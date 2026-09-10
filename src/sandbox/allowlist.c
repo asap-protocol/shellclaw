@@ -70,11 +70,83 @@ static void set_reason(char *buf, size_t cap, const char *prefix, const char *de
     buf[cap - 1] = '\0';
 }
 
-/** Return 1 if @p s begins with prefix after any leading whitespace. */
+/**
+ * Return 1 if @p tok looks like a filesystem path (or expands to one).
+ * Includes shell parameter expansions such as `$HOME/...` and `${PWD}/...`
+ * that never start with `/` `~` `.` but become absolute after /bin/sh expands them.
+ */
 static int has_path_chars(const char *tok)
 {
-    if (!tok) return 0;
-    return tok[0] == '/' || tok[0] == '~' || tok[0] == '.';
+    if (!tok || !tok[0]) return 0;
+    if (tok[0] == '/' || tok[0] == '~' || tok[0] == '.') return 1;
+    /* `$HOME`, `${HOME}/x`, `$PWD/../out`, `$(pwd)/x`, ANSI-C `$'\x2f...'`. */
+    if (tok[0] == '$') return 1;
+    return 0;
+}
+
+/**
+ * Expand a leading `~`, `$HOME` / `${HOME}`, or `$PWD` / `${PWD}` for workspace checks.
+ * Unknown `$...` forms fail closed (return -1) so workspace_only cannot be bypassed
+ * via arbitrary parameter / command substitutions.
+ * @return 0 and writes into @p expanded on success; -1 if the token must be blocked.
+ */
+static int expand_shell_path_token(const char *tok, char *expanded, size_t expanded_cap)
+{
+    const char *home;
+    const char *cwd;
+    const char *suffix;
+    int n;
+
+    if (!tok || !expanded || expanded_cap == 0) return -1;
+
+    if (tok[0] == '~') {
+        home = getenv("HOME");
+        if (home)
+            n = snprintf(expanded, expanded_cap, "%s%s", home, tok + 1);
+        else
+            n = snprintf(expanded, expanded_cap, "%s", tok);
+        return (n < 0 || (size_t)n >= expanded_cap) ? -1 : 0;
+    }
+
+    if (tok[0] != '$') {
+        if (strlen(tok) >= expanded_cap) return -1;
+        memcpy(expanded, tok, strlen(tok) + 1);
+        return 0;
+    }
+
+    /* Fail closed on ANSI-C quoting and command substitution (encoded / dynamic paths). */
+    if (tok[1] == '\'' || tok[1] == '"' || tok[1] == '(')
+        return -1;
+
+    home = getenv("HOME");
+    cwd = getenv("PWD");
+    if (strncmp(tok, "${HOME}", 7) == 0) {
+        suffix = tok + 7;
+        if (!home) return -1;
+        n = snprintf(expanded, expanded_cap, "%s%s", home, suffix);
+        return (n < 0 || (size_t)n >= expanded_cap) ? -1 : 0;
+    }
+    if (strncmp(tok, "$HOME", 5) == 0 && (tok[5] == '\0' || tok[5] == '/')) {
+        suffix = tok + 5;
+        if (!home) return -1;
+        n = snprintf(expanded, expanded_cap, "%s%s", home, suffix);
+        return (n < 0 || (size_t)n >= expanded_cap) ? -1 : 0;
+    }
+    if (strncmp(tok, "${PWD}", 6) == 0) {
+        suffix = tok + 6;
+        if (!cwd) return -1;
+        n = snprintf(expanded, expanded_cap, "%s%s", cwd, suffix);
+        return (n < 0 || (size_t)n >= expanded_cap) ? -1 : 0;
+    }
+    if (strncmp(tok, "$PWD", 4) == 0 && (tok[4] == '\0' || tok[4] == '/')) {
+        suffix = tok + 4;
+        if (!cwd) return -1;
+        n = snprintf(expanded, expanded_cap, "%s%s", cwd, suffix);
+        return (n < 0 || (size_t)n >= expanded_cap) ? -1 : 0;
+    }
+
+    /* Other `$VAR` / `${VAR}` forms: fail closed under workspace_only. */
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -167,20 +239,20 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
     tok = strtok_r(cmd_copy, " \t\n;|&><", &saveptr);
     while (tok) {
         if (has_path_chars(tok)) {
-            /* Expand a leading tilde naively */
             char expanded[PATH_MAX];
-            if (tok[0] == '~') {
-                const char *home = getenv("HOME");
-                if (home)
-                    snprintf(expanded, sizeof(expanded), "%s%s", home, tok + 1);
-                else
-                    snprintf(expanded, sizeof(expanded), "%s", tok);
-                tok = expanded;
-            }
-            if (!allowlist_path_is_under_workspace(tok, workspace_root)) {
+            const char *check_path = tok;
+            if (expand_shell_path_token(tok, expanded, sizeof(expanded)) != 0) {
                 set_reason(reason_buf, reason_cap,
-                           "command blocked: path escapes workspace: ", tok);
-                fprintf(stderr, "allowlist: blocked path outside workspace: %s\n", tok);
+                           "command blocked: unresolved shell path expansion: ", tok);
+                fprintf(stderr, "allowlist: blocked unresolved shell path: %s\n", tok);
+                free(cmd_copy);
+                return 1;
+            }
+            check_path = expanded;
+            if (!allowlist_path_is_under_workspace(check_path, workspace_root)) {
+                set_reason(reason_buf, reason_cap,
+                           "command blocked: path escapes workspace: ", check_path);
+                fprintf(stderr, "allowlist: blocked path outside workspace: %s\n", check_path);
                 free(cmd_copy);
                 return 1;
             }
