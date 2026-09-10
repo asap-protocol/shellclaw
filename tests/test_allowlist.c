@@ -179,6 +179,9 @@ static int test_workspace_only_blocks_home_env_expansion(void)
 	ASSERT(allowlist_check_shell_command("cat $'\\x2fetc\\x2fpasswd'",
 	                                    &cfg, reason, sizeof(reason)) == 1);
 	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat \"$HOME/.shellclaw/auth_tokens.json\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
 	ASSERT(allowlist_check_shell_command("cat notes.txt", &cfg, reason, sizeof(reason)) == 0);
 	if (home && strcmp(home, dir) == 0) {
 		/* Degenerate: HOME equals workspace — $HOME alone is in-bounds. */

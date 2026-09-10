@@ -71,6 +71,23 @@ static void set_reason(char *buf, size_t cap, const char *prefix, const char *de
 }
 
 /**
+ * Strip one matching pair of surrounding quotes so `"$HOME/x"` is checked
+ * the same way as `$HOME/x`. /bin/sh still expands the inner form.
+ */
+static char *strip_surrounding_quotes(char *tok)
+{
+    size_t n;
+    if (!tok || !tok[0]) return tok;
+    n = strlen(tok);
+    if (n >= 2 && ((tok[0] == '\'' && tok[n - 1] == '\'') ||
+                   (tok[0] == '"' && tok[n - 1] == '"'))) {
+        tok[n - 1] = '\0';
+        return tok + 1;
+    }
+    return tok;
+}
+
+/**
  * Return 1 if @p tok looks like a filesystem path (or expands to one).
  * Includes shell parameter expansions such as `$HOME/...` and `${PWD}/...`
  * that never start with `/` `~` `.` but become absolute after /bin/sh expands them.
@@ -238,6 +255,7 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
     if (!cmd_copy) return 0; /* fail-open on OOM */
     tok = strtok_r(cmd_copy, " \t\n;|&><", &saveptr);
     while (tok) {
+        tok = strip_surrounding_quotes(tok);
         if (has_path_chars(tok)) {
             char expanded[PATH_MAX];
             const char *check_path = tok;

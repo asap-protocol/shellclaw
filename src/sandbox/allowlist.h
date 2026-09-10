@@ -10,8 +10,8 @@
  *  2. An optional workspace-containment check: if enabled via allowlist_config_t,
  *     path-like tokens in the command are resolved with realpath(3) and rejected
  *     when they escape the declared workspace root. Tokens that become absolute only
- *     after shell expansion (`$HOME/...`, `${PWD}/...`, ANSI-C `$'\x2f...'`) are
- *     expanded or fail-closed before that check.
+ *     after shell expansion (`$HOME/...`, `"$HOME/..."`, `${PWD}/...`, ANSI-C
+ *     `$'\x2f...'`) are unquoted, expanded, or fail-closed before that check.
  *
  * Both checks are intentionally conservative and may produce false positives.
  * They are a best-effort defence-in-depth layer; real isolation is provided by
