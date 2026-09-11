@@ -31,6 +31,22 @@ void tool_file_set_config(const config_t *cfg)
 	g_file_cfg = cfg;
 }
 
+static int resolved_is_under_workspace(const char *resolved)
+{
+	char ws_resolved[PATH_MAX];
+	const char *workspace;
+	size_t ws_len;
+
+	if (!resolved || !g_file_cfg) return 0;
+	workspace = config_workspace_path(g_file_cfg);
+	if (!workspace || workspace[0] == '\0') return 0;
+	if (realpath(workspace, ws_resolved) == NULL) return 0;
+	ws_len = strlen(ws_resolved);
+	if (strncmp(resolved, ws_resolved, ws_len) != 0) return 0;
+	if (resolved[ws_len] != '\0' && resolved[ws_len] != '/') return 0;
+	return 1;
+}
+
 static int path_within_workspace(const char *path, char *resolved, size_t resolved_size)
 {
 	if (!path || path[0] == '\0') return 0;
@@ -42,36 +58,66 @@ static int path_within_workspace(const char *path, char *resolved, size_t resolv
 	if (!workspace || workspace[0] == '\0') {
 		return 0;  /* Deny: cannot validate without workspace path */
 	}
-	char ws_resolved[PATH_MAX];
-	if (realpath(workspace, ws_resolved) == NULL) return 0;
-	if (realpath(path, resolved) != NULL) {
-		size_t ws_len = strlen(ws_resolved);
-		if (strncmp(resolved, ws_resolved, ws_len) != 0) return 0;
-		if (resolved[ws_len] != '\0' && resolved[ws_len] != '/') return 0;
-		return 1;
-	}
+	if (realpath(workspace, resolved) == NULL) return 0;
+	if (realpath(path, resolved) != NULL)
+		return resolved_is_under_workspace(resolved);
 	char path_copy[PATH_MAX];
 	snprintf(path_copy, sizeof(path_copy), "%s", path);
 	for (;;) {
 		char *dir = dirname(path_copy);
 		if (!dir || dir[0] == '\0') break;
-		if (realpath(dir, resolved) != NULL) {
-			size_t ws_len = strlen(ws_resolved);
-			if (strncmp(resolved, ws_resolved, ws_len) != 0) return 0;
-			if (resolved[ws_len] != '\0' && resolved[ws_len] != '/') return 0;
-			return 1;
-		}
+		if (realpath(dir, resolved) != NULL)
+			return resolved_is_under_workspace(resolved);
 		if (strcmp(dir, ".") == 0 || strcmp(dir, "/") == 0) break;
 		snprintf(path_copy, sizeof(path_copy), "%s", dir);
 	}
 	return 0;
 }
 
+/*
+ * Map a workspace write to the intended path. Ancestor lookup in
+ * path_within_workspace is only a membership check: using that ancestor as
+ * the fopen target truncates an existing file treated as a directory, or
+ * overwrites a same-named file in a parent when intermediate dirs are missing.
+ */
+static int resolve_workspace_write_path(const char *path, char *safe_path, size_t cap)
+{
+	char parent[PATH_MAX];
+	char path_copy[PATH_MAX];
+	struct stat st;
+	const char *base;
+	char *dir;
+	int n;
+
+	if (realpath(path, safe_path) != NULL) {
+		if (stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) return 0;
+		return resolved_is_under_workspace(safe_path);
+	}
+	if (snprintf(path_copy, sizeof(path_copy), "%s", path) >= (int)sizeof(path_copy))
+		return 0;
+	dir = dirname(path_copy);
+	if (!dir || realpath(dir, parent) == NULL) return 0;
+	if (stat(parent, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+	if (!resolved_is_under_workspace(parent)) return 0;
+	base = strrchr(path, '/');
+	base = base ? base + 1 : path;
+	if (base[0] == '\0' || strcmp(base, ".") == 0 || strcmp(base, "..") == 0)
+		return 0;
+	n = snprintf(safe_path, cap, "%s/%s", parent, base);
+	return n > 0 && (size_t)n < cap;
+}
+
 static int file_read(const char *path, char *result_buf, size_t max_len)
 {
 	char resolved[PATH_MAX];
+	int ws_only;
 	if (!path_within_workspace(path, resolved, sizeof(resolved))) {
 		snprintf(result_buf, max_len, "{\"error\":\"path outside workspace\"}");
+		return -1;
+	}
+	ws_only = g_file_cfg ? config_workspace_only(g_file_cfg) : 0;
+	if (ws_only && realpath(path, resolved) == NULL) {
+		snprintf(result_buf, max_len, "{\"error\":\"cannot open file\"}");
 		return -1;
 	}
 	FILE *f = fopen(resolved, "rb");
@@ -106,23 +152,9 @@ static int file_write(const char *path, const char *content, char *result_buf, s
 	char safe_path[PATH_MAX];
 	if (!ws_only) {
 		snprintf(safe_path, sizeof(safe_path), "%s", path);
-	} else {
-		struct stat st;
-		if (stat(resolved, &st) == 0 && S_ISREG(st.st_mode)) {
-			snprintf(safe_path, sizeof(safe_path), "%s", resolved);
-		} else {
-			const char *base = strrchr(path, '/');
-			base = base ? base + 1 : path;
-			size_t res_len = strlen(resolved);
-			size_t base_len = strlen(base);
-			if (res_len + 1 + base_len >= sizeof(safe_path)) {
-				snprintf(result_buf, max_len, "{\"error\":\"path too long\"}");
-				return -1;
-			}
-			memcpy(safe_path, resolved, res_len);
-			safe_path[res_len] = '/';
-			memcpy(safe_path + res_len + 1, base, base_len + 1);
-		}
+	} else if (!resolve_workspace_write_path(path, safe_path, sizeof(safe_path))) {
+		snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
+		return -1;
 	}
 	FILE *f = fopen(safe_path, "w");
 	if (!f) {
@@ -145,8 +177,14 @@ static int file_write(const char *path, const char *content, char *result_buf, s
 static int file_list(const char *path, char *result_buf, size_t max_len)
 {
 	char resolved[PATH_MAX];
+	int ws_only;
 	if (!path_within_workspace(path, resolved, sizeof(resolved))) {
 		snprintf(result_buf, max_len, "{\"error\":\"path outside workspace\"}");
+		return -1;
+	}
+	ws_only = g_file_cfg ? config_workspace_only(g_file_cfg) : 0;
+	if (ws_only && realpath(path, resolved) == NULL) {
+		snprintf(result_buf, max_len, "{\"error\":\"cannot list directory\"}");
 		return -1;
 	}
 	DIR *d = opendir(resolved);

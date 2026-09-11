@@ -196,6 +196,97 @@ static void test_symlink_escape_rejected(void)
 	rmdir(tmpdir);
 }
 
+static int slurp_file(const char *path, char *buf, size_t cap)
+{
+	FILE *f = fopen(path, "rb");
+	size_t n;
+	if (!f) return -1;
+	n = fread(buf, 1, cap - 1, f);
+	fclose(f);
+	buf[n] = '\0';
+	return 0;
+}
+
+static void test_write_does_not_truncate_file_used_as_directory(void)
+{
+	char tmpdir[PATH_MAX];
+	char victim[PATH_MAX];
+	char nested[PATH_MAX];
+	char config_path[PATH_MAX];
+	char args[PATH_MAX + 128];
+	char buf[256];
+	char kept[64];
+	config_t *cfg;
+	const tool_t *t;
+	FILE *f;
+	int r;
+
+	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_filedir_%d", (int)getpid());
+	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
+	snprintf(victim, sizeof(victim), "%s/important.md", tmpdir);
+	f = fopen(victim, "w");
+	MU_ASSERT(f != NULL, "create victim file");
+	fputs("KEEP", f);
+	fclose(f);
+	cfg = make_ws_config(tmpdir, config_path, sizeof(config_path));
+	MU_ASSERT(cfg != NULL, "file-as-dir: load config");
+	tool_file_set_config(cfg);
+	t = tool_file_get();
+	snprintf(nested, sizeof(nested), "%s/important.md/nested.txt", tmpdir);
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"PWNED\"}", nested);
+	r = t->execute(args, buf, sizeof(buf));
+	MU_ASSERT(r == -1, "write through file-as-directory is rejected");
+	MU_ASSERT(slurp_file(victim, kept, sizeof(kept)) == 0, "victim still readable");
+	MU_ASSERT(strcmp(kept, "KEEP") == 0, "victim content preserved");
+	snprintf(args, sizeof(args), "{\"operation\":\"read_file\",\"path\":\"%s\"}", nested);
+	r = t->execute(args, buf, sizeof(buf));
+	MU_ASSERT(r == -1, "read through file-as-directory is rejected");
+	MU_ASSERT(strstr(buf, "KEEP") == NULL, "read does not leak victim contents");
+	config_free(cfg);
+	unlink(config_path);
+	unlink(victim);
+	rmdir(tmpdir);
+}
+
+static void test_write_does_not_collapse_missing_parent_onto_basename(void)
+{
+	char tmpdir[PATH_MAX];
+	char victim[PATH_MAX];
+	char nested[PATH_MAX];
+	char config_path[PATH_MAX];
+	char args[PATH_MAX + 128];
+	char buf[256];
+	char kept[64];
+	config_t *cfg;
+	const tool_t *t;
+	FILE *f;
+	int r;
+
+	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_missdir_%d", (int)getpid());
+	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
+	snprintf(victim, sizeof(victim), "%s/notes.md", tmpdir);
+	f = fopen(victim, "w");
+	MU_ASSERT(f != NULL, "create same-basename victim");
+	fputs("KEEP", f);
+	fclose(f);
+	cfg = make_ws_config(tmpdir, config_path, sizeof(config_path));
+	MU_ASSERT(cfg != NULL, "missing-parent: load config");
+	tool_file_set_config(cfg);
+	t = tool_file_get();
+	snprintf(nested, sizeof(nested), "%s/missing_dir/notes.md", tmpdir);
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"PWNED\"}", nested);
+	r = t->execute(args, buf, sizeof(buf));
+	MU_ASSERT(r == -1, "write with missing parent is rejected");
+	MU_ASSERT(slurp_file(victim, kept, sizeof(kept)) == 0, "workspace notes.md still readable");
+	MU_ASSERT(strcmp(kept, "KEEP") == 0, "missing parent does not overwrite same basename");
+	config_free(cfg);
+	unlink(config_path);
+	unlink(victim);
+	rmdir(tmpdir);
+}
+
 int main(void)
 {
 	MU_RUN(test_file_read_write_list);
@@ -203,6 +294,8 @@ int main(void)
 	MU_RUN(test_file_outside_workspace_rejected);
 	MU_RUN(test_path_traversal_rejected);
 	MU_RUN(test_symlink_escape_rejected);
+	MU_RUN(test_write_does_not_truncate_file_used_as_directory);
+	MU_RUN(test_write_does_not_collapse_missing_parent_onto_basename);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }
