@@ -211,8 +211,8 @@ int hardware_llama_server_running(void)
 	fp = popen("pgrep -x " LLAMA_PROCESS " 2>/dev/null", "r");
 	if (!fp)
 		return 0;
-	line[0] = '\0';
-	fgets(line, sizeof(line), fp);
+	if (!fgets(line, sizeof(line), fp))
+		line[0] = '\0';
 	wait_rc = pclose(fp);
 	if (!subprocess_ok(wait_rc))
 		return 0;
