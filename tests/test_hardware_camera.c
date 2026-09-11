@@ -7,11 +7,13 @@
 #include "hardware/hardware_camera.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static char s_spawn_out_path[256];
 static int s_spawn_fail;
 static int s_spawn_called;
 static int s_spawn_bad_jpeg;
+static int s_auto_temp_existed;
 
 static int argv_has_shell_metachar(const char *s)
 {
@@ -100,6 +102,9 @@ static int mock_spawn(char *const argv[], char *errbuf, size_t errbufsz)
 	ASSERT(last != NULL);
 	ASSERT(argv_all_safe(last));
 	spawn_find_out_path(argv);
+	s_auto_temp_existed = -1;
+	if (strncmp(s_spawn_out_path, "/tmp/shellclaw_cam_", 19) == 0)
+		s_auto_temp_existed = (access(s_spawn_out_path, F_OK) == 0) ? 1 : 0;
 	if (s_spawn_fail) {
 		/* Simulate a tool that created the output file before exiting non-zero. */
 		RUN(spawn_write_output(1));
@@ -116,6 +121,7 @@ static int setup_mock(void)
 	s_spawn_fail = 0;
 	s_spawn_bad_jpeg = 0;
 	s_spawn_called = 0;
+	s_auto_temp_existed = -1;
 	s_spawn_out_path[0] = '\0';
 	hardware_camera_set_spawn_for_test(mock_spawn);
 	ASSERT(hardware_camera_init() == 0);
@@ -504,6 +510,22 @@ static int test_usb_quality_not_in_argv(void)
 	return 0;
 }
 
+static int test_auto_temp_keeps_exclusive_inode(void)
+{
+	char result[256];
+	char err[128];
+
+	RUN(setup_mock());
+	ASSERT(hardware_camera_capture(BOARD_JETSON_ORIN_NANO, "csi", "640x480", 75, 0,
+				       0, NULL, result, sizeof(result), err,
+				       sizeof(err)) == 0);
+	ASSERT(s_auto_temp_existed == 1);
+	ASSERT(strstr(result, ".jpg") == NULL);
+	unlink(result);
+	teardown();
+	return 0;
+}
+
 static int test_temp_jpeg_unlinked_on_spawn_failure(void)
 {
 	char result[256];
@@ -596,6 +618,7 @@ int main(void)
 	RUN(test_jetson_csi_quality_in_argv());
 	RUN(test_rpi_csi_quality_in_argv());
 	RUN(test_usb_quality_not_in_argv());
+	RUN(test_auto_temp_keeps_exclusive_inode());
 	RUN(test_temp_jpeg_unlinked_on_spawn_failure());
 	RUN(test_temp_jpeg_unlinked_on_invalid_jpeg());
 	RUN(test_caller_supplied_output_not_unlinked_on_error());

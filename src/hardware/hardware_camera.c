@@ -291,11 +291,14 @@ static int make_temp_output(char *path, size_t pathsz)
 	if (fd < 0)
 		return -1;
 	close(fd);
-	unlink(tmpl);
-	if (strlen(tmpl) + 5 >= pathsz)
+	if (strlen(tmpl) + 1 > pathsz) {
+		unlink(tmpl);
 		return -1;
-	/* Auto path returned to the caller on success; module unlinks it on internal error. */
-	snprintf(path, pathsz, "%s.jpg", tmpl);
+	}
+	/* Keep the exclusive inode; capture CLIs accept any path and JPEG is
+	 * checked by magic bytes. Unlinking then writing ${tmpl}.jpg races a
+	 * symlink on the sibling name. */
+	snprintf(path, pathsz, "%s", tmpl);
 	return 0;
 }
 
