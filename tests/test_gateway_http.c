@@ -6,7 +6,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/auth.h"
+#include "gateway/rate_limit.h"
 #include "core/config.h"
+#include "core/version.h"
 #include "cJSON.h"
 #include <curl/curl.h>
 #include <errno.h>
@@ -23,6 +25,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+#ifndef INADDR_LOOPBACK
+#define INADDR_LOOPBACK ((in_addr_t)0x7f000001)
+#endif
 
 #define ASSERT(c) do { if (!(c)) { fprintf(stderr, "FAIL: %s:%d %s\n", __FILE__, __LINE__, #c); return 1; } } while (0)
 
@@ -60,6 +66,8 @@ static int pick_ephemeral_port(void)
 }
 
 static int http_get(const char *url, long *code_out, char **body_out);
+static int http_post_raw(const char *url, const void *data, size_t data_len,
+			 const char *content_length, long *code_out, char **body_out);
 static int http_post(const char *url, const char *json, long *code_out, char **body_out);
 
 static int wait_for_health(int max_attempts)
@@ -114,13 +122,25 @@ static int http_get(const char *url, long *code_out, char **body_out)
 
 static int http_post(const char *url, const char *json, long *code_out, char **body_out)
 {
+	return http_post_raw(url, json, json ? strlen(json) : 0, NULL, code_out, body_out);
+}
+
+static int http_post_raw(const char *url, const void *data, size_t data_len,
+			 const char *content_length, long *code_out, char **body_out)
+{
 	CURL *curl = curl_easy_init();
+	char cl_hdr[64];
 	if (!curl) return -1;
 	*body_out = NULL;
 	struct curl_slist *headers = NULL;
 	headers = curl_slist_append(headers, "Content-Type: application/json");
+	if (content_length && content_length[0] != '\0') {
+		snprintf(cl_hdr, sizeof(cl_hdr), "Content-Length: %s", content_length);
+		headers = curl_slist_append(headers, cl_hdr);
+	}
 	curl_easy_setopt(curl, CURLOPT_URL, url);
-	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)data_len);
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, body_out);
@@ -169,6 +189,33 @@ static int http_post_auth(const char *url, const char *bearer, const char *json,
 	headers = curl_slist_append(headers, "Content-Type: application/json");
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, body_out);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+	CURLcode res = curl_easy_perform(curl);
+	long code = 0;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+	if (code_out) *code_out = code;
+	return (res == CURLE_OK) ? 0 : -1;
+}
+
+static int http_put_auth(const char *url, const char *bearer, const char *body,
+			 long *code_out, char **body_out)
+{
+	CURL *curl = curl_easy_init();
+	if (!curl) return -1;
+	*body_out = NULL;
+	struct curl_slist *headers = NULL;
+	char auth_hdr[256];
+	snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", bearer);
+	headers = curl_slist_append(headers, auth_hdr);
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, body_out);
@@ -241,6 +288,7 @@ static int test_health(void)
 	ASSERT(body != NULL);
 	ASSERT(strstr(body, "ok") != NULL);
 	ASSERT(strstr(body, "uptime") != NULL);
+	ASSERT(strstr(body, SHELLCLAW_RELEASE_VERSION) != NULL);
 	free(body);
 	return 0;
 }
@@ -305,6 +353,47 @@ static int test_api_config_401(void)
 	return 0;
 }
 
+static int test_api_config_invalid_bearer(const char *valid_token)
+{
+	long code;
+	char *body = NULL;
+	int r = http_get_auth(gw_url("/api/config"), "not-a-valid-paired-token", &code, &body);
+	(void)valid_token;
+	ASSERT(r == 0);
+	ASSERT(code == 401);
+	free(body);
+	return 0;
+}
+
+static int test_api_config_401_malformed_auth(void)
+{
+	long code;
+	char *body = NULL;
+	CURL *curl = curl_easy_init();
+
+	if (!curl)
+		return 1;
+	struct curl_slist *headers = NULL;
+	headers = curl_slist_append(headers, "Authorization: not-bearer-format");
+	curl_easy_setopt(curl, CURLOPT_URL, gw_url("/api/config"));
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+	if (curl_easy_perform(curl) != CURLE_OK) {
+		curl_slist_free_all(headers);
+		curl_easy_cleanup(curl);
+		free(body);
+		return 1;
+	}
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+	ASSERT(code == 401);
+	free(body);
+	return 0;
+}
+
 static int test_asap_invalid_body(void)
 {
 	long code;
@@ -339,11 +428,52 @@ static int test_manifest(void)
 	ASSERT(r == 0);
 	ASSERT(code == 200);
 	ASSERT(body != NULL);
-	ASSERT(strstr(body, "id") != NULL);
+	ASSERT(strstr(body, "\"manifest\"") != NULL);
+	ASSERT(strstr(body, "\"signature\"") != NULL);
+	ASSERT(strstr(body, "\"trust_level\":\"self-signed\"") != NULL ||
+	       strstr(body, "\"trust_level\": \"self-signed\"") != NULL);
+	ASSERT(strstr(body, "\"public_key\"") != NULL);
 	ASSERT(strstr(body, "urn:asap:agent") != NULL);
 	ASSERT(strstr(body, "skills") != NULL);
 	ASSERT(strstr(body, "endpoints") != NULL);
 	free(body);
+	return 0;
+}
+
+static int test_manifest_rejects_loose_priv(void)
+{
+	long code;
+	char *body = NULL;
+	char priv_path[512];
+	int r;
+
+	ASSERT(test_manifest() == 0);
+	snprintf(priv_path, sizeof(priv_path), "%s/.shellclaw/keys/ed25519.priv",
+		 g_test_home);
+	ASSERT(chmod(priv_path, 0777) == 0);
+	body = NULL;
+	r = http_get(gw_url("/.well-known/asap/manifest.json"), &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 500);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "Signing key unavailable") != NULL);
+	ASSERT(strstr(body, g_test_home) == NULL);
+	ASSERT(strstr(body, "ed25519") == NULL);
+	free(body);
+	return 0;
+}
+
+static int test_asap_body_over_max(void)
+{
+	long code;
+	char *body = NULL;
+	const char payload[] = "{}";
+	int r = http_post_raw(gw_url("/asap"), payload, sizeof(payload) - 1, "1000001",
+			      &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 413);
+	if (body)
+		free(body);
 	return 0;
 }
 
@@ -457,6 +587,71 @@ static int test_api_config_get(const char *token)
 	return 0;
 }
 
+static int test_api_config_put_401(void)
+{
+	long code;
+	char *body = NULL;
+	const char *valid_toml =
+		"[agent]\nmodel = \"blocked\"\n[providers]\nfallback_chain = [ \"stub\" ]\n";
+	int r = http_put_auth(gw_url("/api/config"), "invalid-token", valid_toml, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 401);
+	free(body);
+	return 0;
+}
+
+static int test_api_config_put_invalid_toml(const char *token)
+{
+	long code;
+	char *body = NULL;
+	long get_code;
+	char *before = NULL;
+	int r = http_get_auth(gw_url("/api/config"), token, &get_code, &before);
+	ASSERT(r == 0 && get_code == 200 && before != NULL);
+	r = http_put_auth(gw_url("/api/config"), token, "[[[not valid toml", &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 400);
+	ASSERT(body != NULL);
+	free(body);
+	body = NULL;
+	r = http_get_auth(gw_url("/api/config"), token, &get_code, &body);
+	ASSERT(r == 0 && get_code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strcmp(body, before) == 0);
+	free(before);
+	free(body);
+	return 0;
+}
+
+static int test_api_config_put_valid(const char *token, int port, const char *config_path)
+{
+	long code;
+	char *body = NULL;
+	char put_toml[512];
+	char disk_buf[4096];
+	FILE *disk_fp;
+	snprintf(put_toml, sizeof(put_toml),
+		 "[agent]\nmodel = \"integration_updated\"\n"
+		 "[providers]\nfallback_chain = [ \"stub\" ]\n"
+		 "[gateway]\nenabled = true\nhost = \"127.0.0.1\"\nport = %d\n"
+		 "[memory]\ndb_path = \"%s/.shellclaw/memory.db\"\n"
+		 "[skills]\ndir = \"%s/.shellclaw/skills\"\n",
+		 port, g_test_home, g_test_home);
+	int r = http_put_auth(gw_url("/api/config"), token, put_toml, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "\"ok\"") != NULL);
+	free(body);
+	disk_fp = fopen(config_path, "r");
+	ASSERT(disk_fp != NULL);
+	ASSERT(fread(disk_buf, 1, sizeof(disk_buf) - 1, disk_fp) > 0);
+	disk_buf[sizeof(disk_buf) - 1] = '\0';
+	fclose(disk_fp);
+	ASSERT(strstr(disk_buf, "integration_updated") != NULL);
+	return 0;
+}
+
 static int test_api_skills_list(const char *token)
 {
 	long code;
@@ -539,6 +734,57 @@ static int test_api_cron_create_delete(const char *token)
 	return 0;
 }
 
+static int test_api_cron_toggle_post(const char *token)
+{
+	long code;
+	char *body = NULL;
+	int r = http_post_auth(gw_url("/api/cron"), token,
+		"{\"schedule\":\"interval:3600\",\"message\":\"toggle test\",\"channel\":\"cli\",\"recipient\":\"default\"}",
+		&code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200 || code == 201);
+	ASSERT(body != NULL);
+	cJSON *root = cJSON_Parse(body);
+	ASSERT(root != NULL);
+	cJSON *id_obj = cJSON_GetObjectItem(root, "id");
+	ASSERT(id_obj != NULL && cJSON_IsString(id_obj));
+	char id[128];
+	snprintf(id, sizeof(id), "%s", id_obj->valuestring);
+	cJSON_Delete(root);
+	free(body);
+	body = NULL;
+
+	/* Regression gate: before the routes.c length-guard fix, POST /api/cron/<id>/toggle
+	 * fell through to the DELETE-only branch and returned 405. After the fix it must
+	 * return 200. */
+	char toggle_url[512];
+	snprintf(toggle_url, sizeof(toggle_url), "%s/api/cron/%s/toggle", g_base_url, id);
+	r = http_post_auth(toggle_url, token, "", &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "\"ok\"") != NULL);
+	free(body);
+	body = NULL;
+
+	/* Trailing garbage must NOT be treated as a toggle (exact-match guard). */
+	char junk_url[512];
+	snprintf(junk_url, sizeof(junk_url), "%s/api/cron/%s/toggle/extra", g_base_url, id);
+	r = http_post_auth(junk_url, token, "", &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 405);
+	free(body);
+	body = NULL;
+
+	char del_url[512];
+	snprintf(del_url, sizeof(del_url), "%s/api/cron/%s", g_base_url, id);
+	r = http_delete_auth(del_url, token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	free(body);
+	return 0;
+}
+
 static int test_api_sessions(const char *token)
 {
 	long code;
@@ -576,6 +822,126 @@ static int test_api_asap_log(const char *token)
 	cJSON *ent = cJSON_GetObjectItem(root, "entries");
 	ASSERT(ent != NULL && cJSON_IsArray(ent));
 	cJSON_Delete(root);
+	free(body);
+	return 0;
+}
+
+static int test_api_hardware_board_401(void)
+{
+	long code;
+	char *body = NULL;
+	int r = http_get(gw_url("/api/hardware/board"), &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 401);
+	free(body);
+	return 0;
+}
+
+static int test_api_hardware_gpio_401(void)
+{
+	long code;
+	char *body = NULL;
+	int r = http_get(gw_url("/api/hardware/gpio"), &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 401);
+	free(body);
+	return 0;
+}
+
+static int test_api_hardware_board_get(const char *token)
+{
+	long code;
+	char *body = NULL;
+	int r = http_get_auth(gw_url("/api/hardware/board"), token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	{
+		cJSON *root = cJSON_Parse(body);
+		cJSON *id;
+		cJSON *backends;
+		ASSERT(root != NULL);
+		id = cJSON_GetObjectItem(root, "id");
+		backends = cJSON_GetObjectItem(root, "backends");
+		ASSERT(id != NULL && cJSON_IsString(id));
+		ASSERT(backends != NULL && cJSON_IsObject(backends));
+		cJSON_Delete(root);
+	}
+	free(body);
+	return 0;
+}
+
+static int test_api_hardware_gpio_get(const char *token)
+{
+	long code;
+	char *body = NULL;
+	int r = http_get_auth(gw_url("/api/hardware/gpio"), token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200 || code == 503);
+	free(body);
+	return 0;
+}
+
+static int test_api_hardware_sensors_deferred(const char *token)
+{
+	long code;
+	char *body = NULL;
+	int r = http_get_auth(gw_url("/api/hardware/sensors"), token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	{
+		cJSON *root = cJSON_Parse(body);
+		cJSON *st;
+		cJSON *msg;
+		ASSERT(root != NULL);
+		st = cJSON_GetObjectItem(root, "status");
+		msg = cJSON_GetObjectItem(root, "message");
+		ASSERT(st != NULL && cJSON_IsString(st) &&
+		       strcmp(st->valuestring, "deferred_v12") == 0);
+		ASSERT(msg != NULL && cJSON_IsString(msg) &&
+		       strcmp(msg->valuestring,
+			      "sensor decoders ship in v1.2 (Phase 7)") == 0);
+		cJSON_Delete(root);
+	}
+	free(body);
+	return 0;
+}
+
+static int test_api_hardware_camera_snapshot_401(void)
+{
+	long code;
+	char *body = NULL;
+	int r = http_post(gw_url("/api/hardware/camera/snapshot"), "{}", &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 401);
+	free(body);
+	return 0;
+}
+
+static int test_api_hardware_camera_deferred(const char *token)
+{
+	long code;
+	char *body = NULL;
+	int r = http_post_auth(gw_url("/api/hardware/camera/snapshot"), token, "{}", &code,
+			       &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	{
+		cJSON *root = cJSON_Parse(body);
+		cJSON *st;
+		cJSON *msg;
+		ASSERT(root != NULL);
+		st = cJSON_GetObjectItem(root, "status");
+		msg = cJSON_GetObjectItem(root, "message");
+		ASSERT(st != NULL && cJSON_IsString(st) &&
+		       strcmp(st->valuestring, "deferred_v12") == 0);
+		ASSERT(msg != NULL && cJSON_IsString(msg) &&
+		       strcmp(msg->valuestring,
+			      "camera image return path ships in v1.2 (Phase 7)") == 0);
+		cJSON_Delete(root);
+	}
 	free(body);
 	return 0;
 }
@@ -671,15 +1037,52 @@ int main(int argc, char **argv)
 		failed++;
 	}
 	if (test_api_config_401() != 0) { fprintf(stderr, "test_api_config_401 failed\n"); failed++; }
+	if (test_api_config_401_malformed_auth() != 0) {
+		fprintf(stderr, "test_api_config_401_malformed_auth failed\n");
+		failed++;
+	}
+	if (test_api_config_put_401() != 0) { fprintf(stderr, "test_api_config_put_401 failed\n"); failed++; }
 	if (test_api_status_401() != 0) { fprintf(stderr, "test_api_status_401 failed\n"); failed++; }
 	if (test_api_context_snapshot_401() != 0) { fprintf(stderr, "test_api_context_snapshot_401 failed\n"); failed++; }
 	if (test_manifest() != 0) { fprintf(stderr, "test_manifest failed\n"); failed++; }
+	if (test_manifest_rejects_loose_priv() != 0) {
+		fprintf(stderr, "test_manifest_rejects_loose_priv failed\n");
+		failed++;
+	}
 	if (test_health_wellknown() != 0) { fprintf(stderr, "test_health_wellknown failed\n"); failed++; }
+	if (test_asap_body_over_max() != 0) {
+		fprintf(stderr, "test_asap_body_over_max failed\n");
+		failed++;
+	}
 	if (test_asap_invalid_body() != 0) { fprintf(stderr, "test_asap_invalid_body failed\n"); failed++; }
 	if (test_asap_missing_fields() != 0) { fprintf(stderr, "test_asap_missing_fields failed\n"); failed++; }
 	if (test_api_asap_log_401() != 0) { fprintf(stderr, "test_api_asap_log_401 failed\n"); failed++; }
+	if (test_api_hardware_board_401() != 0) {
+		fprintf(stderr, "test_api_hardware_board_401 failed\n");
+		failed++;
+	}
+	if (test_api_hardware_gpio_401() != 0) {
+		fprintf(stderr, "test_api_hardware_gpio_401 failed\n");
+		failed++;
+	}
+	if (test_api_hardware_camera_snapshot_401() != 0) {
+		fprintf(stderr, "test_api_hardware_camera_snapshot_401 failed\n");
+		failed++;
+	}
 	if (token[0]) {
+		if (test_api_config_invalid_bearer(token) != 0) {
+			fprintf(stderr, "test_api_config_invalid_bearer failed\n");
+			failed++;
+		}
 		if (test_api_config_get(token) != 0) { fprintf(stderr, "test_api_config_get failed\n"); failed++; }
+		if (test_api_config_put_invalid_toml(token) != 0) {
+			fprintf(stderr, "test_api_config_put_invalid_toml failed\n");
+			failed++;
+		}
+		if (test_api_config_put_valid(token, port, config_path) != 0) {
+			fprintf(stderr, "test_api_config_put_valid failed\n");
+			failed++;
+		}
 		if (test_api_status_get(token) != 0) { fprintf(stderr, "test_api_status_get failed\n"); failed++; }
 		if (test_api_context_snapshot_get(token) != 0) { fprintf(stderr, "test_api_context_snapshot_get failed\n"); failed++; }
 		if (test_api_skills_list(token) != 0) { fprintf(stderr, "test_api_skills_list failed\n"); failed++; }
@@ -687,8 +1090,25 @@ int main(int argc, char **argv)
 		if (test_api_memory(token) != 0) { fprintf(stderr, "test_api_memory failed\n"); failed++; }
 		if (test_api_cron_list(token) != 0) { fprintf(stderr, "test_api_cron_list failed\n"); failed++; }
 		if (test_api_cron_create_delete(token) != 0) { fprintf(stderr, "test_api_cron_create_delete failed\n"); failed++; }
+		if (test_api_cron_toggle_post(token) != 0) { fprintf(stderr, "test_api_cron_toggle_post failed\n"); failed++; }
 		if (test_api_sessions(token) != 0) { fprintf(stderr, "test_api_sessions failed\n"); failed++; }
 		if (test_api_asap_log(token) != 0) { fprintf(stderr, "test_api_asap_log failed\n"); failed++; }
+		if (test_api_hardware_board_get(token) != 0) {
+			fprintf(stderr, "test_api_hardware_board_get failed\n");
+			failed++;
+		}
+		if (test_api_hardware_gpio_get(token) != 0) {
+			fprintf(stderr, "test_api_hardware_gpio_get failed\n");
+			failed++;
+		}
+		if (test_api_hardware_sensors_deferred(token) != 0) {
+			fprintf(stderr, "test_api_hardware_sensors_deferred failed\n");
+			failed++;
+		}
+		if (test_api_hardware_camera_deferred(token) != 0) {
+			fprintf(stderr, "test_api_hardware_camera_deferred failed\n");
+			failed++;
+		}
 	}
 	kill(pid, SIGTERM);
 	waitpid(pid, NULL, 0);

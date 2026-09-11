@@ -7,7 +7,9 @@
 #define SHELLCLAW_GATEWAY_HTTP_LWS_H
 
 #include "core/config.h"
+#include "core/version.h"
 #include "gateway/auth.h"
+#include "gateway/lws_compat.h"
 #include <libwebsockets.h>
 #include <pthread.h>
 #include <time.h>
@@ -16,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GATEWAY_VERSION "0.2.0"
+#define GATEWAY_VERSION SHELLCLAW_RELEASE_VERSION
 #define RESP_BUF_SIZE 65536
 #define LWS_HEADER_SPACE 2048
 #define CONFIG_BODY_MAX 65536
@@ -48,6 +50,12 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                   void *in, size_t len);
 int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                 void *in, size_t len);
+
+/**
+ * Extract Bearer token from HTTP headers into @p buf.
+ * @return Pointer into @p buf past "Bearer ", or NULL if missing/invalid.
+ */
+const char *http_request_bearer_token(struct lws *wsi, char *buf, size_t buf_size);
 
 #ifdef __cplusplus
 }

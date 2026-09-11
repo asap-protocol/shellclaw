@@ -44,6 +44,27 @@
     return 'dash-yellow';
   }
 
+  function pickStatusSlice(wsMsg) {
+    if (!wsMsg || typeof wsMsg !== 'object') return null;
+    const o = Object.assign({}, wsMsg);
+    delete o.type;
+    return o;
+  }
+
+  /**
+   * Merge WebSocket provider_status deltas into the last polled /api/status snapshot.
+   */
+  function mergeStatusWithWs(prev, wsMsg) {
+    const slice = pickStatusSlice(wsMsg);
+    if (!slice || !prev) return prev;
+    const out = Object.assign({}, prev);
+    if (slice.active_provider !== undefined) out.active_provider = slice.active_provider;
+    if (slice.providers !== undefined) out.providers = slice.providers;
+    if (slice.generated_at !== undefined) out.generated_at = slice.generated_at;
+    if (Object.prototype.hasOwnProperty.call(slice, 'last_error')) out.last_error = slice.last_error;
+    return out;
+  }
+
   function dashboardMarkup(health, status, ctxSnap) {
     const h = health || {};
     const st = status || {};
@@ -116,6 +137,8 @@
     coerceBool: coerceBool,
     providerSemanticClass: providerSemanticClass,
     discordSemanticClass: discordSemanticClass,
+    pickStatusSlice: pickStatusSlice,
+    mergeStatusWithWs: mergeStatusWithWs,
     dashboardMarkup: dashboardMarkup
   };
 

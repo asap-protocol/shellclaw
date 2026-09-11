@@ -333,6 +333,45 @@ int skill_get_content(const config_t *cfg, const char *name, char *out_buf, size
 	return 0;
 }
 
+int skill_get_description(const config_t *cfg, const char *name, char *out_buf, size_t out_size)
+{
+	const char *override;
+	char line[512];
+	char *nl;
+	const char *start;
+	size_t len;
+
+	if (!cfg || !name || !out_buf || out_size == 0) return -1;
+	override = config_asap_skill_description(cfg, name);
+	if (override && override[0] != '\0') {
+		snprintf(out_buf, out_size, "%s", override);
+		return 0;
+	}
+	if (build_skill_path(cfg, name, line, sizeof(line)) != 0) return -1;
+	{
+		FILE *f = fopen(line, "r");
+		if (!f) return -1;
+		if (!fgets(line, (int)sizeof(line), f)) {
+			fclose(f);
+			return -1;
+		}
+		fclose(f);
+	}
+	nl = strchr(line, '\n');
+	if (nl) *nl = '\0';
+	start = line;
+	while (*start == ' ' || *start == '\t') start++;
+	if (start[0] == '#' && start[1] == ' ') start += 2;
+	else if (start[0] == '#') start += 1;
+	while (*start == ' ' || *start == '\t') start++;
+	if (start[0] == '\0') return -1;
+	len = strlen(start);
+	if (len >= out_size) len = out_size - 1;
+	memcpy(out_buf, start, len);
+	out_buf[len] = '\0';
+	return 0;
+}
+
 int skill_create(const config_t *cfg, const char *name, const char *content)
 {
 	if (!cfg || !name || !content) return -1;

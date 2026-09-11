@@ -10,6 +10,7 @@ struct lws;
 struct lws_context;
 static void lws_callback_on_writable(struct lws *wsi) { (void)wsi; }
 #else
+#include "gateway/lws_compat.h"
 #include <libwebsockets.h>
 #endif
 #include <errno.h>

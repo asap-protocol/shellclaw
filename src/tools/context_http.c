@@ -47,6 +47,11 @@ static int fake_http(const char *url, long *code, char **body)
 		s = ctx_g_fake.hy;
 	if (!s)
 		return 0;
+	if (strcmp(s, "__CTX_HTTP_FAIL__") == 0) {
+		*code = 503L;
+		*body = NULL;
+		return 1;
+	}
 	if (strstr(s, "\"status\":\"fail\""))
 		*code = 502L;
 	else

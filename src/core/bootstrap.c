@@ -14,13 +14,13 @@
 #include "gateway/auth.h"
 #include "gateway/http.h"
 #include "gateway/ws.h"
+#include "asap/manifest_keys.h"
 #endif
 #include <stdio.h>
 #include <stdlib.h>
 
 #define SKILLS_BUF_SIZE (256 * 1024)
 #define SYSTEM_PROMPT_BUF_SIZE (256 * 1024)
-#define MAX_TOOLS 8
 #define MAX_CHANNELS 8
 
 static int g_verbose;
@@ -28,7 +28,7 @@ static const char *g_cli_one_shot;
 static const char *g_config_path;
 static config_t *g_cfg;
 static const provider_t *g_provider;
-static const tool_t *g_tools[MAX_TOOLS];
+static const tool_t *g_tools[SHELLCLAW_MAX_TOOLS];
 static size_t g_tool_count;
 static const channel_t *g_channels[MAX_CHANNELS];
 static int g_channel_count;
@@ -214,7 +214,7 @@ static void channels_cleanup(void)
 int tools_init(const config_t *cfg)
 {
 	tool_set_config(cfg);
-	g_tool_count = tool_get_all(g_tools, MAX_TOOLS);
+	g_tool_count = tool_get_all(g_tools, SHELLCLAW_MAX_TOOLS);
 	return 0;
 }
 
@@ -261,6 +261,25 @@ int init_subsystems(config_t *cfg)
 		char *code = auth_get_or_create_pairing_code(g_auth_ctx);
 		if (code) {
 			free(code);
+		}
+		/* Create/load signing keys eagerly at gateway startup so the FIRST
+		 * unauthenticated /.well-known/asap/manifest.json request never
+		 * triggers keypair creation + disk fsync (DoS surface). The gateway
+		 * must not start if it cannot sign manifests. */
+		{
+			char keys_err[256] = {0};
+
+			if (manifest_keys_ensure_loaded(keys_err, sizeof(keys_err)) != 0) {
+				fprintf(stderr, "shellclaw: signing keys unavailable: %s\n",
+					keys_err[0] ? keys_err : "unknown error");
+				auth_cleanup(g_auth_ctx);
+				g_auth_ctx = NULL;
+				channels_cleanup();
+				providers_cleanup();
+				skills_cleanup();
+				memory_cleanup();
+				return -1;
+			}
 		}
 		if (http_start(cfg, g_auth_ctx, g_config_path) != 0) {
 			fprintf(stderr, "Error: gateway start failed\n");

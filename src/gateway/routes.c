@@ -5,10 +5,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/routes.h"
+#include "gateway/routes_hardware.h"
 #include "gateway/auth.h"
 #include "gateway/rate_limit.h"
 #include "channels/channel.h"
 #include "asap/manifest.h"
+#include "asap/manifest_keys.h"
 #include "asap/envelope.h"
 #include "asap/server.h"
 #include "asap/log.h"
@@ -25,18 +27,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-
-static int path_match(const char *uri, int uri_len, const char *prefix)
-{
-	size_t plen = strlen(prefix);
-	return (uri_len >= (int)plen && strncmp(uri, prefix, plen) == 0);
-}
-
-static int path_eq(const char *uri, int uri_len, const char *path)
-{
-	size_t plen = strlen(path);
-	return (uri_len == (int)plen && strncmp(uri, path, plen) == 0);
-}
 
 static void json_response(char *buf, size_t size, int *status, const char *json)
 {
@@ -577,7 +567,6 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 	char *snippet;
 	int rc;
 	(void)body_len;
-	/* TODO (Task 6.0): tighten rate limit with X-Forwarded-For proxy awareness. */
 	if (rate_limit_asap(client_ip, time(NULL))) {
 		jsonrpc_error(buf, size, status, 429, -32000, "rate limit exceeded");
 		return;
@@ -628,8 +617,23 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 static void handle_well_known(http_server_ctx_t *ctx, const char *uri, int uri_len,
                              char *buf, size_t size, int *status)
 {
-	if (path_eq(uri, uri_len, "/.well-known/asap/manifest.json")) {
-		char *json = manifest_build_json(ctx ? ctx->cfg : NULL);
+	if (uri_exact_eq(uri, uri_len, "/.well-known/asap/manifest.json")) {
+		char keys_err[256] = {0};
+		char *json;
+
+		/* Keys are created at gateway bootstrap (init_subsystems), not here;
+		 * this is a defensive re-check (idempotent + cheap when already
+		 * loaded), kept so a gateway that skipped bootstrap keygen still
+		 * fails closed rather than serving an unsigned manifest. The creation
+		 * was moved off this unauthenticated path to prevent an attacker from
+		 * forcing keypair creation + disk fsync by hitting a public route. */
+		if (manifest_keys_ensure_loaded(keys_err, sizeof(keys_err)) != 0) {
+			if (keys_err[0] != '\0')
+				fprintf(stderr, "manifest keys: %s\n", keys_err);
+			json_error(buf, size, status, 500, "Signing key unavailable");
+			return;
+		}
+		json = manifest_build_signed_json(ctx ? ctx->cfg : NULL);
 		if (!json) {
 			json_error(buf, size, status, 500, "Internal error");
 			return;
@@ -639,7 +643,7 @@ static void handle_well_known(http_server_ctx_t *ctx, const char *uri, int uri_l
 		free(json);
 		return;
 	}
-	if (path_eq(uri, uri_len, "/.well-known/asap/health")) {
+	if (uri_exact_eq(uri, uri_len, "/.well-known/asap/health")) {
 		*status = 200;
 		json_response(buf, size, status, manifest_health_json());
 		return;
@@ -716,11 +720,11 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
                           const char *uri, int uri_len, const char *body, size_t body_len,
                           char *buf, size_t size, int *status)
 {
-	if (path_eq(uri, uri_len, "/health")) {
+	if (uri_exact_eq(uri, uri_len, "/health")) {
 		handle_health(ctx, buf, size, status);
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/pair") && method == HTTP_POST) {
+	if (uri_exact_eq(uri, uri_len, "/pair") && method == HTTP_POST) {
 		char client_ip[64] = {0};
 		lws_get_peer_simple(wsi, client_ip, sizeof client_ip);
 		if (ctx && ctx->auth && auth_pair_check_lockout(ctx->auth, client_ip, time(NULL))) {
@@ -736,33 +740,33 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		}
 		return 0;
 	}
-	if (path_match(uri, uri_len, "/.well-known/")) {
+	if (uri_has_prefix(uri, uri_len, "/.well-known/")) {
 		handle_well_known(ctx, uri, uri_len, buf, size, status);
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/api/config")) {
+	if (uri_exact_eq(uri, uri_len, "/api/config")) {
 		if (method == HTTP_GET) handle_config_get(ctx->cfg, buf, size, status);
 		else if (method == HTTP_PUT) handle_config_put(ctx, body, body_len, buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/api/status")) {
+	if (uri_exact_eq(uri, uri_len, "/api/status")) {
 		if (method == HTTP_GET) handle_api_status(ctx->cfg, buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/api/context/snapshot")) {
+	if (uri_exact_eq(uri, uri_len, "/api/context/snapshot")) {
 		if (method == HTTP_GET) handle_api_context_snapshot(buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/api/skills")) {
+	if (uri_exact_eq(uri, uri_len, "/api/skills")) {
 		if (method == HTTP_GET) handle_skills_list(ctx->cfg, buf, size, status);
 		else if (method == HTTP_POST) handle_skill_create(ctx->cfg, body, body_len, buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
-	if (path_match(uri, uri_len, "/api/skills/")) {
+	if (uri_has_prefix(uri, uri_len, "/api/skills/")) {
 		char name[128];
 		if (extract_path_param(uri, uri_len, "/api/skills/", name, sizeof(name)) != 0) {
 			json_error(buf, size, status, 404, "Not found");
@@ -774,7 +778,7 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
-	if (path_match(uri, uri_len, "/api/memory")) {
+	if (uri_has_prefix(uri, uri_len, "/api/memory")) {
 		if (method != HTTP_GET) { json_error(buf, size, status, 405, "Method not allowed"); return 0; }
 		char qbuf[256] = {0};
 		char lbuf[32] = {0};
@@ -784,12 +788,12 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		handle_memory_get(qbuf[0] ? qbuf : NULL, limit, buf, size, status);
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/api/sessions")) {
+	if (uri_exact_eq(uri, uri_len, "/api/sessions")) {
 		if (method == HTTP_GET) handle_sessions_list(buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
-	if (path_match(uri, uri_len, "/api/sessions/")) {
+	if (uri_has_prefix(uri, uri_len, "/api/sessions/")) {
 		if (method != HTTP_DELETE) { json_error(buf, size, status, 405, "Method not allowed"); return 0; }
 		char id[128];
 		if (extract_path_param(uri, uri_len, "/api/sessions/", id, sizeof(id)) != 0) {
@@ -799,20 +803,24 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		handle_session_delete(id, buf, size, status);
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/api/cron")) {
+	if (uri_exact_eq(uri, uri_len, "/api/cron")) {
 		if (method == HTTP_GET) handle_cron_list(buf, size, status);
 		else if (method == HTTP_POST) handle_cron_create(body, body_len, buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
-	if (path_match(uri, uri_len, "/api/cron/")) {
+	if (uri_has_prefix(uri, uri_len, "/api/cron/")) {
 		char id[128];
 		if (extract_path_param(uri, uri_len, "/api/cron/", id, sizeof(id)) != 0) {
 			json_error(buf, size, status, 404, "Not found");
 			return 0;
 		}
 		size_t suffix = strlen("/api/cron/") + strlen(id);
-		int is_toggle = (uri_len >= (int)(suffix + 8) &&
+		/* Exact length: /toggle is 7 chars. The prior >= suffix+8 guard made
+		 * POST /toggle (uri_len == suffix+7) fall through to the DELETE branch
+		 * and always return 405, so the toggle endpoint was completely broken.
+		 * Exact match also rejects trailing garbage like /<id>/toggle/extra. */
+		int is_toggle = (uri_len == (int)(suffix + 7) &&
 		                 strncmp(uri + suffix, "/toggle", 7) == 0);
 		if (is_toggle) {
 			if (method == HTTP_POST) handle_cron_toggle(id, buf, size, status);
@@ -823,12 +831,14 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		}
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/api/asap/log")) {
+	if (uri_exact_eq(uri, uri_len, "/api/asap/log")) {
 		if (method == HTTP_GET) handle_asap_log_get(buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
-	if (path_eq(uri, uri_len, "/asap") && method == HTTP_POST) {
+	if (routes_hardware_dispatch(ctx, wsi, method, uri, uri_len, buf, size, status))
+		return 0;
+	if (uri_exact_eq(uri, uri_len, "/asap") && method == HTTP_POST) {
 		char client_ip[64] = {0};
 		lws_get_peer_simple(wsi, client_ip, sizeof client_ip);
 		handle_asap(ctx, client_ip, body, body_len, buf, size, status);

@@ -47,11 +47,13 @@ const provider_t *provider_stub_get(void)
 }
 
 static int s_stub_b_chat_should_fail;
+static const char *s_stub_b_error_message;
 
 static int stub_b_init(const config_t *cfg)
 {
 	(void)cfg;
 	s_stub_b_chat_should_fail = 0;
+	s_stub_b_error_message = NULL;
 	return 0;
 }
 
@@ -60,7 +62,10 @@ static int stub_b_chat(const provider_message_t *messages, size_t message_count,
                       provider_response_t *response)
 {
 	if (s_stub_b_chat_should_fail) {
-		provider_set_error(response, "Connection refused (stub-b)");
+		const char *err = s_stub_b_error_message;
+		if (err == NULL || err[0] == '\0')
+			err = "Connection refused (stub-b)";
+		provider_set_error(response, err);
 		return -1;
 	}
 	return stub_chat(messages, message_count, tools, tool_count, response);
@@ -69,6 +74,7 @@ static int stub_b_chat(const provider_message_t *messages, size_t message_count,
 static void stub_b_cleanup(void)
 {
 	s_stub_b_chat_should_fail = 0;
+	s_stub_b_error_message = NULL;
 }
 
 static const provider_t stub_b_provider = {
@@ -86,4 +92,9 @@ const provider_t *provider_stub_b_get(void)
 void provider_stub_b_set_chat_should_fail(int should_fail)
 {
 	s_stub_b_chat_should_fail = should_fail ? 1 : 0;
+}
+
+void provider_stub_b_set_chat_error_message(const char *message)
+{
+	s_stub_b_error_message = message;
 }
