@@ -15,6 +15,8 @@
 #include <string.h>
 
 extern const tool_t HW_TOOLS_GPIO_READ;
+extern const tool_t HW_TOOLS_GPIO_WRITE;
+extern const tool_t HW_TOOLS_GPIO_MODE;
 extern const tool_t HW_TOOLS_I2C_READ;
 extern const tool_t HW_TOOLS_I2C_WRITE;
 
@@ -206,11 +208,70 @@ static int test_i2c_default_bus_from_board(void)
 	return 0;
 }
 
+static int test_gpio_mode_rejects_invalid_mode(void)
+{
+	config_t *cfg = NULL;
+	char result[256];
+	int rc;
+
+	RUN(load_cfg("[agent]\nmodel = \"test\"\n\n[hardware]\nenabled = true\nboard = \"rpi\"\n",
+		     &cfg));
+	hardware_init(cfg);
+	tool_hardware_set_config(cfg);
+	rc = HW_TOOLS_GPIO_MODE.execute("{\"pin\":11,\"mode\":\"pwm\"}", result, sizeof(result));
+	ASSERT(rc == -1);
+	ASSERT(strstr(result, "input or output") != NULL);
+	config_free(cfg);
+	return 0;
+}
+
+static int test_gpio_mode_executes_json(void)
+{
+	config_t *cfg = NULL;
+	char result[256];
+	int rc;
+
+	RUN(load_cfg("[agent]\nmodel = \"test\"\n\n[hardware]\nenabled = true\nboard = \"rpi\"\n",
+		     &cfg));
+	hardware_init(cfg);
+	tool_hardware_set_config(cfg);
+	rc = HW_TOOLS_GPIO_MODE.execute("{\"pin\":11,\"mode\":\"output\"}", result, sizeof(result));
+	ASSERT(result[0] != '\0');
+	if (rc == 0) {
+		ASSERT(strstr(result, "\"mode\":\"output\"") != NULL);
+		ASSERT(strstr(result, "\"pin\":11") != NULL);
+	} else {
+		ASSERT(strstr(result, "error") != NULL);
+	}
+	config_free(cfg);
+	return 0;
+}
+
+static int test_gpio_write_rejects_non_binary_value(void)
+{
+	config_t *cfg = NULL;
+	char result[256];
+	int rc;
+
+	RUN(load_cfg("[agent]\nmodel = \"test\"\n\n[hardware]\nenabled = true\nboard = \"stub\"\n",
+		     &cfg));
+	tool_hardware_set_config(cfg);
+	rc = HW_TOOLS_GPIO_WRITE.execute("{\"pin\":11,\"value\":2}", result, sizeof(result));
+	ASSERT(rc == -1);
+	ASSERT(strstr(result, "value must be 0 or 1") != NULL);
+	ASSERT(strstr(result, "got 2") != NULL);
+	config_free(cfg);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_disabled_returns_error());
 	RUN(test_gpio_invalid_json());
 	RUN(test_gpio_pin_out_of_range());
+	RUN(test_gpio_mode_rejects_invalid_mode());
+	RUN(test_gpio_mode_executes_json());
+	RUN(test_gpio_write_rejects_non_binary_value());
 	RUN(test_i2c_read_success_with_mock());
 	RUN(test_i2c_invalid_addr());
 	RUN(test_i2c_default_bus_from_board());

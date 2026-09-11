@@ -88,6 +88,11 @@ static int gpio_write_exec(const char *args_json, char *result_buf, size_t max_l
 	cJSON_Delete(root);
 	if (hw_tools_validate_gpio_pin(pin, result_buf, max_len) != 0)
 		return -1;
+	if (value != 0 && value != 1) {
+		snprintf(result_buf, max_len, "{\"error\":\"value must be 0 or 1 (got %d)\"}",
+			 value);
+		return -1;
+	}
 	if (!hw_tools_gpio_ready()) {
 		snprintf(result_buf, max_len, "%s", HW_ERR_GPIO);
 		return -1;
@@ -106,22 +111,15 @@ static int gpio_write_exec(const char *args_json, char *result_buf, size_t max_l
 	return 0;
 }
 
-static int gpio_mode_exec(const char *args_json, char *result_buf, size_t max_len)
+static int gpio_mode_parse_args(const char *args_json, int *pin, char *mode_buf,
+				size_t mode_buf_sz, char *result_buf, size_t max_len)
 {
 	cJSON *root = NULL;
 	cJSON *mode_item;
-	int pin;
-	const char *mode;
-	char errbuf[256];
-	int rc;
 
-	if (!hw_tools_enabled()) {
-		snprintf(result_buf, max_len, "%s", HW_ERR_DISABLED);
-		return -1;
-	}
 	if (hw_tools_parse_root(args_json, &root, result_buf, max_len) != 0)
 		return -1;
-	if (hw_tools_require_int(root, "pin", &pin, result_buf, max_len) != 0) {
+	if (hw_tools_require_int(root, "pin", pin, result_buf, max_len) != 0) {
 		cJSON_Delete(root);
 		return -1;
 	}
@@ -131,13 +129,31 @@ static int gpio_mode_exec(const char *args_json, char *result_buf, size_t max_le
 		snprintf(result_buf, max_len, "{\"error\":\"missing or invalid mode\"}");
 		return -1;
 	}
-	mode = mode_item->valuestring;
-	if (strcmp(mode, "input") != 0 && strcmp(mode, "output") != 0) {
+	if (strcmp(mode_item->valuestring, "input") != 0 &&
+	    strcmp(mode_item->valuestring, "output") != 0) {
 		cJSON_Delete(root);
 		snprintf(result_buf, max_len, "{\"error\":\"mode must be input or output\"}");
 		return -1;
 	}
+	snprintf(mode_buf, mode_buf_sz, "%s", mode_item->valuestring);
 	cJSON_Delete(root);
+	return 0;
+}
+
+static int gpio_mode_exec(const char *args_json, char *result_buf, size_t max_len)
+{
+	int pin;
+	char mode_buf[8];
+	char errbuf[256];
+	int rc;
+
+	if (!hw_tools_enabled()) {
+		snprintf(result_buf, max_len, "%s", HW_ERR_DISABLED);
+		return -1;
+	}
+	if (gpio_mode_parse_args(args_json, &pin, mode_buf, sizeof(mode_buf), result_buf,
+				  max_len) != 0)
+		return -1;
 	if (hw_tools_validate_gpio_pin(pin, result_buf, max_len) != 0)
 		return -1;
 	if (!hw_tools_gpio_ready()) {
@@ -145,7 +161,7 @@ static int gpio_mode_exec(const char *args_json, char *result_buf, size_t max_le
 		return -1;
 	}
 #ifdef HAVE_LIBGPIOD
-	rc = hardware_gpio_mode(pin, mode, errbuf, sizeof(errbuf));
+	rc = hardware_gpio_mode(pin, mode_buf, errbuf, sizeof(errbuf));
 #else
 	rc = -1;
 	snprintf(errbuf, sizeof(errbuf), "GPIO not available");
@@ -154,7 +170,7 @@ static int gpio_mode_exec(const char *args_json, char *result_buf, size_t max_le
 		hw_tools_json_error(result_buf, max_len, errbuf);
 		return -1;
 	}
-	snprintf(result_buf, max_len, "{\"pin\":%d,\"mode\":\"%s\"}", pin, mode);
+	snprintf(result_buf, max_len, "{\"pin\":%d,\"mode\":\"%s\"}", pin, mode_buf);
 	return 0;
 }
 
