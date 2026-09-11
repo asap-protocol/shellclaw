@@ -222,6 +222,12 @@ int main(void)
 	CHECK(strstr(out1, "DayX") != NULL, "holiday_line includes next holiday name");
 	CHECK(strstr(out1, "2027-03-10") != NULL, "holiday_line includes next holiday date");
 	{
+		char tiny[80];
+		CHECK(tool_context_get()->execute("{}", tiny, sizeof(tiny)) == -1,
+		      "tiny buffer must fail");
+		CHECK(strstr(tiny, "too large") != NULL, "expects buffer size error");
+	}
+	{
 		char *snap = tool_context_snapshot_json();
 		CHECK(snap != NULL, "snapshot_json alloc");
 		CHECK(strstr(snap, "Berlin, DE") != NULL, "snapshot location_line");
