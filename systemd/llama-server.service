@@ -10,9 +10,12 @@ After=network.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/shellclaw/llama-server.env
-ExecStart=/usr/local/bin/llama-server --model $MODEL --host 127.0.0.1 --port $PORT -t $THREADS -ngl $NGL -c $CTX_SIZE
+ExecStart=/usr/local/bin/llama-server --model "${MODEL}" --host 127.0.0.1 --port "${PORT}" -t "${THREADS}" -ngl "${NGL}" -c "${CTX_SIZE}"
 Restart=on-failure
 RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
 
 [Install]
 WantedBy=shellclaw.service
