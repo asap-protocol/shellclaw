@@ -1,5 +1,5 @@
 # CI: static analysis, tests, release build. Required for branch protection.
-# PRs target `development` during Phase 5; merge to `main` when the release line is stable.
+# PRs may target `main` or `development`. Jetson on-device sign-off is not a CI gate.
 name: CI
 on:
   push:

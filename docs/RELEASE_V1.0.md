@@ -1,12 +1,12 @@
 # v1.0.0 release runbook (operator)
 
-Branch policy: merge **`development` → `main`** only after Jetson sign-off ([`JETSON_SIGNOFF.md`](JETSON_SIGNOFF.md), plan mirror in [`.cursor/dev-planning/tasks/phase5/04-release-quality.md`](../.cursor/dev-planning/tasks/phase5/04-release-quality.md) §189–226).
+Branch policy: **`development` → `main` is allowed without Jetson sign-off.** On-device validation ([`JETSON_SIGNOFF.md`](JETSON_SIGNOFF.md)) is a known pending item — run it when hardware is available; it does not block merging or continuing work on `main`.
 
-| Phase | Where | Jetson required? |
+| Phase | Where | Required to merge to `main`? |
 |-------|--------|------------------|
-| A | x86 / CI gates | No |
-| B | B1–B6 on device | Yes |
-| C | Tag, Pages manifest, marketplace | No (after merge) |
+| A | x86 / CI gates | Yes |
+| B | B1–B6 on device | No (known pending) |
+| C | Tag, Pages manifest, marketplace | No (after merge; optional until Jetson rows are filled) |
 
 **Tracking issue:** [`docs/issueops/v1.0.0-jetson-signoff-issue.md`](issueops/v1.0.0-jetson-signoff-issue.md) — `gh issue create --title "v1.0.0 Jetson sign-off" --body-file docs/issueops/v1.0.0-jetson-signoff-issue.md`
 
@@ -131,7 +131,7 @@ gh pr create --base main --head development \
   --draft
 ```
 
-Fill Jetson issue URL and sign-off commit in the PR body before marking ready for review.
+Jetson sign-off is optional for this PR. Record it as known pending unless the on-device checklist is already done.
 
 ### C2 — After merge to `main`
 

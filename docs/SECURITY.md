@@ -86,7 +86,7 @@ The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened 
 
 ### JetPack 6 / kernel 5.15 note
 
-Namespace behavior above was verified by **source audit** on the development branch. On-device validation on JetPack 6.2.x is part of the [manual sign-off checklist](../.cursor/dev-planning/tasks/phase5/04-release-quality.md) (not a CI gate in v1.0).
+Namespace behavior above was verified by **source audit**. On-device validation on JetPack 6.2.x is a [known pending](JETSON_SIGNOFF.md) item (not a CI or merge-to-`main` gate).
 
 ---
 
@@ -265,7 +265,7 @@ This section summarizes Jetson Orin Nano Super / JetPack 6.2.x concerns that do 
 
 **v1.0 scope on Jetson:** HTTP camera snapshot and sensor decoders are deferred stubs; LLM `camera_capture` and GPIO/I2C tools remain operator-trusted paths outside the shell sandbox. See [NVIDIA Argus](#nvidia-argus--nvargus-daemon-boundary-task-73) and [Gateway hardware API](#gateway-apihardware-task-74).
 
-**Validation outside CI:** release confidence on real Tegra hardware relies on the gpio-mockup local ritual and the on-device sign-off checklist in slice 04 (no Jetson runner in GitHub Actions for v1.0).
+**Validation outside CI:** gpio-mockup local ritual plus the on-device checklist in [`JETSON_SIGNOFF.md`](JETSON_SIGNOFF.md). Jetson sign-off is **known pending** (no Jetson runner in GitHub Actions; not a merge-to-`main` gate).
 
 ---
 
@@ -296,7 +296,7 @@ Per project decision **Q-SECREVIEW (DR-020)**:
 
 - **Self-audit only for v1.0.** This document, source review notes in tasks 7.1–7.6, and CI static/sanitizer runs constitute the full assurance package for the v1.0 release. There was **no external penetration test, no third-party code review, and no paid security auditor** for this version.
 - **Bug bounty:** not offered for v1.0; **considered post-v1.0** (likely v1.2+ alongside external review — see roadmap).
-- **Hardware CI gap:** GitHub Actions does not execute on a physical Jetson. Namespace and libgpiod behavior on Tegra are validated via source audit, unit tests, the [gpio-mockup release ritual](../.cursor/dev-planning/tasks/phase5/04-release-quality.md#120a-gpio-mockup-local-validation-ritual-q-ci-release-ritual), and the manual on-device sign-off checklist — not as automated CI gates.
+- **Hardware CI gap:** GitHub Actions does not execute on a physical Jetson. Namespace and libgpiod behavior on Tegra are validated via source audit, unit tests, and the [gpio-mockup release ritual](../.cursor/dev-planning/tasks/phase5/04-release-quality.md#120a-gpio-mockup-local-validation-ritual-q-ci-release-ritual). The [on-device sign-off checklist](JETSON_SIGNOFF.md) is **known pending** and is not a merge-to-`main` gate.
 - **Sandbox depth:** substring blocklists and namespace isolation are defense in depth, not a formal proof against a determined attacker with shell access when sandbox mode is disabled or when the agent process itself is compromised.
 
 **Do not describe ShellClaw v1.0 as "externally audited" or "pen-tested."**

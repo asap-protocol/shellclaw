@@ -9,7 +9,7 @@ Distilled product architecture for ShellClaw v1.0 — one `aarch64` C binary tha
 | Constraint | Target | As-built (v1.0) |
 |------------|--------|-----------------|
 | Release binary | < 2 MB (CI gate) | < 600 KB with hardware backends |
-| Agent RAM | < 5 MB idle, < 15 MB active | Measured on Jetson sign-off checklist |
+| Agent RAM | < 5 MB idle, < 15 MB active | Target; Jetson on-device measurement is [known pending](JETSON_SIGNOFF.md) |
 | Startup | < 1 s Jetson, < 2 s RPi | Board-dependent; see [BENCHMARKS.md](BENCHMARKS.md) when published |
 | Language | C99/C11 | Single tree, no runtime interpreter |
 | Hardware | GPIO + I2C + camera abstraction | GPIO + I2C live in v1.0; sensor decoders + camera image return in v1.2 |

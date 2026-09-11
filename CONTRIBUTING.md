@@ -17,8 +17,10 @@ Thank you for helping improve ShellClaw. This guide covers workflow, standards, 
 
 | Branch | Purpose |
 |--------|---------|
-| `development` | Integration branch for Phase 5+ work — **open PRs here first** |
-| `main` | Stable release line; merges from `development` after on-device validation |
+| `main` | Active line — open PRs here by default |
+| `development` | Optional integration branch for large slices |
+
+On-device Jetson validation is a **known pending** item ([`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md)); it does not block merging to `main`.
 
 **PR checklist**
 
@@ -88,10 +90,11 @@ When your change affects behavior, update the relevant doc (or add a link from R
 | [`docs/ASAP.md`](docs/ASAP.md) | Manifest, marketplace registration, compliance |
 | [`docs/LOCAL_INFERENCE.md`](docs/LOCAL_INFERENCE.md) | llama.cpp build, models, Jetson memory |
 | [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | Performance numbers per board and power mode |
+| [`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md) | On-device Jetson checklist (known pending, not a merge gate) |
 
 ## Pre-tag release ritual (maintainers)
 
-CI compile-only smoke does not exercise real GPIO file descriptors. Before tagging a release (e.g. `v1.0.0`), run **both** rituals below.
+CI compile-only smoke does not exercise real GPIO file descriptors. Before tagging a release (e.g. `v1.0.0`), run the `gpio-mockup` ritual below. Jetson on-device sign-off is **known pending** — skip until hardware is available; it does not block `main`.
 
 ### 1. `gpio-mockup` local validation (Linux only; requires libgpiod)
 
@@ -108,9 +111,9 @@ sudo rmmod gpio-mockup
 
 **Verify:** `test_hardware_libgpiod` reports successful read/write/mode against the mockup chip (or skips I/O cleanly when mockup is absent).
 
-### 2. Jetson on-device sign-off
+### 2. Jetson on-device sign-off (known pending — not a merge gate)
 
-On a wired Jetson Orin Nano Super (with `llama-server` on port 8080):
+On a wired Jetson Orin Nano Super (with `llama-server` on port 8080). Skip until hardware is available; software continues on `main`.
 
 ```bash
 export SHELLCLAW_HW_TEST=1

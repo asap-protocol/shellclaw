@@ -45,12 +45,13 @@ tests/        one test binary per module (Makefile targets)
 
 - **`tool_X_set_config` setter-global convention (v1.0.1):** the tools (shell, file, web_search, asap_invoke, context, hardware) each expose a module-local mutable config pointer set via a `tool_X_set_config(const config_t *)` setter (e.g. `g_hw_cfg` in `src/tools/hardware_tools_helpers.c`). This avoids passing `const config_t *cfg` through `tool_t.execute` / `agent_tool_t.execute` (an ABI change touching `tool.h`/`agent.h` vtables, 13 tool callbacks, ~30 test sites, >10 files). The whole-convention refactor (pass `const config_t *cfg` or a `tool_context_t` through `execute` for all tools) is scheduled for v1.0.1. Recorded in Phase 5 slice 05 (H1 path B).
 - **`src/core/config.c` 1000-line waiver (v1.0.1):** `config.c` is 1261 lines (a single-struct TOML parser where every `parse_*` writes the same `config_t`). The 1000-line rule is a presumptive (rebuttable) blocker. A clean hardware-only extract (~167 lines: `parse_hardware`, `free_hardware_io`, `config_hardware_*` accessors) leaves the file at ~1094 — still over 1k. The proper fix is a two-section extract (`config_hardware.c` + `config_asap.c`, ~331 lines → ~930), scheduled for v1.0.1. The `asap_skill_descriptions` table is ASAP-section code, NOT hardware, and must not move with a hardware extraction. Waived for v1.0.0 per Phase 5 slice 05 (B1).
+- **Jetson on-device sign-off (deferred):** Phase 5 software is on `main`. GPIO/I2C/`llama-server` smoke on a physical Jetson Orin Nano Super is **not** a merge gate. Run `SHELLCLAW_HW_TEST=1 make test_hardware_on_device` and [`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md) when hardware is available.
 
 ## Branches
 
-- `main` — stable release line.
-- `development` — integration branch for Phase 5+ work; open PRs here first.
-- Phase slices land as focused feature branches merged into `development`; merge `development` → `main` when hardware validation on target boards is done.
+- `main` — active line; open PRs here (or via `development` when integrating a large slice).
+- `development` — optional integration branch; no longer a hold-back until Jetson sign-off.
+- Phase 5 on-device Jetson validation is a known pending item, not a `development` → `main` blocker. See [`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md).
 
 ## Rules
 

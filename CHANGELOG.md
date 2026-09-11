@@ -9,6 +9,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - `CONTRIBUTING.md` with PR workflow and pre-tag `gpio-mockup` ritual.
 - Jetson-aware `[hardware]` defaults in `config.example.toml` and `.env.example`.
 
+### Changed
+- `main` is the active line. On-device Jetson sign-off is a known pending item, not a merge gate ([`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md)).
+
 ---
 
 ## [1.0.0] - TBD
@@ -32,6 +35,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ### Security
 - Blocklist Jetson GPU `/dev` nodes and `/tmp/argus_socket` from sandboxed shell.
 - Per-token rate limit on `/api/hardware/camera/snapshot` (1 req/s).
+
+### Known pending (not a v1.2 deferral)
+- On-device Jetson Orin Nano Super sign-off: GPIO/I2C/`llama-server` smoke, benchmark fill ([`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md)). Not a merge-to-`main` gate.
 
 ### Deferred to v1.2 (Phase 7)
 - BME280, BH1750, DHT22 sensor decoders and Web UI sensor panels.

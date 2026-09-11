@@ -19,11 +19,13 @@ A lightweight AI assistant written in C that runs on **NVIDIA Jetson Orin Nano S
 | 2: Gateway | v0.2.0 | ✅ Done | HTTP server, embedded Web UI, WebSocket chat, cron scheduler, pairing auth, ASAP manifest, skill hot-reload |
 | 3: Protocol | v0.3.0 | ✅ Done | ASAP client/server, registry, `asap_invoke` tool, process sandbox (namespaces + cgroups), Tavily search, `/asap` + `/api/asap/log`, rate limits |
 | 4: Autonomy | v0.4.0 | ✅ Done | Local inference (llama.cpp), provider fallback, Discord channel, systemd service, OTA updates, context tool, dashboard |
-| 5: Edge AI Hardware & Release | v1.0.0 | — | **Jetson Orin Nano Super primary target**: hardware abstraction (GPIO, I2C, camera CLI skeleton), CUDA-accelerated local LLM (Phi-3-mini default), Ed25519 signing, ASAP marketplace registration, security audit, full docs |
+| 5: Edge AI Hardware & Release | v1.0.0 | Landed (Jetson on-device pending) | Hardware abstraction (GPIO, I2C, camera CLI skeleton), CUDA local LLM path, Ed25519 signing, ASAP marketplace docs. **Known pending:** physical Jetson sign-off — [`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md) |
 | 6: Hobbyist Portability | v1.1.0 | — | **Raspberry Pi Zero 2 W validation**: same binary, RPi-specific install + CPU-only local LLM (TinyLlama 1.1B) + benchmarks + docs, optional pre-built SD image |
 | 7: Physical World Hardware | v1.2.0 | — | **Real sensors + camera image return** on both boards: BME280, BH1750, DHT22 (experimental), CSI + USB camera capture, Web UI sensor/camera panels, `home-monitor` + `visual-monitor` skills |
 
 *v1.2 (Phase 7) intentionally deferred from v1.0:* sensor decoders (BME280, BH1750, DHT22), CSI/USB camera image return to the LLM, Hardware Web UI sensor/camera tabs (currently "Coming in v1.2"), and the `home-monitor` / `visual-monitor` skills. GPIO, I2C scan, CUDA inference, and the camera CLI skeleton ship in v1.0.
+
+*Known pending:* on-device validation on a physical Jetson Orin Nano Super is **not** a merge gate. See [`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md).
 
 ## What makes ShellClaw different
 
@@ -73,7 +75,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR workflow, coding standards, and th
 | [CHANGELOG.md](CHANGELOG.md) | Release history v0.1.0 → v1.0.0 |
 | [AGENTS.md](AGENTS.md) | Agent/coder quickstart |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | As-built module map and data flow |
-| [docs/HARDWARE_JETSON.md](docs/HARDWARE_JETSON.md) | JetPack, NVMe, pin map, wiring |
+| [docs/JETSON_SIGNOFF.md](docs/JETSON_SIGNOFF.md) | On-device Jetson checklist (**known pending**, not a merge gate) |
 | [docs/HARDWARE_SAFETY.md](docs/HARDWARE_SAFETY.md) | 3V3 logic, current limits, ESD |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model, sandbox audit, gateway auth |
 | [docs/ASAP.md](docs/ASAP.md) | Manifest signing, marketplace registration |

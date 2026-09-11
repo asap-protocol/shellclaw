@@ -1,10 +1,12 @@
 # Jetson v1.0.0 sign-off (operator checklist)
 
-Copy-paste ritual for **Jetson Orin Nano Super** before `development` → `main` and tag `v1.0.0`. Mirrors [`.cursor/dev-planning/tasks/phase5/04-release-quality.md`](../.cursor/dev-planning/tasks/phase5/04-release-quality.md) § Manual on-device validation, with **corrected commands** where the plan omits env vars.
+**Status: known pending — not a merge gate.** Phase 5 software lives on `main`. Run this checklist when a Jetson Orin Nano Super is available; do not block PRs or `development` → `main` on it.
+
+Copy-paste ritual for **Jetson Orin Nano Super** before tagging `v1.0.0` with on-device confidence. Mirrors [`.cursor/dev-planning/tasks/phase5/04-release-quality.md`](../.cursor/dev-planning/tasks/phase5/04-release-quality.md) § Manual on-device validation, with **corrected commands** where the plan omits env vars.
 
 **Out of scope for v1.0:** BME280/BH1750 reads, CSI/USB camera E2E, `home-monitor` / `visual-monitor` skills (v1.2).
 
-Tracking: open GitHub issue **v1.0.0 Jetson sign-off** from [`docs/issueops/v1.0.0-jetson-signoff-issue.md`](issueops/v1.0.0-jetson-signoff-issue.md).
+Tracking: keep this checklist in-repo. GitHub issues may be disabled; use [`docs/issueops/v1.0.0-jetson-signoff-issue.md`](issueops/v1.0.0-jetson-signoff-issue.md) if you open a tracking issue later.
 
 ---
 
@@ -33,7 +35,7 @@ gpiodetect
 From repo root on the Jetson:
 
 ```bash
-git checkout development && git pull
+git checkout main && git pull
 make shellclaw
 ./scripts/install.sh
 ./scripts/build_llama_jetson.sh
