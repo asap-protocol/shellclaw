@@ -202,6 +202,35 @@ static int test_i2c_scan_finds_device(void)
 	return 0;
 }
 
+static int test_i2c_read_rejects_reserved_addr(void)
+{
+	char errbuf[128];
+	uint8_t out = 0;
+
+	ASSERT(mock_reset() == 0);
+	ASSERT(hardware_i2c_read(7, 0x02, 0x00, 1, &out, errbuf, sizeof(errbuf)) != 0);
+	ASSERT(strstr(errbuf, "0x02") != NULL);
+	ASSERT(strstr(errbuf, "0x03-0x77") != NULL);
+	ASSERT(s_mock.close_count == 0);
+	mock_teardown();
+	return 0;
+}
+
+static int test_i2c_write_rejects_oversize_len(void)
+{
+	uint8_t payload[257];
+	char errbuf[128];
+
+	memset(payload, 0x11, sizeof(payload));
+	ASSERT(mock_reset() == 0);
+	ASSERT(hardware_i2c_write(1, 0x50, 0x00, payload, sizeof(payload), errbuf,
+				   sizeof(errbuf)) != 0);
+	ASSERT(strstr(errbuf, "1-256") != NULL);
+	ASSERT(s_mock.close_count == 0);
+	mock_teardown();
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_i2c_read_register_pattern());
@@ -210,6 +239,8 @@ int main(void)
 	RUN(test_i2c_slave_error_propagation());
 	RUN(test_i2c_scan_empty_bus());
 	RUN(test_i2c_scan_finds_device());
+	RUN(test_i2c_read_rejects_reserved_addr());
+	RUN(test_i2c_write_rejects_oversize_len());
 	printf("test_hardware_i2c: all tests passed\n");
 	return 0;
 }

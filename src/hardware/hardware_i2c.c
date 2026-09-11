@@ -21,6 +21,7 @@
 
 #define I2C_ADDR_MIN 0x03u
 #define I2C_ADDR_MAX 0x77u
+#define I2C_XFER_LEN_MAX 256u
 
 static const hardware_i2c_syscalls_t *s_test_syscalls;
 static int s_i2c_ready;
@@ -181,6 +182,22 @@ int hardware_i2c_is_available(void)
 	return s_i2c_ready ? 1 : 0;
 }
 
+static int validate_i2c_xfer(uint8_t addr, size_t len, char *errbuf, size_t errbufsz)
+{
+	if (addr < I2C_ADDR_MIN || addr > I2C_ADDR_MAX) {
+		if (errbuf && errbufsz > 0)
+			snprintf(errbuf, errbufsz, "i2c: addr 0x%02x out of range (0x03-0x77)",
+				 addr);
+		return -1;
+	}
+	if (len < 1 || len > I2C_XFER_LEN_MAX) {
+		if (errbuf && errbufsz > 0)
+			snprintf(errbuf, errbufsz, "i2c: len %zu out of range (1-256)", len);
+		return -1;
+	}
+	return 0;
+}
+
 int hardware_i2c_read(int bus, uint8_t addr, uint8_t reg, size_t len, uint8_t *out,
 		      char *errbuf, size_t errbufsz)
 {
@@ -192,11 +209,13 @@ int hardware_i2c_read(int bus, uint8_t addr, uint8_t reg, size_t len, uint8_t *o
 			snprintf(errbuf, errbufsz, "i2c: backend not initialized");
 		return -1;
 	}
-	if (!out || len == 0) {
+	if (!out) {
 		if (errbuf && errbufsz > 0)
 			snprintf(errbuf, errbufsz, "i2c: invalid read buffer or len=%zu", len);
 		return -1;
 	}
+	if (validate_i2c_xfer(addr, len, errbuf, errbufsz) != 0)
+		return -1;
 	fd = open_bus(bus, errbuf, errbufsz);
 	if (fd < 0)
 		return -1;
@@ -241,11 +260,13 @@ int hardware_i2c_write(int bus, uint8_t addr, uint8_t reg, const uint8_t *data,
 			snprintf(errbuf, errbufsz, "i2c: backend not initialized");
 		return -1;
 	}
-	if (!data || len == 0) {
+	if (!data) {
 		if (errbuf && errbufsz > 0)
 			snprintf(errbuf, errbufsz, "i2c: invalid write buffer or len=%zu", len);
 		return -1;
 	}
+	if (validate_i2c_xfer(addr, len, errbuf, errbufsz) != 0)
+		return -1;
 	fd = open_bus(bus, errbuf, errbufsz);
 	if (fd < 0)
 		return -1;
