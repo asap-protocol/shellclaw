@@ -333,6 +333,40 @@ static void copy_str_bounded(char *dst, size_t dst_size, const char *src)
 	dst[n] = '\0';
 }
 
+static char *dup_sqlite_text(sqlite3_stmt *stmt, int col)
+{
+	const char *src = (const char *)sqlite3_column_text(stmt, col);
+	return strdup(src ? src : "");
+}
+
+void cron_job_row_free(cron_job_row_t *row)
+{
+	if (!row) return;
+	free(row->schedule);
+	free(row->message);
+	row->schedule = NULL;
+	row->message = NULL;
+}
+
+static int fill_cron_job_row(sqlite3_stmt *stmt, cron_job_row_t *out)
+{
+	char *schedule = dup_sqlite_text(stmt, 1);
+	char *message = dup_sqlite_text(stmt, 2);
+	if (!schedule || !message) {
+		free(schedule);
+		free(message);
+		return -1;
+	}
+	copy_str_bounded(out->id, sizeof(out->id), (const char *)sqlite3_column_text(stmt, 0));
+	out->schedule = schedule;
+	out->message = message;
+	copy_str_bounded(out->channel, sizeof(out->channel), (const char *)sqlite3_column_text(stmt, 3));
+	copy_str_bounded(out->recipient, sizeof(out->recipient), (const char *)sqlite3_column_text(stmt, 4));
+	out->next_run = sqlite3_column_int64(stmt, 5);
+	out->enabled = sqlite3_column_int(stmt, 6);
+	return 0;
+}
+
 int cron_job_create(const char *id, const char *schedule, const char *message,
                     const char *channel, const char *recipient, long long next_run, int enabled)
 {
@@ -400,13 +434,12 @@ int cron_job_list(cron_job_row_t *out, int max_count)
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
 	int count = 0;
 	while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
-		copy_str_bounded(out[count].id, sizeof(out[count].id), (const char *)sqlite3_column_text(stmt, 0));
-		copy_str_bounded(out[count].schedule, sizeof(out[count].schedule), (const char *)sqlite3_column_text(stmt, 1));
-		copy_str_bounded(out[count].message, sizeof(out[count].message), (const char *)sqlite3_column_text(stmt, 2));
-		copy_str_bounded(out[count].channel, sizeof(out[count].channel), (const char *)sqlite3_column_text(stmt, 3));
-		copy_str_bounded(out[count].recipient, sizeof(out[count].recipient), (const char *)sqlite3_column_text(stmt, 4));
-		out[count].next_run = sqlite3_column_int64(stmt, 5);
-		out[count].enabled = sqlite3_column_int(stmt, 6);
+		if (fill_cron_job_row(stmt, &out[count]) != 0) {
+			for (int i = 0; i < count; i++)
+				cron_job_row_free(&out[i]);
+			sqlite3_finalize(stmt);
+			return -1;
+		}
 		count++;
 	}
 	sqlite3_finalize(stmt);
@@ -423,13 +456,10 @@ int cron_job_get_next_due(long long now, cron_job_row_t *out)
 	sqlite3_bind_int64(stmt, 1, now);
 	int ret = 0;
 	if (sqlite3_step(stmt) == SQLITE_ROW) {
-		copy_str_bounded(out->id, sizeof(out->id), (const char *)sqlite3_column_text(stmt, 0));
-		copy_str_bounded(out->schedule, sizeof(out->schedule), (const char *)sqlite3_column_text(stmt, 1));
-		copy_str_bounded(out->message, sizeof(out->message), (const char *)sqlite3_column_text(stmt, 2));
-		copy_str_bounded(out->channel, sizeof(out->channel), (const char *)sqlite3_column_text(stmt, 3));
-		copy_str_bounded(out->recipient, sizeof(out->recipient), (const char *)sqlite3_column_text(stmt, 4));
-		out->next_run = sqlite3_column_int64(stmt, 5);
-		out->enabled = sqlite3_column_int(stmt, 6);
+		if (fill_cron_job_row(stmt, out) != 0) {
+			sqlite3_finalize(stmt);
+			return -1;
+		}
 		ret = 1;
 	}
 	sqlite3_finalize(stmt);

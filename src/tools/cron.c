@@ -194,9 +194,10 @@ static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 		row.recipient[0] ? row.recipient : "default");
 	out->session_id = strdup(session_id);
 	out->user_id = strdup(row.id);
-	out->text = strdup(row.message);
+	out->text = strdup(row.message ? row.message : "");
 	out->attachments = NULL;
 	out->attachments_count = 0;
+	cron_job_row_free(&row);
 	return 1;
 }
 
@@ -251,21 +252,33 @@ static int cron_tool_execute(const char *args_json, char *result_buf, size_t max
 	int ret = 0;
 	if (strcmp(operation, "list") == 0) {
 		cron_job_row_t rows[64];
+		memset(rows, 0, sizeof(rows));
 		int n = cron_job_list(rows, 64);
+		if (n < 0) {
+			cJSON_Delete(root);
+			snprintf(result_buf, max_len, "{\"error\":\"failed to list jobs\"}");
+			return -1;
+		}
 		cJSON *arr = cJSON_CreateArray();
-		if (!arr) { cJSON_Delete(root); snprintf(result_buf, max_len, "{\"error\":\"out of memory\"}"); return -1; }
+		if (!arr) {
+			for (int i = 0; i < n; i++) cron_job_row_free(&rows[i]);
+			cJSON_Delete(root);
+			snprintf(result_buf, max_len, "{\"error\":\"out of memory\"}");
+			return -1;
+		}
 		for (int i = 0; i < n; i++) {
 			cJSON *obj = cJSON_CreateObject();
 			if (!obj) break;
 			cJSON_AddItemToObject(obj, "id", cJSON_CreateString(rows[i].id));
-			cJSON_AddItemToObject(obj, "schedule", cJSON_CreateString(rows[i].schedule));
-			cJSON_AddItemToObject(obj, "message", cJSON_CreateString(rows[i].message));
+			cJSON_AddItemToObject(obj, "schedule", cJSON_CreateString(rows[i].schedule ? rows[i].schedule : ""));
+			cJSON_AddItemToObject(obj, "message", cJSON_CreateString(rows[i].message ? rows[i].message : ""));
 			cJSON_AddItemToObject(obj, "channel", cJSON_CreateString(rows[i].channel));
 			cJSON_AddItemToObject(obj, "recipient", cJSON_CreateString(rows[i].recipient));
 			cJSON_AddItemToObject(obj, "next_run", cJSON_CreateNumber((double)rows[i].next_run));
 			cJSON_AddItemToObject(obj, "enabled", cJSON_CreateBool(rows[i].enabled));
 			cJSON_AddItemToArray(arr, obj);
 		}
+		for (int i = 0; i < n; i++) cron_job_row_free(&rows[i]);
 		char *s = cJSON_PrintUnformatted(arr);
 		cJSON_Delete(arr);
 		if (s) {
