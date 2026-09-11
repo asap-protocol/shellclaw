@@ -34,9 +34,11 @@ void bootstrap_add_tool_for_test(const tool_t *tool);
 	} while (0)
 
 #define SEND_BUF_SIZE 4096
+#define DISPATCH_FULL_TOOL_COUNT 13
 static char g_last_session[SEND_BUF_SIZE];
 static char g_last_text[SEND_BUF_SIZE];
 static int g_send_calls;
+static size_t g_last_provider_tool_count;
 
 static int mock_send(const char *session_id, const char *text,
 		     const channel_attachment_t *attachments, size_t attachments_count)
@@ -72,7 +74,7 @@ static int spy_chat(const provider_message_t *messages, size_t message_count,
 	(void)messages;
 	(void)message_count;
 	(void)tools;
-	(void)tool_count;
+	g_last_provider_tool_count = tool_count;
 	response->error = 0;
 	response->content = strdup("agent-ok");
 	response->tool_calls = NULL;
@@ -143,6 +145,7 @@ static void reset_send_spy(void)
 	g_send_calls = 0;
 	g_last_session[0] = '\0';
 	g_last_text[0] = '\0';
+	g_last_provider_tool_count = 0;
 }
 
 static int test_reset_clears_session(void)
@@ -253,12 +256,59 @@ static int test_normal_message_uses_provider(void)
 	return 0;
 }
 
+static int dummy_tool_exec(const char *args_json, char *result_buf, size_t max_len)
+{
+	(void)args_json;
+	if (result_buf && max_len > 0)
+		result_buf[0] = '\0';
+	return 0;
+}
+
+static int test_dispatch_forwards_full_hardware_tool_table(void)
+{
+	channel_incoming_msg_t msg = {0};
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_tools_XXXXXX";
+	config_t *cfg = NULL;
+	static tool_t tools[DISPATCH_FULL_TOOL_COUNT];
+	static char names[DISPATCH_FULL_TOOL_COUNT][8];
+	size_t i;
+	int fd;
+
+	reset_send_spy();
+	g_last_provider_tool_count = 0;
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	bootstrap_set_cfg(cfg);
+	bootstrap_set_provider_for_test(&spy_provider);
+	bootstrap_reset_tools_for_test();
+	for (i = 0; i < DISPATCH_FULL_TOOL_COUNT; i++) {
+		snprintf(names[i], sizeof(names[i]), "t%zu", i);
+		tools[i].name = names[i];
+		tools[i].description = "d";
+		tools[i].parameters_json = "{}";
+		tools[i].execute = dummy_tool_exec;
+		bootstrap_add_tool_for_test(&tools[i]);
+	}
+	msg.session_id = "cli:tools";
+	msg.text = "ping";
+	ASSERT(handle_message(&mock_channel, &msg) == 0);
+	ASSERT(g_last_provider_tool_count == DISPATCH_FULL_TOOL_COUNT);
+	config_free(cfg);
+	unlink(tmpl);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_reset_clears_session());
 	RUN(test_status_returns_version());
 	RUN(test_agent_failure_fallback_message());
 	RUN(test_normal_message_uses_provider());
+	RUN(test_dispatch_forwards_full_hardware_tool_table());
 	puts("test_dispatch OK");
 	return 0;
 }

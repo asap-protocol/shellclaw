@@ -19,17 +19,66 @@
 } while (0)
 #define RUN(t) do { int _r = (t); if (_r) return _r; } while (0)
 
-/* Stubs so test_registry links without the full tool dependency graph. */
-const tool_t *tool_shell_get(void) { return NULL; }
+/* Legacy production cap that truncated hardware tools after six core slots. */
+#define LEGACY_TOOL_TABLE_CAP 8
+
+static int core_stub_exec(const char *args_json, char *result_buf, size_t max_len)
+{
+	(void)args_json;
+	if (result_buf && max_len > 0)
+		result_buf[0] = '\0';
+	return 0;
+}
+
+/* Non-NULL stand-ins for production getters so tool_get_all occupies six core
+ * slots. NULL stubs hid the 8-slot production cap in earlier tests. */
+static const tool_t CORE_STUB_SHELL = {
+	.name = "shell",
+	.description = "core stub",
+	.parameters_json = "{}",
+	.execute = core_stub_exec,
+};
+static const tool_t CORE_STUB_WEB_SEARCH = {
+	.name = "web_search",
+	.description = "core stub",
+	.parameters_json = "{}",
+	.execute = core_stub_exec,
+};
+static const tool_t CORE_STUB_FILE = {
+	.name = "file",
+	.description = "core stub",
+	.parameters_json = "{}",
+	.execute = core_stub_exec,
+};
+static const tool_t CORE_STUB_CRON = {
+	.name = "cron",
+	.description = "core stub",
+	.parameters_json = "{}",
+	.execute = core_stub_exec,
+};
+static const tool_t CORE_STUB_CONTEXT = {
+	.name = "context",
+	.description = "core stub",
+	.parameters_json = "{}",
+	.execute = core_stub_exec,
+};
+static const tool_t CORE_STUB_ASAP_INVOKE = {
+	.name = "asap_invoke",
+	.description = "core stub",
+	.parameters_json = "{}",
+	.execute = core_stub_exec,
+};
+
+const tool_t *tool_shell_get(void) { return &CORE_STUB_SHELL; }
 void tool_shell_set_config(const config_t *cfg) { (void)cfg; }
-const tool_t *tool_web_search_get(void) { return NULL; }
+const tool_t *tool_web_search_get(void) { return &CORE_STUB_WEB_SEARCH; }
 void tool_web_search_set_config(const config_t *cfg) { (void)cfg; }
-const tool_t *tool_file_get(void) { return NULL; }
+const tool_t *tool_file_get(void) { return &CORE_STUB_FILE; }
 void tool_file_set_config(const config_t *cfg) { (void)cfg; }
-const tool_t *tool_cron_get(void) { return NULL; }
-const tool_t *tool_context_get(void) { return NULL; }
+const tool_t *tool_cron_get(void) { return &CORE_STUB_CRON; }
+const tool_t *tool_context_get(void) { return &CORE_STUB_CONTEXT; }
 void tool_context_set_config(const config_t *cfg) { (void)cfg; }
-const tool_t *tool_asap_invoke_get(void) { return NULL; }
+const tool_t *tool_asap_invoke_get(void) { return &CORE_STUB_ASAP_INVOKE; }
 void tool_asap_invoke_set_config(const config_t *cfg) { (void)cfg; }
 
 static const char *const HW_TOOL_NAMES[] = {
@@ -126,10 +175,72 @@ static int test_hardware_tools_hidden_when_disabled(void)
 	return 0;
 }
 
+static int load_hw_enabled_tools(const char *path, const tool_t **tools, size_t max_count,
+				  size_t *n_out, config_t **cfg_out)
+{
+	FILE *f;
+	char errbuf[256];
+
+	f = fopen(path, "w");
+	ASSERT(f);
+	fprintf(f, "[agent]\nmodel = \"test\"\n\n[hardware]\nenabled = true\n");
+	fclose(f);
+	ASSERT(config_load(path, cfg_out, errbuf, sizeof(errbuf)) == 0);
+	tool_set_config(*cfg_out);
+	*n_out = tool_get_all(tools, max_count);
+	return 0;
+}
+
+static int assert_all_hardware_names(const tool_t **tools, size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(HW_TOOL_NAMES) / sizeof(HW_TOOL_NAMES[0]); i++) {
+		ASSERT(find_tool_by_name(tools, n, HW_TOOL_NAMES[i]) != NULL);
+	}
+	return 0;
+}
+
+static int test_hardware_tools_fit_production_cap(void)
+{
+	const char *path = "/tmp/shellclaw_test_registry_cap.toml";
+	config_t *cfg = NULL;
+	const tool_t *tools[SHELLCLAW_MAX_TOOLS];
+	size_t n;
+
+	RUN(load_hw_enabled_tools(path, tools, SHELLCLAW_MAX_TOOLS, &n, &cfg));
+	ASSERT(n <= SHELLCLAW_MAX_TOOLS);
+	ASSERT(n >= sizeof(HW_TOOL_NAMES) / sizeof(HW_TOOL_NAMES[0]));
+	RUN(assert_all_hardware_names(tools, n));
+	config_free(cfg);
+	remove(path);
+	return 0;
+}
+
+static int test_legacy_eight_slot_cap_drops_later_hardware(void)
+{
+	const char *path = "/tmp/shellclaw_test_registry_cap8.toml";
+	config_t *cfg = NULL;
+	const tool_t *tools[LEGACY_TOOL_TABLE_CAP];
+	size_t n;
+
+	RUN(load_hw_enabled_tools(path, tools, LEGACY_TOOL_TABLE_CAP, &n, &cfg));
+	ASSERT(n == LEGACY_TOOL_TABLE_CAP);
+	ASSERT(find_tool_by_name(tools, n, "gpio_read") != NULL);
+	ASSERT(find_tool_by_name(tools, n, "gpio_write") != NULL);
+	ASSERT(find_tool_by_name(tools, n, "gpio_mode") == NULL);
+	ASSERT(find_tool_by_name(tools, n, "camera_capture") == NULL);
+	config_free(cfg);
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_hardware_tools_registered());
 	RUN(test_hardware_tools_hidden_when_disabled());
+	RUN(test_hardware_tools_fit_production_cap());
+	RUN(test_legacy_eight_slot_cap_drops_later_hardware());
 	printf("test_registry: all tests passed\n");
 	return 0;
 }

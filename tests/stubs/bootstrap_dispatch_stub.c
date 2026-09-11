@@ -10,11 +10,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#define MAX_TOOLS 8
-
 static config_t *g_cfg;
 static const provider_t *g_provider;
-static const tool_t *g_tools[MAX_TOOLS];
+static const tool_t *g_tools[SHELLCLAW_MAX_TOOLS];
 static size_t g_tool_count;
 static char g_config_path[512];
 
@@ -70,6 +68,6 @@ void bootstrap_reset_tools_for_test(void)
 
 void bootstrap_add_tool_for_test(const tool_t *tool)
 {
-	if (tool != NULL && g_tool_count < MAX_TOOLS)
+	if (tool != NULL && g_tool_count < SHELLCLAW_MAX_TOOLS)
 		g_tools[g_tool_count++] = tool;
 }

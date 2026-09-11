@@ -28,7 +28,9 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 	}
 	char resp_buf[RESPONSE_BUF_SIZE];
 	size_t tool_count = bootstrap_tool_count();
-	agent_tool_t flat_tools[8];
+	agent_tool_t flat_tools[SHELLCLAW_MAX_TOOLS];
+	if (tool_count > SHELLCLAW_MAX_TOOLS)
+		tool_count = SHELLCLAW_MAX_TOOLS;
 	for (size_t i = 0; i < tool_count; i++) {
 		const tool_t *t = bootstrap_tool_at(i);
 		if (!t)

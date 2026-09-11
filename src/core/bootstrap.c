@@ -21,7 +21,6 @@
 
 #define SKILLS_BUF_SIZE (256 * 1024)
 #define SYSTEM_PROMPT_BUF_SIZE (256 * 1024)
-#define MAX_TOOLS 8
 #define MAX_CHANNELS 8
 
 static int g_verbose;
@@ -29,7 +28,7 @@ static const char *g_cli_one_shot;
 static const char *g_config_path;
 static config_t *g_cfg;
 static const provider_t *g_provider;
-static const tool_t *g_tools[MAX_TOOLS];
+static const tool_t *g_tools[SHELLCLAW_MAX_TOOLS];
 static size_t g_tool_count;
 static const channel_t *g_channels[MAX_CHANNELS];
 static int g_channel_count;
@@ -215,7 +214,7 @@ static void channels_cleanup(void)
 int tools_init(const config_t *cfg)
 {
 	tool_set_config(cfg);
-	g_tool_count = tool_get_all(g_tools, MAX_TOOLS);
+	g_tool_count = tool_get_all(g_tools, SHELLCLAW_MAX_TOOLS);
 	return 0;
 }
 
