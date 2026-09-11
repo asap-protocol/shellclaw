@@ -20,7 +20,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ### Added
 - Hardware abstraction: GPIO (libgpiod), I2C scan, camera CLI skeleton with per-board backends and runtime board detection (`/proc/device-tree/compatible`, `SHELLCLAW_BOARD` override).
-- Jetson-specific: `tegrastats` GPU metrics parser, 40-pin GPIO snapshot, `/hardware` Web UI and `/api/hardware/*` REST routes (Bearer auth, camera snapshot rate limit).
+- Jetson-specific: `tegrastats` GPU metrics parser, 40-pin GPIO snapshot, `/hardware` Web UI and `/api/hardware/*` REST routes (Bearer auth; camera HTTP capture deferred).
 - CUDA-accelerated local inference path: `scripts/build_llama_jetson.sh`, `scripts/download_model.sh` (Phi-3-mini Q4_K_M default), systemd units for `llama-server` + `shellclaw`.
 - Ed25519 manifest signing (`src/crypto/`, TweetNaCl), JCS canonicalization, strict key file permissions (0600), fail-fast startup on loose keys.
 - Board-aware ASAP manifest capabilities (hardware class/model, local model id, GPIO/I2C tools).
@@ -34,7 +34,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ### Security
 - Blocklist Jetson GPU `/dev` nodes and `/tmp/argus_socket` from sandboxed shell.
-- Per-token rate limit on `/api/hardware/camera/snapshot` (1 req/s).
+- `/api/hardware/camera/snapshot` is a v1.2 deferred stub; per-token 1 req/s throttle is not shipped until Phase 7 HTTP capture ([`docs/SECURITY.md`](docs/SECURITY.md)).
 
 ### Known pending (not a v1.2 deferral)
 - On-device Jetson Orin Nano Super sign-off: GPIO/I2C/`llama-server` smoke, benchmark fill ([`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md)). Not a merge-to-`main` gate.
