@@ -10,6 +10,7 @@
 #include "hardware/hardware.h"
 #include "tools/tool.h"
 #include "cJSON.h"
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -28,6 +29,7 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 {
 	cJSON *root = NULL;
 	cJSON *path_item;
+	char path_buf[PATH_MAX];
 	const char *output_path = NULL;
 	const char *camera_type;
 	const char *resolution;
@@ -37,12 +39,9 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 	int quality;
 	int rc;
 
+	path_buf[0] = '\0';
 	if (!hw_tools_enabled()) {
 		snprintf(result_buf, max_len, "%s", HW_ERR_DISABLED);
-		return -1;
-	}
-	if (!hardware_active_camera_backend() || !hardware_camera_is_available()) {
-		snprintf(result_buf, max_len, "%s", HW_ERR_CAMERA);
 		return -1;
 	}
 	if (args_json && args_json[0] != '\0') {
@@ -50,7 +49,19 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 			return -1;
 		path_item = cJSON_GetObjectItem(root, "path");
 		if (path_item && cJSON_IsString(path_item) && path_item->valuestring[0])
-			output_path = path_item->valuestring;
+			snprintf(path_buf, sizeof(path_buf), "%s", path_item->valuestring);
+		cJSON_Delete(root);
+		root = NULL;
+	}
+	if (path_buf[0] != '\0')
+		output_path = path_buf;
+	if (output_path && !hardware_camera_output_allowed(output_path)) {
+		hw_tools_json_error(result_buf, max_len, "camera: path outside workspace");
+		return -1;
+	}
+	if (!hardware_active_camera_backend() || !hardware_camera_is_available()) {
+		snprintf(result_buf, max_len, "%s", HW_ERR_CAMERA);
+		return -1;
 	}
 	board = hardware_active_board();
 	camera_type = config_hardware_camera_type(g_hw_cfg);
@@ -58,8 +69,6 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 	quality = config_hardware_camera_quality(g_hw_cfg);
 	rc = hardware_camera_capture(board, camera_type, resolution, quality, 0, 0, output_path,
 				     result_path, sizeof(result_path), errbuf, sizeof(errbuf));
-	if (root)
-		cJSON_Delete(root);
 	if (rc != 0) {
 		hw_tools_json_error(result_buf, max_len, errbuf);
 		return -1;
@@ -68,7 +77,7 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 	return 0;
 }
 
-static const tool_t CAMERA_CAPTURE_TOOL = {
+const tool_t HW_TOOLS_CAMERA_CAPTURE = {
 	.name = "camera_capture",
 	.description = "Capture a still JPEG frame using the board camera backend (CSI or USB).",
 	.parameters_json = CAMERA_CAPTURE_PARAMS,
@@ -82,7 +91,7 @@ static const tool_t *const HARDWARE_TOOLS[] = {
 	&HW_TOOLS_I2C_READ,
 	&HW_TOOLS_I2C_WRITE,
 	&HW_TOOLS_I2C_SCAN,
-	&CAMERA_CAPTURE_TOOL,
+	&HW_TOOLS_CAMERA_CAPTURE,
 };
 
 static const size_t HARDWARE_TOOL_COUNT =
@@ -91,6 +100,10 @@ static const size_t HARDWARE_TOOL_COUNT =
 void tool_hardware_set_config(const config_t *cfg)
 {
 	g_hw_cfg = cfg;
+	if (cfg && config_workspace_only(cfg))
+		hardware_camera_set_workspace(config_workspace_path(cfg));
+	else
+		hardware_camera_set_workspace(NULL);
 }
 
 size_t tool_hardware_get_all(const tool_t **out, size_t max_count)

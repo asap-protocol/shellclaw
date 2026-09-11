@@ -49,6 +49,22 @@ int hardware_camera_capture(board_id_t board, const char *camera_type,
 			    int video_index, const char *output_path, char *result_path,
 			    size_t result_pathsz, char *errbuf, size_t errbufsz);
 
+/**
+ * Bind the file-tool workspace root used for caller-supplied capture paths.
+ * NULL or empty disables the check (auto temp files and unit tests).
+ */
+void hardware_camera_set_workspace(const char *workspace);
+
+/**
+ * Return 1 if @p path may be used as a caller-supplied capture output.
+ * Auto temp (NULL/empty) is always allowed. When a workspace is bound,
+ * the path must resolve under that root (same policy as write_file).
+ */
+int hardware_camera_output_allowed(const char *path);
+
+void hardware_camera_set_spawn_timeout_ms_for_test(int ms);
+int hardware_camera_default_spawn_for_test(char *const argv[], char *errbuf, size_t errbufsz);
+
 /** Override spawn for unit tests (NULL restores default). */
 void hardware_camera_set_spawn_for_test(hardware_camera_spawn_fn fn);
 

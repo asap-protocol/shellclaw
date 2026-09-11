@@ -124,6 +124,7 @@ static int setup_mock(void)
 
 static void teardown(void)
 {
+	hardware_camera_set_workspace(NULL);
 	hardware_camera_shutdown();
 	hardware_camera_set_spawn_for_test(NULL);
 }
@@ -185,6 +186,45 @@ static int test_unsafe_output_path_rejected(void)
 				       err, sizeof(err)) == -1);
 	ASSERT(s_spawn_called == 0);
 	teardown();
+	return 0;
+}
+
+static int test_output_path_outside_workspace_rejected(void)
+{
+	char result[256];
+	char err[128];
+	char ws[128];
+
+	ASSERT(test_runner_mkdtemp_path("shellclaw_cam_ws", ws, sizeof(ws)) == 0);
+	hardware_camera_set_workspace(ws);
+	RUN(setup_mock());
+	ASSERT(hardware_camera_capture(BOARD_JETSON_ORIN_NANO, "csi", "640x480", 75, 0, 0,
+				       "/tmp/shellclaw_escape.jpg", result, sizeof(result),
+				       err, sizeof(err)) == -1);
+	ASSERT(strstr(err, "workspace") != NULL);
+	ASSERT(s_spawn_called == 0);
+	teardown();
+	rmdir(ws);
+	return 0;
+}
+
+static int test_output_path_inside_workspace_allowed(void)
+{
+	char result[256];
+	char err[128];
+	char ws[128];
+	char inside[256];
+
+	ASSERT(test_runner_mkdtemp_path("shellclaw_cam_wsok", ws, sizeof(ws)) == 0);
+	snprintf(inside, sizeof(inside), "%s/shot.jpg", ws);
+	hardware_camera_set_workspace(ws);
+	RUN(setup_mock());
+	ASSERT(hardware_camera_capture(BOARD_JETSON_ORIN_NANO, "csi", "640x480", 75, 0, 0,
+				       inside, result, sizeof(result), err,
+				       sizeof(err)) == 0);
+	unlink(inside);
+	teardown();
+	rmdir(ws);
 	return 0;
 }
 
@@ -524,12 +564,26 @@ static int test_caller_supplied_output_not_unlinked_on_error(void)
 	return 0;
 }
 
+static int test_default_spawn_times_out(void)
+{
+	char *argv[] = { "/bin/sleep", "5", NULL };
+	char err[128];
+
+	hardware_camera_set_spawn_timeout_ms_for_test(80);
+	ASSERT(hardware_camera_default_spawn_for_test(argv, err, sizeof(err)) != 0);
+	ASSERT(strstr(err, "timed out") != NULL);
+	hardware_camera_set_spawn_timeout_ms_for_test(0);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_capture_requires_init());
 	RUN(test_stub_board_unavailable());
 	RUN(test_capture_argument_validation());
 	RUN(test_unsafe_output_path_rejected());
+	RUN(test_output_path_outside_workspace_rejected());
+	RUN(test_output_path_inside_workspace_allowed());
 	RUN(test_output_path_traversal_rejected());
 	RUN(test_resolution_injection_rejected());
 	RUN(test_camera_type_injection_rejected());
@@ -545,6 +599,7 @@ int main(void)
 	RUN(test_temp_jpeg_unlinked_on_spawn_failure());
 	RUN(test_temp_jpeg_unlinked_on_invalid_jpeg());
 	RUN(test_caller_supplied_output_not_unlinked_on_error());
+	RUN(test_default_spawn_times_out());
 	printf("All hardware_camera tests passed.\n");
 	return 0;
 }

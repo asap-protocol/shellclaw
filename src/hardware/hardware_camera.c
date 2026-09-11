@@ -6,16 +6,21 @@
 
 #include "hardware/hardware_camera.h"
 #include <errno.h>
+#include <libgen.h>
+#include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CAPS_BUF_SZ 128
 #define ARG_BUF_SZ 64
 #define MIN_JPEG_BYTES 2
+#define HARDWARE_CAMERA_SPAWN_TIMEOUT_MS 15000
 
 typedef enum camera_cli_kind {
 	CAMERA_CLI_NONE = 0,
@@ -25,10 +30,12 @@ typedef enum camera_cli_kind {
 } camera_cli_kind_t;
 
 static int s_camera_ready;
+static char s_workspace[PATH_MAX];
 static hardware_camera_spawn_fn s_test_spawn;
 static char *s_last_argv[HARDWARE_CAMERA_ARGV_MAX];
 static char s_last_argv_storage[HARDWARE_CAMERA_ARGV_MAX][ARG_BUF_SZ];
 static int s_last_argv_count;
+static int s_spawn_timeout_ms = HARDWARE_CAMERA_SPAWN_TIMEOUT_MS;
 
 /* cppcheck-suppress constParameter */
 static void record_argv(char *const argv[])
@@ -81,6 +88,44 @@ static int path_chars_safe(const char *path)
 		return 0;
 	}
 	return 1;
+}
+
+static int resolved_under_workspace(const char *resolved, const char *ws_resolved)
+{
+	size_t ws_len;
+
+	ws_len = strlen(ws_resolved);
+	if (strncmp(resolved, ws_resolved, ws_len) != 0)
+		return 0;
+	if (resolved[ws_len] != '\0' && resolved[ws_len] != '/')
+		return 0;
+	return 1;
+}
+
+static int path_inside_workspace(const char *path)
+{
+	char ws_resolved[PATH_MAX];
+	char resolved[PATH_MAX];
+	char path_copy[PATH_MAX];
+
+	if (s_workspace[0] == '\0' || !path || path[0] == '\0')
+		return 1;
+	if (realpath(s_workspace, ws_resolved) == NULL)
+		return 0;
+	if (realpath(path, resolved) != NULL)
+		return resolved_under_workspace(resolved, ws_resolved);
+	snprintf(path_copy, sizeof(path_copy), "%s", path);
+	for (;;) {
+		char *dir = dirname(path_copy);
+		if (!dir || dir[0] == '\0')
+			break;
+		if (realpath(dir, resolved) != NULL)
+			return resolved_under_workspace(resolved, ws_resolved);
+		if (strcmp(dir, ".") == 0 || strcmp(dir, "/") == 0)
+			break;
+		snprintf(path_copy, sizeof(path_copy), "%s", dir);
+	}
+	return 0;
 }
 
 static int parse_resolution(const char *resolution, unsigned int *w, unsigned int *h,
@@ -170,10 +215,40 @@ static int tool_executable(const char *prog)
 	return access(path, X_OK) == 0;
 }
 
+static int wait_child_timeout(pid_t pid, char *errbuf, size_t errbufsz)
+{
+	int elapsed = 0;
+	int status = 0;
+	const int slice_ms = 20;
+	struct timespec ts;
+
+	while (elapsed < s_spawn_timeout_ms) {
+		pid_t r = waitpid(pid, &status, WNOHANG);
+		if (r == pid) {
+			if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+				set_err(errbuf, errbufsz, HARDWARE_CAMERA_ERR_UNAVAILABLE);
+				return -1;
+			}
+			return 0;
+		}
+		if (r < 0) {
+			set_err(errbuf, errbufsz, HARDWARE_CAMERA_ERR_UNAVAILABLE);
+			return -1;
+		}
+		ts.tv_sec = 0;
+		ts.tv_nsec = (long)slice_ms * 1000000L;
+		nanosleep(&ts, NULL);
+		elapsed += slice_ms;
+	}
+	kill(pid, SIGKILL);
+	(void)waitpid(pid, &status, 0);
+	set_err(errbuf, errbufsz, "camera: capture timed out");
+	return -1;
+}
+
 static int default_spawn(char *const argv[], char *errbuf, size_t errbufsz)
 {
 	pid_t pid;
-	int status;
 	if (!argv || !argv[0]) {
 		set_err(errbuf, errbufsz, HARDWARE_CAMERA_ERR_UNAVAILABLE);
 		return -1;
@@ -187,15 +262,17 @@ static int default_spawn(char *const argv[], char *errbuf, size_t errbufsz)
 		execvp(argv[0], argv);
 		_exit(127);
 	}
-	if (waitpid(pid, &status, 0) < 0) {
-		set_err(errbuf, errbufsz, HARDWARE_CAMERA_ERR_UNAVAILABLE);
-		return -1;
-	}
-	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-		set_err(errbuf, errbufsz, HARDWARE_CAMERA_ERR_UNAVAILABLE);
-		return -1;
-	}
-	return 0;
+	return wait_child_timeout(pid, errbuf, errbufsz);
+}
+
+void hardware_camera_set_spawn_timeout_ms_for_test(int ms)
+{
+	s_spawn_timeout_ms = (ms > 0) ? ms : HARDWARE_CAMERA_SPAWN_TIMEOUT_MS;
+}
+
+int hardware_camera_default_spawn_for_test(char *const argv[], char *errbuf, size_t errbufsz)
+{
+	return default_spawn(argv, errbuf, errbufsz);
 }
 
 static int run_cli(char *const argv[], char *errbuf, size_t errbufsz)
@@ -334,10 +411,28 @@ int hardware_camera_init(void)
 	return 0;
 }
 
+void hardware_camera_set_workspace(const char *workspace)
+{
+	if (!workspace || workspace[0] == '\0') {
+		s_workspace[0] = '\0';
+		return;
+	}
+	snprintf(s_workspace, sizeof(s_workspace), "%s", workspace);
+}
+
+int hardware_camera_output_allowed(const char *path)
+{
+	if (!path || path[0] == '\0')
+		return 1;
+	return path_inside_workspace(path);
+}
+
 void hardware_camera_shutdown(void)
 {
 	s_test_spawn = NULL;
 	s_camera_ready = 0;
+	s_workspace[0] = '\0';
+	s_spawn_timeout_ms = HARDWARE_CAMERA_SPAWN_TIMEOUT_MS;
 	s_last_argv_count = 0;
 	memset(s_last_argv, 0, sizeof(s_last_argv));
 }
@@ -407,6 +502,10 @@ static int prepare_capture_output_path(const char *output_path, char *out_path,
 	if (output_path && output_path[0] != '\0') {
 		if (!path_chars_safe(output_path)) {
 			set_err(errbuf, errbufsz, "camera: unsafe output path");
+			return -1;
+		}
+		if (!path_inside_workspace(output_path)) {
+			set_err(errbuf, errbufsz, "camera: path outside workspace");
 			return -1;
 		}
 		snprintf(out_path, out_pathsz, "%s", output_path);

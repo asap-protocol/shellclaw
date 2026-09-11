@@ -19,6 +19,7 @@ extern const tool_t HW_TOOLS_GPIO_WRITE;
 extern const tool_t HW_TOOLS_GPIO_MODE;
 extern const tool_t HW_TOOLS_I2C_READ;
 extern const tool_t HW_TOOLS_I2C_WRITE;
+extern const tool_t HW_TOOLS_CAMERA_CAPTURE;
 
 /* Stubs so this test links without the full tool dependency graph. */
 const tool_t *tool_shell_get(void) { return NULL; }
@@ -264,6 +265,31 @@ static int test_gpio_write_rejects_non_binary_value(void)
 	return 0;
 }
 
+static int test_camera_capture_rejects_path_outside_workspace(void)
+{
+	char ws[128];
+	char toml[512];
+	config_t *cfg = NULL;
+	char result[256];
+	int rc;
+
+	ASSERT(test_runner_mkdtemp_path("shellclaw_hw_cam_ws", ws, sizeof(ws)) == 0);
+	snprintf(toml, sizeof(toml),
+		 "[agent]\nmodel = \"test\"\n\n[hardware]\nenabled = true\nboard = \"rpi\"\n\n"
+		 "[sandbox]\nworkspace_only = true\nworkspace_path = \"%s\"\n",
+		 ws);
+	RUN(load_cfg(toml, &cfg));
+	hardware_init(cfg);
+	tool_hardware_set_config(cfg);
+	rc = HW_TOOLS_CAMERA_CAPTURE.execute("{\"path\":\"/tmp/shellclaw_escape.jpg\"}",
+					     result, sizeof(result));
+	ASSERT(rc == -1);
+	ASSERT(strstr(result, "workspace") != NULL);
+	config_free(cfg);
+	rmdir(ws);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_disabled_returns_error());
@@ -272,6 +298,7 @@ int main(void)
 	RUN(test_gpio_mode_rejects_invalid_mode());
 	RUN(test_gpio_mode_executes_json());
 	RUN(test_gpio_write_rejects_non_binary_value());
+	RUN(test_camera_capture_rejects_path_outside_workspace());
 	RUN(test_i2c_read_success_with_mock());
 	RUN(test_i2c_invalid_addr());
 	RUN(test_i2c_default_bus_from_board());
