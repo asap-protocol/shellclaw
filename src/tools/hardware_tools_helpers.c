@@ -133,6 +133,10 @@ int hw_tools_resolve_i2c_bus(cJSON *root, int *bus_out, char *result_buf, size_t
 			snprintf(result_buf, max_len, "{\"error\":\"missing or invalid bus\"}");
 			return -1;
 		}
+		if (item->valueint < HW_I2C_BUS_MIN || item->valueint > HW_I2C_BUS_MAX) {
+			snprintf(result_buf, max_len, "{\"error\":\"bus must be 0-255\"}");
+			return -1;
+		}
 		*bus_out = item->valueint;
 		return 0;
 	}

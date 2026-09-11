@@ -13,7 +13,8 @@
 
 static const char I2C_READ_PARAMS[] =
 	"{\"type\":\"object\",\"properties\":{\"bus\":{\"type\":\"integer\","
-	"\"description\":\"I2C bus number (default from config or board)\",\"minimum\":0},"
+	"\"description\":\"I2C bus number (default from config or board)\","
+	"\"minimum\":0,\"maximum\":255},"
 	"\"addr\":{\"type\":\"integer\",\"description\":\"7-bit I2C address\","
 	"\"minimum\":3,\"maximum\":119},\"reg\":{\"type\":\"integer\","
 	"\"description\":\"Register address\",\"minimum\":0,\"maximum\":255},"
@@ -22,7 +23,8 @@ static const char I2C_READ_PARAMS[] =
 
 static const char I2C_WRITE_PARAMS[] =
 	"{\"type\":\"object\",\"properties\":{\"bus\":{\"type\":\"integer\","
-	"\"description\":\"I2C bus number (default from config or board)\",\"minimum\":0},"
+	"\"description\":\"I2C bus number (default from config or board)\","
+	"\"minimum\":0,\"maximum\":255},"
 	"\"addr\":{\"type\":\"integer\",\"minimum\":3,\"maximum\":119},"
 	"\"reg\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},\"data\":{"
 	"\"type\":\"array\",\"items\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255},"
@@ -32,7 +34,7 @@ static const char I2C_WRITE_PARAMS[] =
 static const char I2C_SCAN_PARAMS[] =
 	"{\"type\":\"object\",\"properties\":{\"bus\":{\"type\":\"integer\","
 	"\"description\":\"I2C bus number to probe (default from config or board)\","
-	"\"minimum\":0}}}";
+	"\"minimum\":0,\"maximum\":255}}}";
 
 static int i2c_read_exec(const char *args_json, char *result_buf, size_t max_len)
 {

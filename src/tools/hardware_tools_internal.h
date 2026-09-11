@@ -17,6 +17,8 @@ extern const config_t *g_hw_cfg;
 #define HW_ERR_GPIO     "{\"error\":\"GPIO not available (libgpiod or pin table missing)\"}"
 #define HW_ERR_I2C      "{\"error\":\"I2C backend not initialized\"}"
 #define HW_ERR_CAMERA   "{\"error\":\"camera backend not initialized\"}"
+#define HW_I2C_BUS_MIN 0
+#define HW_I2C_BUS_MAX 255
 
 int hw_tools_enabled(void);
 

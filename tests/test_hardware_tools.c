@@ -209,6 +209,30 @@ static int test_i2c_default_bus_from_board(void)
 	return 0;
 }
 
+static int test_i2c_rejects_out_of_range_bus(void)
+{
+	config_t *cfg = NULL;
+	char result[256];
+	int rc;
+
+	RUN(load_cfg("[agent]\nmodel = \"test\"\n\n[hardware]\nenabled = true\nboard = \"jetson\"\n",
+		     &cfg));
+	hardware_init(cfg);
+	tool_hardware_set_config(cfg);
+	hardware_i2c_set_syscalls_for_test(&s_mock_ops);
+	rc = HW_TOOLS_I2C_READ.execute("{\"bus\":256,\"addr\":16,\"reg\":0,\"len\":1}", result,
+				       sizeof(result));
+	ASSERT(rc == -1);
+	ASSERT(strstr(result, "\"error\":\"bus must be 0-255\"") != NULL);
+	rc = HW_TOOLS_I2C_READ.execute("{\"bus\":-1,\"addr\":16,\"reg\":0,\"len\":1}", result,
+				       sizeof(result));
+	ASSERT(rc == -1);
+	ASSERT(strstr(result, "\"error\":\"bus must be 0-255\"") != NULL);
+	config_free(cfg);
+	hardware_i2c_set_syscalls_for_test(NULL);
+	return 0;
+}
+
 static int test_gpio_mode_rejects_invalid_mode(void)
 {
 	config_t *cfg = NULL;
@@ -302,6 +326,7 @@ int main(void)
 	RUN(test_i2c_read_success_with_mock());
 	RUN(test_i2c_invalid_addr());
 	RUN(test_i2c_default_bus_from_board());
+	RUN(test_i2c_rejects_out_of_range_bus());
 	printf("test_hardware_tools: all tests passed\n");
 	return 0;
 }
