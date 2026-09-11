@@ -14,7 +14,9 @@
 #         (upstream name differs; same Q4_K_M quant — save as Phi-3-mini-4k-instruct-Q4_K_M.gguf)
 #   tinyllama: same TheBloke repo via `huggingface-cli download TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf`
 #
-# Pin EXPECTED_SHA256 from the HF file metadata page when enabling supply-chain checks on device.
+# Official blob SHA256 is not vendored here: Hugging Face file hashes can change
+# with repo revisions. Do not invent a digest. For production installs set
+# EXPECTED_SHA256, or PHI3_SHA256 / TINYLLAMA_SHA256, from the HF file metadata page.
 #
 # Usage:
 #   ./scripts/download_model.sh <model-key>
@@ -26,6 +28,8 @@
 # Environment (optional):
 #   MODEL_DIR          — destination directory (default: /var/lib/shellclaw/models)
 #   EXPECTED_SHA256    — if set, verify on skip-if-present and after download
+#   PHI3_SHA256        — default EXPECTED_SHA256 for phi3 / phi-3-mini (optional)
+#   TINYLLAMA_SHA256   — default EXPECTED_SHA256 for tinyllama (optional)
 #   SKIP_DOWNLOAD=1    — never fetch; only verify or skip existing files (tests)
 #   DOWNLOAD_CMD       — override downloader: receives URL and temp path (tests)
 #
@@ -130,10 +134,16 @@ resolve_model() {
 		phi3 | phi-3-mini)
 			MODEL_FILENAME="${PHI3_FILENAME}"
 			MODEL_URL="${PHI3_URL}"
+			if [[ -z "${EXPECTED_SHA256:-}" && -n "${PHI3_SHA256:-}" ]]; then
+				EXPECTED_SHA256="${PHI3_SHA256}"
+			fi
 			;;
 		tinyllama)
 			MODEL_FILENAME="${TINYLLAMA_FILENAME}"
 			MODEL_URL="${TINYLLAMA_URL}"
+			if [[ -z "${EXPECTED_SHA256:-}" && -n "${TINYLLAMA_SHA256:-}" ]]; then
+				EXPECTED_SHA256="${TINYLLAMA_SHA256}"
+			fi
 			;;
 		'')
 			die "usage: ${0} <model-key>  (phi3 | phi-3-mini | tinyllama)"

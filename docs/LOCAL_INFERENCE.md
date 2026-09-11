@@ -114,7 +114,7 @@ systemctl --user restart llama-server.service
 
 Destination: `/var/lib/shellclaw/models/` (override with `MODEL_DIR`).
 
-Optional supply-chain check: set `EXPECTED_SHA256` from Hugging Face file metadata.
+Optional supply-chain check: set `EXPECTED_SHA256` (or `PHI3_SHA256` / `TINYLLAMA_SHA256`) from the Hugging Face file metadata page. This repo does not vendor a default digest.
 
 ---
 
