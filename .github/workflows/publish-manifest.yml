@@ -106,17 +106,33 @@ jobs:
         env:
           CI: true
 
+      - name: Restore publisher signing key
+        env:
+          MANIFEST_PRIV_B64: ${{ secrets.SHELLCLAW_MANIFEST_ED25519_PRIV }}
+          MANIFEST_PUB_B64: ${{ secrets.SHELLCLAW_MANIFEST_ED25519_PUB }}
+        run: |
+          if [ -z "${MANIFEST_PRIV_B64}" ] || [ -z "${MANIFEST_PUB_B64}" ]; then
+            echo "Tag publish requires secrets SHELLCLAW_MANIFEST_ED25519_PRIV and SHELLCLAW_MANIFEST_ED25519_PUB (base64 of ed25519.priv / ed25519.pub). Do not mint a fresh key per tag."
+            exit 1
+          fi
+          export SHELLCLAW_HOME="${RUNNER_TEMP}/shellclaw-home"
+          mkdir -p "${SHELLCLAW_HOME}/keys"
+          echo "${MANIFEST_PRIV_B64}" | base64 -d > "${SHELLCLAW_HOME}/keys/ed25519.priv"
+          echo "${MANIFEST_PUB_B64}" | base64 -d > "${SHELLCLAW_HOME}/keys/ed25519.pub"
+          chmod 0600 "${SHELLCLAW_HOME}/keys/ed25519.priv" "${SHELLCLAW_HOME}/keys/ed25519.pub"
+          echo "SHELLCLAW_HOME=${SHELLCLAW_HOME}" >> "${GITHUB_ENV}"
+
       - name: Dump live SignedManifest
         run: |
           chmod +x scripts/dump_manifest.sh
-          mkdir -p docs
-          ./scripts/dump_manifest.sh -o docs/manifest.json
-          test -s docs/manifest.json
-          : > docs/.nojekyll
+          mkdir -p pages-dist
+          ./scripts/dump_manifest.sh -o pages-dist/manifest.json
+          test -s pages-dist/manifest.json
+          : > pages-dist/.nojekyll
 
       - name: Validate manifest JSON (optional)
         run: |
-          python3 -c "import json; json.load(open('docs/manifest.json'))"
+          python3 -c "import json; json.load(open('pages-dist/manifest.json'))"
           pip3 install --quiet 'asap-protocol==2.5.0'
           # Validate the inner manifest + upstream signature; hard-fail on rejection
           # (the prior `|| echo` / `if ...; then` patterns masked failures).
@@ -126,7 +142,7 @@ jobs:
           from asap.models.entities import Manifest
           from asap.crypto.signing import verify_manifest
           from asap.crypto.models import SignedManifest
-          with open("docs/manifest.json") as f:
+          with open("pages-dist/manifest.json") as f:
               data = json.load(f)
           Manifest.model_validate(data["manifest"])
           print("inner manifest: Pydantic OK")
@@ -142,7 +158,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: pages-dist
 
       - name: Deploy to GitHub Pages
         id: deployment
