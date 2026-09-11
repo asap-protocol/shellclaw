@@ -2,6 +2,7 @@
  * @file hardware_camera.c
  * @brief Camera capture via fixed-argv CLI tools (no shell interpolation).
  */
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "hardware/hardware_camera.h"

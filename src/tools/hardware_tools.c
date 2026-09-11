@@ -28,7 +28,6 @@ static const char CAMERA_CAPTURE_PARAMS[] =
 static int camera_capture_exec(const char *args_json, char *result_buf, size_t max_len)
 {
 	cJSON *root = NULL;
-	cJSON *path_item;
 	char path_buf[PATH_MAX];
 	const char *output_path = NULL;
 	const char *camera_type;
@@ -45,6 +44,7 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 		return -1;
 	}
 	if (args_json && args_json[0] != '\0') {
+		cJSON *path_item;
 		if (hw_tools_parse_root(args_json, &root, result_buf, max_len) != 0)
 			return -1;
 		path_item = cJSON_GetObjectItem(root, "path");
