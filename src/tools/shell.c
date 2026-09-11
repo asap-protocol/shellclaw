@@ -19,12 +19,14 @@
 #include "sandbox/sandbox.h"
 #include "sandbox/allowlist.h"
 #include "cJSON.h"
+#include <errno.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_TIMEOUT_SEC 60
@@ -56,6 +58,49 @@ static int fallback_is_blocked(const char *cmd)
 
 static const config_t *g_shell_cfg;
 
+static void kill_command_tree(pid_t pid)
+{
+	if (kill(-pid, SIGKILL) != 0)
+		(void)kill(pid, SIGKILL);
+}
+
+/* Kill leftover children after drain (timeout or output cap), matching sandbox_exec. */
+static int reap_running_child(pid_t pid)
+{
+	int status = 0;
+	int wr = waitpid(pid, &status, WNOHANG);
+	int i;
+	struct timespec ts;
+
+	if (wr != 0)
+		return 0;
+	kill_command_tree(pid);
+	for (i = 0; i < 40; i++) {
+		wr = waitpid(pid, &status, WNOHANG);
+		if (wr != 0)
+			return 1;
+		ts.tv_sec = 0;
+		ts.tv_nsec = 50 * 1000 * 1000;
+		(void)nanosleep(&ts, NULL);
+	}
+	(void)waitpid(pid, &status, 0);
+	return 1;
+}
+
+static void append_unsandboxed_output(char *result_buf, size_t max_len, size_t *total,
+                                      const char *chunk, size_t n)
+{
+	size_t add = n;
+
+	if (*total + add >= max_len - 1)
+		add = max_len - 1 - *total;
+	if (add == 0)
+		return;
+	memcpy(result_buf + *total, chunk, add);
+	*total += add;
+	result_buf[*total] = '\0';
+}
+
 /* ------------------------------------------------------------------ */
 /* Unsandboxed execution (fork + poll + waitpid)                        */
 /* ------------------------------------------------------------------ */
@@ -68,7 +113,6 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 	size_t total = 0;
 	int timed_out = 0;
 	int elapsed_ms = 0;
-	int status;
 	char buf[256];
 	if (pipe(pipefd) != 0) {
 		snprintf(result_buf, max_len, "{\"error\":\"pipe failed\"}");
@@ -86,9 +130,11 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 		dup2(pipefd[1], STDOUT_FILENO);
 		dup2(pipefd[1], STDERR_FILENO);
 		close(pipefd[1]);
+		(void)setpgid(0, 0);
 		execl("/bin/sh", "sh", "-c", command, (char *)NULL);
 		_exit(127);
 	}
+	(void)setpgid(pid, pid);
 	close(pipefd[1]);
 	result_buf[0] = '\0';
 	while (total < max_len - 1 && elapsed_ms < timeout_sec * 1000) {
@@ -102,28 +148,27 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 		rem = timeout_sec * 1000 - elapsed_ms;
 		if (rem > 5000) rem = 5000;
 		r = poll(&pfd, 1, rem);
-		if (r < 0) break;
+		if (r < 0) {
+			if (errno == EINTR) continue;
+			break;
+		}
 		if (r == 0) {
 			elapsed_ms += rem;
 			if (elapsed_ms >= timeout_sec * 1000) {
 				timed_out = 1;
-				kill(pid, SIGKILL);
+				kill_command_tree(pid);
 				break;
 			}
 			continue;
 		}
-		n = read(pipefd[0], buf, sizeof(buf) - 1);
+		n = read(pipefd[0], buf, sizeof(buf));
 		if (n <= 0) break;
-		buf[n] = '\0';
-		{
-			size_t add = (size_t)n;
-			if (total + add >= max_len - 1) add = max_len - 1 - total;
-			memcpy(result_buf + total, buf, add + 1);
-			total += add;
-		}
+		append_unsandboxed_output(result_buf, max_len, &total, buf, (size_t)n);
 	}
+	result_buf[total] = '\0';
 	close(pipefd[0]);
-	waitpid(pid, &status, 0);
+	if (reap_running_child(pid))
+		timed_out = 1;
 	if (timed_out && total < max_len - 32)
 		snprintf(result_buf + total, max_len - total, "\n[Command timed out]");
 	return 0;
