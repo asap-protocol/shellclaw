@@ -13,6 +13,7 @@ void bootstrap_add_tool_for_test(const tool_t *tool);
 #include "core/config.h"
 #include "core/dispatch.h"
 #include "core/memory.h"
+#include "core/version.h"
 #include "providers/provider.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -193,7 +194,7 @@ static int test_status_returns_version(void)
 	msg.text = "/status";
 	ASSERT(handle_message(&mock_channel, &msg) == 0);
 	ASSERT(g_send_calls == 1);
-	ASSERT(strstr(g_last_text, "ShellClaw 0.2.0") != NULL);
+	ASSERT(strstr(g_last_text, "ShellClaw " SHELLCLAW_RELEASE_VERSION) != NULL);
 	ASSERT(strstr(g_last_text, "agent ready") != NULL);
 	return 0;
 }

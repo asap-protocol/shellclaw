@@ -22,6 +22,7 @@
 #include "core/daemon.h"
 #include "core/dispatch.h"
 #include "core/reload.h"
+#include "core/version.h"
 #include "channels/channel.h"
 #include "hardware/board_detect.h"
 #include "providers/provider.h"
@@ -32,7 +33,6 @@
 #include <string.h>
 #include <time.h>
 
-#define VERSION "0.2.0"
 #define DEFAULT_CONFIG_PATH "~/.shellclaw/config.toml"
 #define POLL_TIMEOUT_MS 1000
 
@@ -112,7 +112,7 @@ static int parse_args(int argc, char **argv, const char **config_path_out)
 	daemon_set_want(0);
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--version") == 0) {
-			printf("%s\n", VERSION);
+			printf("%s\n", SHELLCLAW_RELEASE_VERSION);
 			exit(0);
 		}
 		if (strcmp(argv[i], "--detect-board") == 0) {
