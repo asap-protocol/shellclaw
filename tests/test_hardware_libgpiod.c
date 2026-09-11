@@ -161,6 +161,45 @@ static int test_mockup_read_write(void)
 	return 0;
 }
 
+static int test_gpio_write_holds_line_request(void)
+{
+	char errbuf[128];
+
+	hardware_libgpiod_enable_fake_lines_for_test(1);
+	hardware_libgpiod_set_pin_table_for_test(&s_test_table);
+	ASSERT(hardware_libgpiod_init(&s_test_table) == 0);
+	ASSERT(hardware_gpio_write(13, 1, errbuf, sizeof(errbuf)) == 0);
+	ASSERT(hardware_libgpiod_held_count_for_test() == 1);
+	ASSERT(hardware_libgpiod_release_count_for_test() == 0);
+	ASSERT(hardware_gpio_write(13, 0, errbuf, sizeof(errbuf)) == 0);
+	ASSERT(hardware_libgpiod_held_count_for_test() == 1);
+	ASSERT(hardware_libgpiod_release_count_for_test() == 0);
+	ASSERT(hardware_gpio_mode(13, "input", errbuf, sizeof(errbuf)) == 0);
+	ASSERT(hardware_libgpiod_held_count_for_test() == 0);
+	ASSERT(hardware_libgpiod_release_count_for_test() >= 1);
+	hardware_libgpiod_shutdown();
+	hardware_libgpiod_enable_fake_lines_for_test(0);
+	hardware_libgpiod_set_pin_table_for_test(NULL);
+	return 0;
+}
+
+static int test_gpio_mode_output_holds_until_shutdown(void)
+{
+	char errbuf[128];
+
+	hardware_libgpiod_enable_fake_lines_for_test(1);
+	hardware_libgpiod_set_pin_table_for_test(&s_test_table);
+	ASSERT(hardware_libgpiod_init(&s_test_table) == 0);
+	ASSERT(hardware_gpio_mode(13, "output", errbuf, sizeof(errbuf)) == 0);
+	ASSERT(hardware_libgpiod_held_count_for_test() == 1);
+	ASSERT(hardware_libgpiod_release_count_for_test() == 0);
+	hardware_libgpiod_shutdown();
+	ASSERT(hardware_libgpiod_held_count_for_test() == 0);
+	hardware_libgpiod_enable_fake_lines_for_test(0);
+	hardware_libgpiod_set_pin_table_for_test(NULL);
+	return 0;
+}
+
 #endif /* HAVE_LIBGPIOD */
 
 int main(void)
@@ -170,6 +209,8 @@ int main(void)
 	RUN(test_gpio_requires_init());
 	RUN(test_sfio_rejection());
 	RUN(test_gpio_validation_and_non_sfio_paths());
+	RUN(test_gpio_write_holds_line_request());
+	RUN(test_gpio_mode_output_holds_until_shutdown());
 	RUN(test_mockup_read_write());
 	RUN(test_mockup_snapshot_output_readonly());
 #endif

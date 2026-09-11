@@ -90,6 +90,14 @@ void hardware_libgpiod_snapshot_end(hardware_libgpiod_snapshot_ctx_t *ctx);
  */
 void hardware_libgpiod_set_pin_table_for_test(const hardware_pin_table_t *table);
 
+/**
+ * Test seam: succeed line request/set/get without a gpiochip, and count releases.
+ * Only linked into test_hardware_libgpiod.
+ */
+void hardware_libgpiod_enable_fake_lines_for_test(int enable);
+int hardware_libgpiod_release_count_for_test(void);
+int hardware_libgpiod_held_count_for_test(void);
+
 #ifdef __cplusplus
 }
 #endif

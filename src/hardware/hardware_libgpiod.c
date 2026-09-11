@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <gpiod.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,9 +20,44 @@ static const hardware_pin_table_t *s_test_pin_table;
 static int s_libgpiod_ready;
 static pthread_mutex_t s_gpio_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+typedef struct gpio_held_line {
+	struct gpiod_line_request *request;
+	unsigned int offset;
+	int as_output;
+} gpio_held_line_t;
+
+static gpio_held_line_t s_held[HARDWARE_HEADER_PIN_COUNT + 1];
+static int s_fake_lines;
+static int s_release_calls;
+static uintptr_t s_next_fake = 1;
+
 void hardware_libgpiod_set_pin_table_for_test(const hardware_pin_table_t *table)
 {
 	s_test_pin_table = table;
+}
+
+void hardware_libgpiod_enable_fake_lines_for_test(int enable)
+{
+	s_fake_lines = enable ? 1 : 0;
+	s_release_calls = 0;
+	s_next_fake = 1;
+}
+
+int hardware_libgpiod_release_count_for_test(void)
+{
+	return s_release_calls;
+}
+
+int hardware_libgpiod_held_count_for_test(void)
+{
+	int pin;
+	int n = 0;
+
+	for (pin = 1; pin <= HARDWARE_HEADER_PIN_COUNT; pin++) {
+		if (s_held[pin].request)
+			n++;
+	}
+	return n;
 }
 
 static const hardware_pin_table_t *active_pin_table(void)
@@ -149,6 +185,8 @@ static struct gpiod_line_request *request_line(const hardware_pin_entry_t *entry
 	struct gpiod_chip *chip = NULL;
 	struct gpiod_line_request *request = NULL;
 
+	if (s_fake_lines)
+		return (struct gpiod_line_request *)(uintptr_t)s_next_fake++;
 	if (chip_path_for_num(entry->gpiochip_num, chip_path, sizeof(chip_path)) != 0) {
 		if (errbuf && errbufsz > 0)
 			snprintf(errbuf, errbufsz, "gpio: chip path too long for gpiochip%u",
@@ -172,8 +210,59 @@ static struct gpiod_line_request *request_line(const hardware_pin_entry_t *entry
 
 static void release_request(struct gpiod_line_request *request)
 {
-	if (request)
-		gpiod_line_request_release(request);
+	if (!request)
+		return;
+	if (s_fake_lines) {
+		s_release_calls++;
+		return;
+	}
+	gpiod_line_request_release(request);
+}
+
+static int line_set_value(struct gpiod_line_request *request, unsigned int offset,
+			  enum gpiod_line_value val)
+{
+	if (s_fake_lines)
+		return 0;
+	return gpiod_line_request_set_value(request, offset, val);
+}
+
+static enum gpiod_line_value line_get_value(struct gpiod_line_request *request,
+					    unsigned int offset)
+{
+	if (s_fake_lines)
+		return GPIOD_LINE_VALUE_ACTIVE;
+	return gpiod_line_request_get_value(request, offset);
+}
+
+static void held_clear_pin(int pin)
+{
+	if (pin < 1 || pin > HARDWARE_HEADER_PIN_COUNT)
+		return;
+	if (!s_held[pin].request)
+		return;
+	release_request(s_held[pin].request);
+	s_held[pin].request = NULL;
+	s_held[pin].offset = 0;
+	s_held[pin].as_output = 0;
+}
+
+static void held_clear_all(void)
+{
+	int pin;
+
+	for (pin = 1; pin <= HARDWARE_HEADER_PIN_COUNT; pin++)
+		held_clear_pin(pin);
+}
+
+static void held_keep(int pin, struct gpiod_line_request *request, unsigned int offset,
+		       int as_output)
+{
+	if (pin < 1 || pin > HARDWARE_HEADER_PIN_COUNT)
+		return;
+	s_held[pin].request = request;
+	s_held[pin].offset = offset;
+	s_held[pin].as_output = as_output;
 }
 
 static int line_value_to_int(enum gpiod_line_value val)
@@ -221,6 +310,7 @@ int hardware_libgpiod_init(const hardware_pin_table_t *table)
 
 void hardware_libgpiod_shutdown(void)
 {
+	held_clear_all();
 	s_pin_table = NULL;
 	s_test_pin_table = NULL;
 	s_libgpiod_ready = 0;
@@ -334,10 +424,22 @@ int hardware_gpio_read(int pin, int *value_out, char *errbuf, size_t errbufsz)
 	if (reject_sfio(entry, pin, errbuf, errbufsz) != 0)
 		return -1;
 	pthread_mutex_lock(&s_gpio_mutex);
+	if (s_held[pin].request && s_held[pin].as_output) {
+		val = line_get_value(s_held[pin].request, s_held[pin].offset);
+		if (val == GPIOD_LINE_VALUE_ERROR) {
+			if (errbuf && errbufsz > 0)
+				snprintf(errbuf, errbufsz, "gpio: read pin %d failed: %s",
+					 pin, strerror(errno));
+			goto done;
+		}
+		*value_out = line_value_to_int(val);
+		ret = 0;
+		goto done;
+	}
 	request = request_line(entry, 0, GPIOD_LINE_VALUE_INACTIVE, errbuf, errbufsz);
 	if (!request)
 		goto done;
-	val = gpiod_line_request_get_value(request, entry->line_num);
+	val = line_get_value(request, entry->line_num);
 	if (val == GPIOD_LINE_VALUE_ERROR) {
 		if (errbuf && errbufsz > 0)
 			snprintf(errbuf, errbufsz, "gpio: read pin %d failed: %s",
@@ -369,18 +471,30 @@ int hardware_gpio_write(int pin, int value, char *errbuf, size_t errbufsz)
 	if (reject_sfio(entry, pin, errbuf, errbufsz) != 0)
 		return -1;
 	pthread_mutex_lock(&s_gpio_mutex);
+	if (s_held[pin].request && s_held[pin].as_output) {
+		if (line_set_value(s_held[pin].request, s_held[pin].offset, out_val) != 0) {
+			if (errbuf && errbufsz > 0)
+				snprintf(errbuf, errbufsz, "gpio: write pin %d failed: %s",
+					 pin, strerror(errno));
+			goto done;
+		}
+		ret = 0;
+		goto done;
+	}
+	held_clear_pin(pin);
 	request = request_line(entry, 1, out_val, errbuf, errbufsz);
 	if (!request)
 		goto done;
-	if (gpiod_line_request_set_value(request, entry->line_num, out_val) != 0) {
+	if (line_set_value(request, entry->line_num, out_val) != 0) {
 		if (errbuf && errbufsz > 0)
 			snprintf(errbuf, errbufsz, "gpio: write pin %d failed: %s",
 				 pin, strerror(errno));
+		release_request(request);
 		goto done;
 	}
+	held_keep(pin, request, entry->line_num, 1);
 	ret = 0;
 done:
-	release_request(request);
 	pthread_mutex_unlock(&s_gpio_mutex);
 	return ret;
 }
@@ -417,12 +531,16 @@ int hardware_gpio_mode(int pin, const char *mode, char *errbuf, size_t errbufsz)
 	if (reject_sfio(entry, pin, errbuf, errbufsz) != 0)
 		return -1;
 	pthread_mutex_lock(&s_gpio_mutex);
+	held_clear_pin(pin);
 	request = request_line(entry, as_output, GPIOD_LINE_VALUE_INACTIVE, errbuf, errbufsz);
 	if (!request)
 		goto done;
+	if (as_output)
+		held_keep(pin, request, entry->line_num, 1);
+	else
+		release_request(request);
 	ret = 0;
 done:
-	release_request(request);
 	pthread_mutex_unlock(&s_gpio_mutex);
 	return ret;
 }
