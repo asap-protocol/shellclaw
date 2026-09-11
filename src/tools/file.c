@@ -10,6 +10,7 @@
 #include "core/config.h"
 #include "cJSON.h"
 #include <dirent.h>
+#include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
 #include <stdio.h>
@@ -95,6 +96,71 @@ static int file_read(const char *path, char *result_buf, size_t max_len)
 	return 0;
 }
 
+static void discard_file_tmp(int fd, char *tmp_path)
+{
+	if (fd >= 0)
+		(void)close(fd);
+	if (tmp_path) {
+		unlink(tmp_path);
+		free(tmp_path);
+	}
+}
+
+static int write_all(int fd, const char *buf, size_t len)
+{
+	size_t off = 0;
+
+	while (off < len) {
+		ssize_t n = write(fd, buf + off, len - off);
+		if (n <= 0)
+			return -1;
+		off += (size_t)n;
+	}
+	return 0;
+}
+
+/*
+ * Replace the target via temp+rename so fopen("w") cannot wipe an existing
+ * workspace file before the new bytes are fully on disk (ENOSPC / EFBIG).
+ */
+static int write_file_atomic(const char *path, const char *content)
+{
+	size_t path_len;
+	char *tmp_path;
+	int fd;
+
+	if (!path || !content)
+		return -1;
+	path_len = strlen(path);
+	tmp_path = malloc(path_len + 8);
+	if (!tmp_path)
+		return -1;
+	snprintf(tmp_path, path_len + 8, "%s.tmp", path);
+	fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (fd < 0) {
+		free(tmp_path);
+		return -1;
+	}
+	if (write_all(fd, content, strlen(content)) != 0) {
+		discard_file_tmp(fd, tmp_path);
+		return -1;
+	}
+	if (fsync(fd) != 0) {
+		discard_file_tmp(fd, tmp_path);
+		return -1;
+	}
+	if (close(fd) != 0) {
+		discard_file_tmp(-1, tmp_path);
+		return -1;
+	}
+	if (rename(tmp_path, path) != 0) {
+		discard_file_tmp(-1, tmp_path);
+		return -1;
+	}
+	free(tmp_path);
+	return 0;
+}
+
 static int file_write(const char *path, const char *content, char *result_buf, size_t max_len)
 {
 	char resolved[PATH_MAX];
@@ -124,20 +190,10 @@ static int file_write(const char *path, const char *content, char *result_buf, s
 			memcpy(safe_path + res_len + 1, base, base_len + 1);
 		}
 	}
-	FILE *f = fopen(safe_path, "w");
-	if (!f) {
-		snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
+	if (write_file_atomic(safe_path, content ? content : "") != 0) {
+		snprintf(result_buf, max_len, "{\"error\":\"write failed\"}");
 		return -1;
 	}
-	if (content) {
-		size_t len = strlen(content);
-		if (fwrite(content, 1, len, f) != len) {
-			fclose(f);
-			snprintf(result_buf, max_len, "{\"error\":\"write failed\"}");
-			return -1;
-		}
-	}
-	fclose(f);
 	snprintf(result_buf, max_len, "{\"status\":\"ok\"}");
 	return 0;
 }

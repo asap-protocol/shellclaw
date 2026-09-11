@@ -15,6 +15,8 @@
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -196,6 +198,80 @@ static void test_symlink_escape_rejected(void)
 	rmdir(tmpdir);
 }
 
+/*
+ * file_write used fopen("w"), which truncates before the new bytes are
+ * durable. ENOSPC/EFBIG then destroyed the live workspace file. Atomic
+ * temp+rename must keep the original contents when the write fails.
+ */
+static void test_file_write_failure_preserves_existing(void)
+{
+	char tmpdir[PATH_MAX];
+	char notes_path[PATH_MAX];
+	char config_path[PATH_MAX];
+	char args[PATH_MAX + 640];
+	char buf[512];
+	char oversized[512];
+	struct rlimit old_lim;
+	struct rlimit new_lim;
+	config_t *cfg;
+	const tool_t *t;
+	int write_ret;
+	size_t i;
+
+	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_fsize_%d", (int)getpid());
+	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
+	snprintf(notes_path, sizeof(notes_path), "%s/notes.md", tmpdir);
+	cfg = make_ws_config(tmpdir, config_path, sizeof(config_path));
+	MU_ASSERT(cfg != NULL, "fsize: load config");
+	tool_file_set_config(cfg);
+	t = tool_file_get();
+
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"original notes that must survive\"}",
+		notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "seed original file");
+	snprintf(args, sizeof(args), "{\"operation\":\"read_file\",\"path\":\"%s\"}", notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "read seeded file");
+	MU_ASSERT(strstr(buf, "original notes that must survive") != NULL, "seeded content present");
+
+	for (i = 0; i < sizeof(oversized) - 1; i++)
+		oversized[i] = 'A';
+	oversized[sizeof(oversized) - 1] = '\0';
+
+	MU_ASSERT(getrlimit(RLIMIT_FSIZE, &old_lim) == 0, "getrlimit FSIZE");
+	new_lim = old_lim;
+	new_lim.rlim_cur = 8;
+	(void)signal(SIGXFSZ, SIG_IGN);
+	MU_ASSERT(setrlimit(RLIMIT_FSIZE, &new_lim) == 0, "setrlimit FSIZE");
+
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"%s\"}",
+		notes_path, oversized);
+	write_ret = t->execute(args, buf, sizeof(buf));
+	MU_ASSERT(setrlimit(RLIMIT_FSIZE, &old_lim) == 0, "restore rlimit");
+
+	MU_ASSERT(write_ret != 0, "oversized write fails");
+	snprintf(args, sizeof(args), "{\"operation\":\"read_file\",\"path\":\"%s\"}", notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "read after failed write");
+	MU_ASSERT(strstr(buf, "original notes that must survive") != NULL,
+		"failed write must not wipe original");
+
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"recovered after limit\"}",
+		notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "write recovers after limit");
+	snprintf(args, sizeof(args), "{\"operation\":\"read_file\",\"path\":\"%s\"}", notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "read recovered file");
+	MU_ASSERT(strstr(buf, "recovered after limit") != NULL, "recovered content present");
+
+	config_free(cfg);
+	unlink(config_path);
+	unlink(notes_path);
+	snprintf(notes_path, sizeof(notes_path), "%s/notes.md.tmp", tmpdir);
+	unlink(notes_path);
+	rmdir(tmpdir);
+}
+
 int main(void)
 {
 	MU_RUN(test_file_read_write_list);
@@ -203,6 +279,7 @@ int main(void)
 	MU_RUN(test_file_outside_workspace_rejected);
 	MU_RUN(test_path_traversal_rejected);
 	MU_RUN(test_symlink_escape_rejected);
+	MU_RUN(test_file_write_failure_preserves_existing);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }
