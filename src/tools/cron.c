@@ -21,7 +21,8 @@
 #define CRON_PREFIX_INTERVAL "interval:"
 #define CRON_PREFIX_AT       "at:"
 #define CRON_PREFIX_CRON     "cron:"
-#define CRON_MAX_ITER_MINUTES (8 * 24 * 60)
+/* Cover at least one leap year so monthly/yearly exprs can advance after firing. */
+#define CRON_MAX_ITER_MINUTES (366 * 24 * 60)
 
 static int parse_field(const char *s, int *out, int min_val, int max_val)
 {
@@ -104,7 +105,14 @@ static long long cron_next_from_expr(const char *cron_part, long long now)
 {
 	int fields[10];
 	if (parse_cron_expr(cron_part, fields) != 0) return -1;
+	/*
+	 * Start at the beginning of the *next* minute. Returning the current
+	 * minute would leave next_run <= now after cron_poll fires, so the job
+	 * would re-deliver every poll (~1s) until the minute rolled over — and
+	 * forever if the following match was outside the search window.
+	 */
 	time_t t = (time_t)now;
+	t = t - (t % 60) + 60;
 	struct tm tm;
 	if (!localtime_r(&t, &tm)) return -1;
 	int min = tm.tm_min, hour = tm.tm_hour, mday = tm.tm_mday, mon = tm.tm_mon + 1, wday = tm.tm_wday;
@@ -184,8 +192,12 @@ static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 		cron_job_delete(row.id);
 	} else {
 		long long next = 0;
-		if (cron_parse_next_run(row.schedule, now, &next) == 0)
+		if (cron_parse_next_run(row.schedule, now, &next) == 0) {
 			cron_job_update_next_run(row.id, next);
+		} else {
+			/* Fail closed: never leave a due next_run that re-fires every poll. */
+			cron_job_update_next_run(row.id, now + 365LL * 24 * 3600);
+		}
 	}
 	memset(out, 0, sizeof(*out));
 	char session_id[256];

@@ -14,13 +14,15 @@ extern "C" {
 #endif
 
 /**
- * Parse schedule and compute next_run from current time.
+ * Parse schedule and compute next_run strictly after `now`.
  * Formats: "cron:min hour dom month dow", "interval:N", "at:unix_ts".
  * Cron: 5 fields, * or N or N-M. dow 0-6 (Sun-Sat).
+ * Cron expressions start searching at the next minute boundary so a just-fired
+ * job cannot remain due in the same minute.
  *
  * @param schedule Schedule string.
  * @param now      Current Unix timestamp.
- * @param next_out Output: next run time.
+ * @param next_out Output: next run time (always > now on success for cron:/interval:).
  * @return 0 on success, -1 on parse error.
  */
 int cron_parse_next_run(const char *schedule, long long now, long long *next_out);

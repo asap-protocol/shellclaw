@@ -3,6 +3,8 @@
  * @brief Unit tests for cron: schedule parsing, next_run, one-shot.
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "tools/cron.h"
 #include "core/memory.h"
 #include <stdio.h>
@@ -41,7 +43,7 @@ static int test_cron_expr_next_run(void)
 	long long now = 1700000000;
 	long long next = 0;
 	ASSERT(cron_parse_next_run("0 0 * * *", now, &next) == 0);
-	ASSERT(next >= now);
+	ASSERT(next > now);
 	return 0;
 }
 
@@ -50,7 +52,95 @@ static int test_cron_expr_with_prefix(void)
 	long long now = 1700000000;
 	long long next = 0;
 	ASSERT(cron_parse_next_run("cron:0 0 * * *", now, &next) == 0);
-	ASSERT(next >= now);
+	ASSERT(next > now);
+	return 0;
+}
+
+static int test_cron_expr_skips_current_minute(void)
+{
+	long long now = 1700000017; /* mid-minute so a same-minute match would be <= now */
+	time_t t = (time_t)now;
+	struct tm tm;
+	ASSERT(localtime_r(&t, &tm) != NULL);
+	char schedule[64];
+	snprintf(schedule, sizeof(schedule), "cron:%d %d * * *", tm.tm_min, tm.tm_hour);
+	long long next = 0;
+	ASSERT(cron_parse_next_run(schedule, now, &next) == 0);
+	ASSERT(next > now);
+	/* Must advance at least to the next minute boundary (not remain due this minute). */
+	ASSERT(next >= (now - (now % 60) + 60));
+	time_t next_t = (time_t)next;
+	struct tm next_tm;
+	ASSERT(localtime_r(&next_t, &next_tm) != NULL);
+	ASSERT(next_tm.tm_min == tm.tm_min);
+	ASSERT(next_tm.tm_hour == tm.tm_hour);
+	return 0;
+}
+
+static int test_cron_expr_monthly_beyond_eight_days(void)
+{
+	/* Anchor mid-month so the 1st of next month is > 8 days away. */
+	time_t t = 1700000000; /* 2023-11-14 local-ish depending on TZ */
+	struct tm tm;
+	ASSERT(localtime_r(&t, &tm) != NULL);
+	tm.tm_mday = 15;
+	tm.tm_hour = 12;
+	tm.tm_min = 0;
+	tm.tm_sec = 0;
+	tm.tm_isdst = -1;
+	t = mktime(&tm);
+	ASSERT(t != (time_t)-1);
+	long long now = (long long)t;
+	long long next = 0;
+	ASSERT(cron_parse_next_run("cron:0 0 1 * *", now, &next) == 0);
+	ASSERT(next > now);
+	ASSERT(next - now > 8LL * 24 * 3600);
+	time_t next_t = (time_t)next;
+	struct tm next_tm;
+	ASSERT(localtime_r(&next_t, &next_tm) != NULL);
+	ASSERT(next_tm.tm_mday == 1);
+	ASSERT(next_tm.tm_hour == 0);
+	ASSERT(next_tm.tm_min == 0);
+	return 0;
+}
+
+static int test_cron_poll_advances_recurring_past_due_minute(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_poll_advance.db";
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+
+	long long now = (long long)time(NULL);
+	time_t t = (time_t)now;
+	struct tm tm;
+	ASSERT(localtime_r(&t, &tm) != NULL);
+	char schedule[64];
+	snprintf(schedule, sizeof(schedule), "cron:%d %d * * *", tm.tm_min, tm.tm_hour);
+
+	ASSERT(cron_job_create("poll_adv1", schedule, "due now", "cli", "default", now - 1, 1) == 0);
+
+	const channel_t *cron_ch = channel_cron_get();
+	ASSERT(cron_ch != NULL && cron_ch->poll != NULL);
+	channel_incoming_msg_t msg;
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 1);
+	ASSERT(msg.text != NULL);
+	free(msg.session_id);
+	free(msg.user_id);
+	free(msg.text);
+
+	cron_job_row_t rows[4];
+	ASSERT(cron_job_list(rows, 4) == 1);
+	ASSERT(strcmp(rows[0].id, "poll_adv1") == 0);
+	ASSERT(rows[0].next_run > now);
+	ASSERT(rows[0].next_run >= (now - (now % 60) + 60));
+
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 0);
+
+	cron_job_delete("poll_adv1");
+	memory_cleanup();
+	remove(path);
 	return 0;
 }
 
@@ -145,6 +235,9 @@ int main(void)
 	RUN(test_at_one_shot());
 	RUN(test_cron_expr_next_run());
 	RUN(test_cron_expr_with_prefix());
+	RUN(test_cron_expr_skips_current_minute());
+	RUN(test_cron_expr_monthly_beyond_eight_days());
+	RUN(test_cron_poll_advances_recurring_past_due_minute());
 	RUN(test_invalid_schedule());
 	RUN(test_cron_job_crud_and_due());
 	RUN(test_cron_tool_execute());
