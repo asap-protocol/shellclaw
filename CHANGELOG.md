@@ -11,6 +11,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ### Changed
 - `main` is the active line. On-device Jetson sign-off is a known pending item, not a merge gate ([`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md)).
+- Gateway `/health` `version` matches `SHELLCLAW_RELEASE_VERSION`.
 
 ### Security
 - Camera auto-output keeps the exclusive `mkstemp` inode (no unlink + `${tmpl}.jpg` sibling).

@@ -8,6 +8,7 @@
 #include "gateway/auth.h"
 #include "gateway/rate_limit.h"
 #include "core/config.h"
+#include "core/version.h"
 #include "cJSON.h"
 #include <curl/curl.h>
 #include <errno.h>
@@ -287,6 +288,7 @@ static int test_health(void)
 	ASSERT(body != NULL);
 	ASSERT(strstr(body, "ok") != NULL);
 	ASSERT(strstr(body, "uptime") != NULL);
+	ASSERT(strstr(body, SHELLCLAW_RELEASE_VERSION) != NULL);
 	free(body);
 	return 0;
 }

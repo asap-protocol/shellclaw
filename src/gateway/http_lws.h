@@ -7,6 +7,7 @@
 #define SHELLCLAW_GATEWAY_HTTP_LWS_H
 
 #include "core/config.h"
+#include "core/version.h"
 #include "gateway/auth.h"
 #include "gateway/lws_compat.h"
 #include <libwebsockets.h>
@@ -17,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GATEWAY_VERSION "0.2.0"
+#define GATEWAY_VERSION SHELLCLAW_RELEASE_VERSION
 #define RESP_BUF_SIZE 65536
 #define LWS_HEADER_SPACE 2048
 #define CONFIG_BODY_MAX 65536
