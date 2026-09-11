@@ -5,9 +5,14 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "crypto/crypto.h"
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+void randombytes(unsigned char *x, unsigned long long n);
 
 #define ASSERT(c) do { if (!(c)) { fprintf(stderr, "FAIL: %s:%d %s\n", __FILE__, __LINE__, #c); return 1; } } while (0)
 #define RUN(t) do { int _r = (t); if (_r) return _r; } while (0)
@@ -141,6 +146,25 @@ static int test_ed25519_keypair_fails_without_rng(void)
 	return 0;
 }
 
+static int test_randombytes_aborts_on_urandom_failure(void)
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	ASSERT(pid >= 0);
+	if (pid == 0) {
+		unsigned char buf[8];
+		crypto_test_force_urandom_fail(1);
+		randombytes(buf, sizeof(buf));
+		_exit(0);
+	}
+	ASSERT(waitpid(pid, &status, 0) == pid);
+	ASSERT(WIFSIGNALED(status));
+	ASSERT(WTERMSIG(status) == SIGABRT);
+	return 0;
+}
+
 static int test_ed25519_empty_message_sign(void)
 {
 	uint8_t pk[CRYPTO_ED25519_PUBLIC_KEY_SIZE];
@@ -236,6 +260,7 @@ int main(void)
 	RUN(test_ed25519_rfc8032_vector1());
 	RUN(test_ed25519_rfc8032_vector2());
 	RUN(test_ed25519_keypair_fails_without_rng());
+	RUN(test_randombytes_aborts_on_urandom_failure());
 	RUN(test_ed25519_empty_message_sign());
 	RUN(test_ed25519_verify_empty_message_null_pointer());
 	RUN(test_base64_roundtrip_and_rejects());

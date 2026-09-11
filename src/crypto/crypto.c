@@ -33,8 +33,10 @@ void randombytes(unsigned char *x, unsigned long long n)
 	len = (size_t)n;
 	if (len == 0U)
 		return;
-	if (crypto_read_urandom(x, len) != 0)
-		return;
+	if (crypto_read_urandom(x, len) != 0) {
+		memset(x, 0, len);
+		abort();
+	}
 }
 
 void crypto_test_set_randombytes_seed(const uint8_t seed[32])
