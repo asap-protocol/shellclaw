@@ -141,13 +141,14 @@ static int manifest_write_key_file(const char *path, const uint8_t *data, size_t
 {
 	int fd;
 	size_t off = 0;
+	struct stat st;
 
 	if (g_manifest_keys_test_fail_backup_write && path != NULL &&
 	    strstr(path, ".bak.") != NULL) {
 		g_manifest_keys_test_fail_backup_write = 0;
 		return -1;
 	}
-	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, MANIFEST_KEY_FILE_MODE);
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, MANIFEST_KEY_FILE_MODE);
 	if (fd < 0)
 		return -1;
 	while (off < len) {
@@ -160,6 +161,11 @@ static int manifest_write_key_file(const char *path, const uint8_t *data, size_t
 		off += (size_t)n;
 	}
 	if (fchmod(fd, MANIFEST_KEY_FILE_MODE) != 0) {
+		close(fd);
+		unlink(path);
+		return -1;
+	}
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || (st.st_mode & 0077) != 0) {
 		close(fd);
 		unlink(path);
 		return -1;

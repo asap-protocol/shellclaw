@@ -599,6 +599,38 @@ static int test_manifest_keys_rejects_symlinked_priv(void)
 	return 0;
 }
 
+static int test_manifest_keys_rejects_symlinked_tmp_on_write(void)
+{
+	char dir[128];
+	char tmp_path[512];
+	char target[256];
+	char err[256];
+	FILE *f;
+
+	ASSERT(test_runner_mkdtemp_path("shellclaw_manifest_wrsyl", dir, sizeof(dir)) == 0);
+	snprintf(tmp_path, sizeof(tmp_path), "%s/ed25519.priv.tmp", dir);
+	snprintf(target, sizeof(target), "/tmp/sc_wr_symlink_target_%d", (int)getpid());
+	f = fopen(target, "wb");
+	ASSERT(f != NULL);
+	fclose(f);
+	ASSERT(symlink(target, tmp_path) == 0);
+	manifest_keys_set_dir_for_test(dir);
+	manifest_keys_reset();
+	crypto_test_set_randombytes_seed(MANIFEST_KEYS_TEST_SEED);
+	ASSERT(manifest_keys_load(err, sizeof(err)) != 0);
+	crypto_test_clear_randombytes_seed();
+	manifest_keys_reset();
+	manifest_keys_set_dir_for_test(NULL);
+	unlink(tmp_path);
+	unlink(target);
+	{
+		char cmd[512];
+		snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", dir);
+		(void)system(cmd);
+	}
+	return 0;
+}
+
 /* 5.6.1 M1: when the new pub write fails after the new priv landed, rotation
  * restores old_priv to disk and resets in-memory state to the OLD pair so
  * memory matches the on-disk keys (pub == priv[32..64]) and ensure_loaded is
@@ -761,6 +793,10 @@ int main(int argc, char **argv)
 	}
 	if (test_manifest_keys_rejects_symlinked_priv() != 0) {
 		fprintf(stderr, "test_manifest_keys_rejects_symlinked_priv failed\n");
+		failed++;
+	}
+	if (test_manifest_keys_rejects_symlinked_tmp_on_write() != 0) {
+		fprintf(stderr, "test_manifest_keys_rejects_symlinked_tmp_on_write failed\n");
 		failed++;
 	}
 	if (test_manifest_keys_rejects_overlong_home() != 0) {
