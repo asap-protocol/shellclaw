@@ -50,7 +50,7 @@ static const hardware_pin_entry_t rpi_zero2w_pin_entries[] = {
 	RPI_HDR_SFIO(23, 11, "GPIO11_SCLK"),
 	RPI_HDR_SFIO(24, 8, "GPIO8_CE0"),
 	RPI_HDR_PWR(25, "GND"),
-	RPI_HDR_GPIO(26, 7, "GPIO7"),
+	RPI_HDR_SFIO(26, 7, "GPIO7_CE1"),
 	RPI_HDR_SFIO(27, 0, "ID_SDA"),
 	RPI_HDR_SFIO(28, 1, "ID_SCL"),
 	RPI_HDR_GPIO(29, 5, "GPIO5"),

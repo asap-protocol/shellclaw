@@ -65,6 +65,10 @@ static int test_rpi_pin_table(void)
 	ASSERT(rpi_zero2w_pin_table.entries[10].line_num == 17u);
 	ASSERT(rpi_zero2w_pin_table.entries[10].sfio_flag == 0);
 	ASSERT(rpi_zero2w_pin_table.entries[2].sfio_flag == 1);
+	ASSERT(rpi_zero2w_pin_table.entries[23].physical_pin == 24);
+	ASSERT(rpi_zero2w_pin_table.entries[23].sfio_flag == 1);
+	ASSERT(rpi_zero2w_pin_table.entries[25].physical_pin == 26);
+	ASSERT(rpi_zero2w_pin_table.entries[25].sfio_flag == 1);
 	return 0;
 }
 
