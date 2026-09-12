@@ -36,6 +36,16 @@ void agent_unlock(void)
 	pthread_mutex_unlock(&g_agent_mutex);
 }
 
+int agent_mutex_is_locked_for_test(void)
+{
+	int rc = pthread_mutex_trylock(&g_agent_mutex);
+	if (rc == 0) {
+		pthread_mutex_unlock(&g_agent_mutex);
+		return 0;
+	}
+	return 1;
+}
+
 #define SYSTEM_PROMPT_MAX      65536
 #define SKILLS_BUF_SIZE        32768
 #define SESSION_JSON_MAX       (128 * 1024)

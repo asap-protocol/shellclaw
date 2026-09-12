@@ -49,23 +49,35 @@ int agent_run(const config_t *cfg, const char *session_id, const char *user_mess
               char *response_buf, size_t response_size);
 
 /**
- * Acquire the global agent mutex before calling agent_run() from a non-main thread.
+ * Acquire the global agent mutex before touching shared session/memory state.
  *
- * Ordering rule: threads that call agent_run() (e.g. the inbound ASAP HTTP
- * thread and the WebSocket dispatcher) must acquire this mutex first to
- * prevent concurrent re-entrant access to shared session/memory state.
- * The main-loop thread is the canonical owner; all other callers must use
- * agent_lock() / agent_unlock() around every agent_run() invocation.
+ * Every agent_run() caller (main-loop handle_message, inbound ASAP HTTP,
+ * WebSocket dispatcher) must hold this mutex for the duration of agent_run().
+ * /reset in handle_message must also hold it around session_delete().
+ * Release before channel I/O (ch->send). The mutex is not recursive.
  */
 void agent_lock(void);
 
 /**
- * Release the global agent mutex after agent_run() returns.
+ * Release the global agent mutex after agent_run() or a locked session_delete().
  */
 void agent_unlock(void);
 
 /** Test-only: non-empty @p name_or_null forces “active backend” for local/offline prompt suffix; NULL uses router. */
 void shellclaw_agent_set_test_active_backend_name(const char *name_or_null);
+
+/**
+ * Test-only: probe whether the global agent mutex is currently held.
+ * @return 1 if locked, 0 if free.
+ *
+ * Relies on a non-recursive mutex: pthread_mutex_trylock from the owning
+ * thread returns EBUSY. A recursive mutex would make this helper lie
+ * (trylock succeeds, this function unlocks once, returns 0).
+ *
+ * Used by dispatch tests to assert handle_message() holds the mutex
+ * for the duration of agent_run() (see #54).
+ */
+int agent_mutex_is_locked_for_test(void);
 
 #ifdef __cplusplus
 }

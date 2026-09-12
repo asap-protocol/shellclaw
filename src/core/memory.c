@@ -15,6 +15,12 @@
 #define WARN_RECREATED "Warning: memory DB invalid or corrupted, recreated at %s\n"
 
 static sqlite3 *g_db;
+static void (*g_session_delete_hook_for_test)(const char *session_id);
+
+void session_delete_set_hook_for_test(void (*hook)(const char *session_id))
+{
+	g_session_delete_hook_for_test = hook;
+}
 
 static const char *SCHEMA_MEMORIES =
 	"CREATE TABLE IF NOT EXISTS memories ("
@@ -253,6 +259,8 @@ int session_save(const char *session_id, const char *messages)
 
 int session_delete(const char *session_id)
 {
+	if (g_session_delete_hook_for_test)
+		g_session_delete_hook_for_test(session_id);
 	if (!g_db || !session_id) return -1;
 	const char *sql = "DELETE FROM sessions WHERE id = ?1";
 	sqlite3_stmt *stmt = NULL;

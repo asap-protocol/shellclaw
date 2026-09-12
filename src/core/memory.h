@@ -70,6 +70,13 @@ int session_save(const char *session_id, const char *messages);
 int session_delete(const char *session_id);
 
 /**
+ * Test-only: invoke @p hook from session_delete before the SQL DELETE.
+ * Pass NULL to clear. Used by dispatch tests to assert /reset holds the
+ * agent mutex (see #54).
+ */
+void session_delete_set_hook_for_test(void (*hook)(const char *session_id));
+
+/**
  * List session IDs from the database.
  *
  * @param session_ids_out Array of pointers to receive session IDs; caller must free each.
