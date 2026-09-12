@@ -581,7 +581,46 @@ static int write_asap_oversize_file(char *path, size_t path_sz)
 	return nw == ASAP_OVERSIZE_FILE_BYTES ? 0 : -1;
 }
 
-static int test_asap_rejects_oversized_response(void)
+static int asap_log_outbound_count(const char *token, int *count_out)
+{
+	long code;
+	char *body = NULL;
+	cJSON *root;
+	cJSON *ent;
+	int i;
+	int n;
+	int count = 0;
+	if (!token || !token[0] || !count_out)
+		return -1;
+	if (http_get_auth(gw_url("/api/asap/log"), token, &code, &body) != 0)
+		return -1;
+	if (code != 200 || !body) {
+		free(body);
+		return -1;
+	}
+	root = cJSON_Parse(body);
+	free(body);
+	if (!root)
+		return -1;
+	ent = cJSON_GetObjectItemCaseSensitive(root, "entries");
+	if (!ent || !cJSON_IsArray(ent)) {
+		cJSON_Delete(root);
+		return -1;
+	}
+	n = cJSON_GetArraySize(ent);
+	for (i = 0; i < n; i++) {
+		cJSON *e = cJSON_GetArrayItem(ent, i);
+		cJSON *dir = e ? cJSON_GetObjectItemCaseSensitive(e, "direction") : NULL;
+		if (dir && cJSON_IsString(dir) && dir->valuestring &&
+		    strcmp(dir->valuestring, "out") == 0)
+			count++;
+	}
+	cJSON_Delete(root);
+	*count_out = count;
+	return 0;
+}
+
+static int test_asap_rejects_oversized_response(const char *token)
 {
 	char path[256];
 	char payload[640];
@@ -589,12 +628,16 @@ static int test_asap_rejects_oversized_response(void)
 	char *body = NULL;
 	int n;
 	int r;
+	int out_before = 0;
+	int out_after = 0;
 	cJSON *parsed;
 	ASSERT(write_asap_oversize_file(path, sizeof path) == 0);
 	n = snprintf(payload, sizeof payload,
 		"{\"name\":\"file\",\"arguments\":{\"operation\":\"read_file\",\"path\":\"%s\"}}",
 		path);
 	ASSERT(n > 0 && (size_t)n < sizeof payload);
+	if (token && token[0])
+		ASSERT(asap_log_outbound_count(token, &out_before) == 0);
 	r = post_asap("mcp.tool_call", payload, "01HZABC126", &code, &body);
 	ASSERT(r == 0);
 	if (code != 500)
@@ -611,6 +654,10 @@ static int test_asap_rejects_oversized_response(void)
 	ASSERT(asap_error_code_is(body, -32603));
 	ASSERT(strstr(body, "exceeds gateway buffer") != NULL);
 	free(body);
+	if (token && token[0]) {
+		ASSERT(asap_log_outbound_count(token, &out_after) == 0);
+		ASSERT(out_after == out_before);
+	}
 	return 0;
 }
 
@@ -1253,7 +1300,7 @@ int main(int argc, char **argv)
 	if (test_asap_task_request() != 0) { fprintf(stderr, "test_asap_task_request failed\n"); failed++; }
 	if (test_asap_mcp_tool_call() != 0) { fprintf(stderr, "test_asap_mcp_tool_call failed\n"); failed++; }
 	if (test_asap_mcp_unknown_tool() != 0) { fprintf(stderr, "test_asap_mcp_unknown_tool failed\n"); failed++; }
-	if (test_asap_rejects_oversized_response() != 0) {
+	if (test_asap_rejects_oversized_response(token) != 0) {
 		fprintf(stderr, "test_asap_rejects_oversized_response failed\n");
 		failed++;
 	}
