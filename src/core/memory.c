@@ -16,10 +16,16 @@
 
 static sqlite3 *g_db;
 static void (*g_session_delete_hook_for_test)(const char *session_id);
+static void (*g_memory_get_row_counts_hook_for_test)(void);
 
 void session_delete_set_hook_for_test(void (*hook)(const char *session_id))
 {
 	g_session_delete_hook_for_test = hook;
+}
+
+void memory_get_row_counts_set_hook_for_test(void (*hook)(void))
+{
+	g_memory_get_row_counts_hook_for_test = hook;
 }
 
 static const char *SCHEMA_MEMORIES =
@@ -467,6 +473,8 @@ static int count_table(const char *sql, int *out_count)
 
 int memory_get_row_counts(int *sessions_out, int *memories_out, int *cron_jobs_out)
 {
+	if (g_memory_get_row_counts_hook_for_test)
+		g_memory_get_row_counts_hook_for_test();
 	if (!g_db) return -1;
 	if (sessions_out) {
 		if (count_table("SELECT COUNT(*) FROM sessions", sessions_out) != 0) return -1;

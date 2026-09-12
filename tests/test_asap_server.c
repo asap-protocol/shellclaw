@@ -46,10 +46,22 @@ static int test_hook_state_fail(const asap_server_ctx_t *ctx, cJSON **payload_ou
 	return -1;
 }
 
+static int g_agent_mutex_held_during_mcp_tool;
+static int g_agent_mutex_held_during_mcp_hook;
+static int g_agent_mutex_held_during_state_query;
+
 static int echo_tool_execute(const char *args_json, char *result_buf, size_t max_len)
 {
 	(void)args_json;
 	snprintf(result_buf, max_len, "echo-ok");
+	return 0;
+}
+
+static int mutex_probe_tool_execute(const char *args_json, char *result_buf, size_t max_len)
+{
+	(void)args_json;
+	g_agent_mutex_held_during_mcp_tool = agent_mutex_is_locked_for_test();
+	snprintf(result_buf, max_len, "probe-ok");
 	return 0;
 }
 
@@ -73,11 +85,49 @@ static int hook_tool_dispatcher(const asap_server_ctx_t *ctx, const char *tool_n
 	return -1;
 }
 
+static int mutex_probe_tool_hook(const asap_server_ctx_t *ctx, const char *tool_name,
+				const char *args_json, char *result_buf, size_t result_cap)
+{
+	(void)ctx;
+	(void)tool_name;
+	(void)args_json;
+	g_agent_mutex_held_during_mcp_hook = agent_mutex_is_locked_for_test();
+	snprintf(result_buf, result_cap, "hook-probe-ok");
+	return 0;
+}
+
+static void mutex_probe_row_counts(void)
+{
+	g_agent_mutex_held_during_state_query = agent_mutex_is_locked_for_test();
+}
+
+static int mutex_probe_state_query_hook(const asap_server_ctx_t *ctx, cJSON **payload_out)
+{
+	cJSON *o;
+	(void)ctx;
+	g_agent_mutex_held_during_state_query = agent_mutex_is_locked_for_test();
+	o = cJSON_CreateObject();
+	if (!o) return -1;
+	if (!cJSON_AddNumberToObject(o, "probed", 1.0)) {
+		cJSON_Delete(o);
+		return -1;
+	}
+	*payload_out = o;
+	return 0;
+}
+
 static agent_tool_t s_echo_tool = {
 	.name = "echo",
 	.description = "",
 	.parameters_json = "{}",
 	.execute = echo_tool_execute,
+};
+
+static agent_tool_t s_mutex_probe_tool = {
+	.name = "mutex_probe",
+	.description = "",
+	.parameters_json = "{}",
+	.execute = mutex_probe_tool_execute,
 };
 
 static agent_tool_t s_flaky_tool = {
@@ -720,6 +770,114 @@ static int test_trust_sender_rejects_blank_sender_when_list_nonempty(void)
 	return 0;
 }
 
+static int test_mcp_tool_call_holds_agent_mutex(void)
+{
+	asap_envelope_t in;
+	asap_envelope_t out;
+	asap_server_ctx_t ctx;
+	char err[128];
+	cJSON *pl;
+	int rc;
+	asap_envelope_init(&in);
+	asap_envelope_init(&out);
+	pl = cJSON_CreateObject();
+	ASSERT(pl != NULL);
+	ASSERT(cJSON_AddStringToObject(pl, "name", "mutex_probe") != NULL);
+	ASSERT(cJSON_AddObjectToObject(pl, "arguments") != NULL);
+	ASSERT(wrap_build(&in, "mcp.tool_call", pl) == 0);
+	memset(&ctx, 0, sizeof ctx);
+	ctx.tools = &s_mutex_probe_tool;
+	ctx.tool_count = 1;
+	g_agent_mutex_held_during_mcp_tool = 0;
+	rc = asap_server_handle(&in, &out, &ctx, err, sizeof err);
+	ASSERT(rc == 0);
+	ASSERT(g_agent_mutex_held_during_mcp_tool == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
+static int test_mcp_tool_call_hook_holds_agent_mutex(void)
+{
+	asap_envelope_t in;
+	asap_envelope_t out;
+	asap_server_ctx_t ctx;
+	char err[128];
+	cJSON *pl;
+	int rc;
+	pl = cJSON_CreateObject();
+	ASSERT(pl != NULL);
+	ASSERT(cJSON_AddStringToObject(pl, "name", "echo") != NULL);
+	ASSERT(cJSON_AddObjectToObject(pl, "arguments") != NULL);
+	ASSERT(wrap_build(&in, "mcp.tool_call", pl) == 0);
+	memset(&ctx, 0, sizeof ctx);
+	ctx.tool_call_hook = mutex_probe_tool_hook;
+	g_agent_mutex_held_during_mcp_hook = 0;
+	rc = asap_server_handle(&in, &out, &ctx, err, sizeof err);
+	ASSERT(rc == 0);
+	ASSERT(g_agent_mutex_held_during_mcp_hook == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
+static int test_state_query_memory_holds_agent_mutex(void)
+{
+	char tmpl[] = "/tmp/sc_asap_srv_lock_XXXXXX";
+	int fd;
+	asap_envelope_t in;
+	asap_envelope_t out;
+	asap_server_ctx_t ctx;
+	char err[128];
+	cJSON *pl;
+	int rc;
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(memory_init(tmpl) == 0);
+	pl = cJSON_CreateObject();
+	ASSERT(pl != NULL);
+	ASSERT(wrap_build(&in, "state.query", pl) == 0);
+	memset(&ctx, 0, sizeof ctx);
+	g_agent_mutex_held_during_state_query = 0;
+	memory_get_row_counts_set_hook_for_test(mutex_probe_row_counts);
+	rc = asap_server_handle(&in, &out, &ctx, err, sizeof err);
+	memory_get_row_counts_set_hook_for_test(NULL);
+	ASSERT(rc == 0);
+	ASSERT(g_agent_mutex_held_during_state_query == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	memory_cleanup();
+	unlink(tmpl);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
+static int test_state_query_hook_holds_agent_mutex(void)
+{
+	asap_envelope_t in;
+	asap_envelope_t out;
+	asap_server_ctx_t ctx;
+	char err[128];
+	cJSON *pl;
+	int rc;
+	pl = cJSON_CreateObject();
+	ASSERT(pl != NULL);
+	ASSERT(wrap_build(&in, "state.query", pl) == 0);
+	memset(&ctx, 0, sizeof ctx);
+	ctx.state_query_hook = mutex_probe_state_query_hook;
+	g_agent_mutex_held_during_state_query = 0;
+	rc = asap_server_handle(&in, &out, &ctx, err, sizeof err);
+	ASSERT(rc == 0);
+	ASSERT(g_agent_mutex_held_during_state_query == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
 int main(void)
 {
 	int r = 0;
@@ -747,5 +905,9 @@ int main(void)
 	r |= test_tool_call_hook_overrides_builtin_dispatch();
 	r |= test_tool_execute_nonzero_reports_error();
 	r |= test_trust_sender_rejects_blank_sender_when_list_nonempty();
+	r |= test_mcp_tool_call_holds_agent_mutex();
+	r |= test_mcp_tool_call_hook_holds_agent_mutex();
+	r |= test_state_query_memory_holds_agent_mutex();
+	r |= test_state_query_hook_holds_agent_mutex();
 	return r;
 }

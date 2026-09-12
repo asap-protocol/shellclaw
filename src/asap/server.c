@@ -196,13 +196,24 @@ static int handle_state_query(const asap_envelope_t *in, asap_envelope_t *out,
 	int sess = 0;
 	int mem = 0;
 	int cron = 0;
+	int hook_rc = 0;
+	int counts_rc = 0;
+	/* Same mutex as mcp.tool_call / task.request: g_db is not safe from an
+	 * HTTP thread while another thread is in agent_run (#60). */
+	agent_lock();
 	if (ctx->state_query_hook) {
-		if (ctx->state_query_hook(ctx, &pl) != 0 || !pl) {
+		hook_rc = ctx->state_query_hook(ctx, &pl);
+	} else {
+		counts_rc = memory_get_row_counts(&sess, &mem, &cron);
+	}
+	agent_unlock();
+	if (ctx->state_query_hook) {
+		if (hook_rc != 0 || !pl) {
 			set_err(err_message, err_message_size, "state.query: hook failed");
 			return -32603;
 		}
 	} else {
-		if (memory_get_row_counts(&sess, &mem, &cron) != 0) {
+		if (counts_rc != 0) {
 			set_err(err_message, err_message_size, "state.query: memory store unavailable");
 			return -32603;
 		}
@@ -282,11 +293,16 @@ static int handle_mcp_tool_call(const asap_envelope_t *in, asap_envelope_t *out,
 		return -32603;
 	}
 	result_buf[0] = '\0';
+	/* Same mutex as task.request / handle_message: inbound tools may
+	 * touch session/memory while another thread is in agent_run (#60). */
+	agent_lock();
 	if (ctx->tool_call_hook) {
 		int hr = ctx->tool_call_hook(ctx, tool_name, args_json, result_buf, RESULT_CAP);
 		exec_rc = hr == 0 ? 0 : 2;
-	} else
+	} else {
 		exec_rc = dispatch_tool_by_name(ctx, tool_name, args_json, result_buf, RESULT_CAP);
+	}
+	agent_unlock();
 	free(args_json);
 	if (exec_rc == 1) {
 		free(result_buf);

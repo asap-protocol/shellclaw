@@ -77,6 +77,13 @@ int session_delete(const char *session_id);
 void session_delete_set_hook_for_test(void (*hook)(const char *session_id));
 
 /**
+ * Test-only: invoke @p hook from memory_get_row_counts before the COUNT queries.
+ * Pass NULL to clear. Used by ASAP server tests to assert state.query holds
+ * the agent mutex (see #60).
+ */
+void memory_get_row_counts_set_hook_for_test(void (*hook)(void));
+
+/**
  * List session IDs from the database.
  *
  * @param session_ids_out Array of pointers to receive session IDs; caller must free each.
