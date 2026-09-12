@@ -112,11 +112,24 @@ static int fill_response_envelope(asap_envelope_t *out, const asap_envelope_t *i
 	return 0;
 }
 
+const char *asap_resolve_task_session_id(const char *ctx_session_id, const char *sender,
+					 char *buf, size_t buf_size)
+{
+	if (ctx_session_id && ctx_session_id[0] != '\0')
+		return ctx_session_id;
+	if (sender && sender[0] != '\0' && buf != NULL && buf_size > 0) {
+		snprintf(buf, buf_size, "asap:%s", sender);
+		return buf;
+	}
+	return "asap:inbound";
+}
+
 static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
 	asap_server_ctx_t *ctx, char *err_message, size_t err_message_size)
 {
 	char *prompt;
 	char *resp_buf;
+	char sid_buf[256];
 	const char *sid;
 	int ar;
 	cJSON *pl;
@@ -134,7 +147,8 @@ static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
 		return -32603;
 	}
 	resp_buf[0] = '\0';
-	sid = ctx->session_id ? ctx->session_id : "asap:inbound";
+	/* Isolate SQLite history by sender URN; "asap:inbound" mixed clients (#64). */
+	sid = asap_resolve_task_session_id(ctx->session_id, in->sender, sid_buf, sizeof sid_buf);
 	if (ctx->task_request_hook)
 		ar = ctx->task_request_hook(ctx, in, resp_buf, (size_t)ASAP_SERVER_AGENT_RESPONSE_CAP);
 	else {
