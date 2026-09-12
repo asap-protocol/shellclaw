@@ -57,7 +57,7 @@ ShellClaw is C99/C11. Follow the project rule files (summarized here — full de
 - New tools → `src/tools/<name>.c` + `tests/test_<name>.c` + Makefile target.
 - New hardware backend → `src/hardware/` with board-specific code under `src/hardware/boards/`.
 - Config and secrets via TOML + environment variables only — see [`.env.example`](.env.example).
-- Thread safety: inbound HTTP/WebSocket paths must use `agent_lock()` / `agent_unlock()` around `agent_run()` (see README § Thread Safety).
+- Thread safety: inbound HTTP/WebSocket paths must use `agent_lock()` / `agent_unlock()` around `agent_run()`, inbound ASAP `mcp.tool_call` execute, and `state.query` memory-store reads (see README § Thread Safety).
 
 ## Testing
 
