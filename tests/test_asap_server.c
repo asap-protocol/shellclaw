@@ -8,6 +8,7 @@
 #include "asap/envelope.h"
 #include "core/config.h"
 #include "core/memory.h"
+#include "providers/provider.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,37 @@ static int test_hook_task(const asap_server_ctx_t *ctx, const asap_envelope_t *i
 	snprintf(response_buf, response_cap, "reply-for-test");
 	return 0;
 }
+
+static int isolate_provider_init(const config_t *cfg)
+{
+	(void)cfg;
+	return 0;
+}
+
+static int isolate_provider_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	(void)messages;
+	(void)message_count;
+	(void)tools;
+	(void)tool_count;
+	response->error = 0;
+	response->content = strdup("isolate-ok");
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	return 0;
+}
+
+static void isolate_provider_cleanup(void)
+{
+}
+
+static const provider_t s_isolate_provider = {
+	.name = "isolate",
+	.init = isolate_provider_init,
+	.chat = isolate_provider_chat,
+	.cleanup = isolate_provider_cleanup,
+};
 
 static int test_hook_state(const asap_server_ctx_t *ctx, cJSON **payload_out)
 {
@@ -173,6 +205,13 @@ static int build_in(asap_envelope_t *e, const char *ptype, cJSON *payload)
 static int wrap_build(asap_envelope_t *e, const char *ptype, cJSON *payload)
 {
 	int rc = build_in(e, ptype, payload);
+	cJSON_Delete(payload);
+	return rc;
+}
+
+static int wrap_build_from(asap_envelope_t *e, const char *ptype, const char *sender, cJSON *payload)
+{
+	int rc = build_in_custom(e, ptype, sender, "urn:to", payload);
 	cJSON_Delete(payload);
 	return rc;
 }
@@ -736,6 +775,118 @@ static int test_tool_execute_nonzero_reports_error(void)
 	return 0;
 }
 
+static int submit_task_request(asap_server_ctx_t *ctx, const char *sender, const char *input)
+{
+	asap_envelope_t in;
+	asap_envelope_t out;
+	char err[192];
+	cJSON *pl;
+	int rc;
+	asap_envelope_init(&in);
+	asap_envelope_init(&out);
+	pl = cJSON_CreateObject();
+	if (!pl || !cJSON_AddStringToObject(pl, "input", input)) {
+		if (pl) cJSON_Delete(pl);
+		return -1;
+	}
+	if (wrap_build_from(&in, "task.request", sender, pl) != 0)
+		return -1;
+	rc = asap_server_handle(&in, &out, ctx, err, sizeof err);
+	teardown_env(&in);
+	teardown_env(&out);
+	return rc;
+}
+
+static int test_task_request_isolates_sessions_by_sender(void)
+{
+	char tmpl[] = "/tmp/sc_asap_sid_XXXXXX";
+	int fd;
+	const char *cfg_path = "/tmp/shellclaw_test_asap_sid.toml";
+	FILE *f;
+	config_t *cfg = NULL;
+	asap_server_ctx_t ctx;
+	char loaded[4096];
+	int rc = 1;
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	f = fopen(cfg_path, "w");
+	ASSERT(f != NULL);
+	fprintf(f, "[agent]\nmodel = \"test\"\n[memory]\ndb_path = \"%s\"\n", tmpl);
+	fclose(f);
+	ASSERT(memory_init(tmpl) == 0);
+	ASSERT(config_load(cfg_path, &cfg, NULL, 0) == 0);
+	memset(&ctx, 0, sizeof ctx);
+	ctx.cfg = cfg;
+	ctx.provider = &s_isolate_provider;
+	ASSERT(submit_task_request(&ctx, "urn:alice", "alice-secret") == 0);
+	ASSERT(session_load("asap:urn:alice", loaded, sizeof loaded) == 0);
+	ASSERT(strstr(loaded, "alice-secret") != NULL);
+	ASSERT(submit_task_request(&ctx, "urn:bob", "bob-hello") == 0);
+	ASSERT(session_load("asap:urn:bob", loaded, sizeof loaded) == 0);
+	ASSERT(strstr(loaded, "bob-hello") != NULL);
+	ASSERT(strstr(loaded, "alice-secret") == NULL);
+	ASSERT(session_load("asap:urn:alice", loaded, sizeof loaded) == 0);
+	ASSERT(strstr(loaded, "alice-secret") != NULL);
+	ASSERT(strstr(loaded, "bob-hello") == NULL);
+	ASSERT(session_load("asap:inbound", loaded, sizeof loaded) != 0);
+	rc = 0;
+	config_free(cfg);
+	memory_cleanup();
+	unlink(tmpl);
+	remove(cfg_path);
+	return rc;
+}
+
+static int test_resolve_task_session_id(void)
+{
+	char buf[128];
+	char tiny[8];
+	const char *sid;
+	sid = asap_resolve_task_session_id("urn:alice", buf, sizeof buf);
+	ASSERT(sid == buf);
+	ASSERT(strcmp(sid, "asap:urn:alice") == 0);
+	sid = asap_resolve_task_session_id("urn:bob", buf, sizeof buf);
+	ASSERT(sid == buf);
+	ASSERT(strcmp(sid, "asap:urn:bob") == 0);
+	sid = asap_resolve_task_session_id(NULL, buf, sizeof buf);
+	ASSERT(sid != NULL && strcmp(sid, "asap:inbound") == 0);
+	sid = asap_resolve_task_session_id("", buf, sizeof buf);
+	ASSERT(sid != NULL && strcmp(sid, "asap:inbound") == 0);
+	sid = asap_resolve_task_session_id("urn:alice", tiny, sizeof tiny);
+	ASSERT(sid == NULL);
+	sid = asap_resolve_task_session_id("urn:alice", buf, 0);
+	ASSERT(sid == NULL);
+	return 0;
+}
+
+static int test_task_request_rejects_oversized_sender(void)
+{
+	asap_envelope_t in;
+	asap_envelope_t out;
+	asap_server_ctx_t ctx;
+	char err[192];
+	char sender[600];
+	cJSON *pl;
+	int rc;
+	asap_envelope_init(&in);
+	asap_envelope_init(&out);
+	memset(sender, 'x', sizeof sender - 1);
+	sender[sizeof sender - 1] = '\0';
+	pl = cJSON_CreateObject();
+	ASSERT(pl != NULL);
+	ASSERT(cJSON_AddStringToObject(pl, "input", "hi") != NULL);
+	ASSERT(wrap_build_from(&in, "task.request", sender, pl) == 0);
+	memset(&ctx, 0, sizeof ctx);
+	ctx.task_request_hook = test_hook_task;
+	rc = asap_server_handle(&in, &out, &ctx, err, sizeof err);
+	ASSERT(rc == -32602);
+	ASSERT(strstr(err, "too long") != NULL || strstr(err, "exceeds") != NULL);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
 static int test_trust_sender_rejects_blank_sender_when_list_nonempty(void)
 {
 	const char *path = "/tmp/shellclaw_test_asap_trust_blank.toml";
@@ -909,5 +1060,8 @@ int main(void)
 	r |= test_mcp_tool_call_hook_holds_agent_mutex();
 	r |= test_state_query_memory_holds_agent_mutex();
 	r |= test_state_query_hook_holds_agent_mutex();
+	r |= test_resolve_task_session_id();
+	r |= test_task_request_rejects_oversized_sender();
+	r |= test_task_request_isolates_sessions_by_sender();
 	return r;
 }

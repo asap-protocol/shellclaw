@@ -74,6 +74,10 @@ description = "C-native edge-AI ASAP agent on NVIDIA Jetson Orin Nano Super (CUD
 # Production: set to your HTTPS origin before marketplace registration (example.com is dev-only).
 public_base_url = "https://shellclaw.example.com"
 registry_url = "https://raw.githubusercontent.com/asap-protocol/asap-protocol/main/registry.json"
+# POST /asap is protocol-public (rate-limited, not Bearer). Empty trusted_senders
+# allows every sender URN. Set this in production so task.request sessions
+# keyed as asap:<sender> cannot be spoofed by claiming another client's URN.
+# trusted_senders = ["urn:asap:agent:peer"]
 
 [asap.skill_descriptions]
 # assistant = "Override text for manifest capabilities.skills[].description"
