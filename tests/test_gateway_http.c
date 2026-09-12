@@ -556,6 +556,64 @@ static int test_asap_mcp_unknown_tool(void)
 	return 0;
 }
 
+/* Gateway HTTP buffer is RESP_BUF_SIZE (65536). A (64 KiB - 1) file
+ * read wraps into JSON-RPC larger than that; truncation was #61. */
+enum { ASAP_OVERSIZE_FILE_BYTES = 65535 };
+
+static int write_asap_oversize_file(char *path, size_t path_sz)
+{
+	FILE *f;
+	char *block;
+	size_t nw;
+	snprintf(path, path_sz, "%s/.shellclaw/asap_oversize.txt", g_test_home);
+	block = malloc(ASAP_OVERSIZE_FILE_BYTES);
+	if (!block)
+		return -1;
+	memset(block, 'A', ASAP_OVERSIZE_FILE_BYTES);
+	f = fopen(path, "wb");
+	if (!f) {
+		free(block);
+		return -1;
+	}
+	nw = fwrite(block, 1, ASAP_OVERSIZE_FILE_BYTES, f);
+	fclose(f);
+	free(block);
+	return nw == ASAP_OVERSIZE_FILE_BYTES ? 0 : -1;
+}
+
+static int test_asap_rejects_oversized_response(void)
+{
+	char path[256];
+	char payload[640];
+	long code;
+	char *body = NULL;
+	int n;
+	int r;
+	cJSON *parsed;
+	ASSERT(write_asap_oversize_file(path, sizeof path) == 0);
+	n = snprintf(payload, sizeof payload,
+		"{\"name\":\"file\",\"arguments\":{\"operation\":\"read_file\",\"path\":\"%s\"}}",
+		path);
+	ASSERT(n > 0 && (size_t)n < sizeof payload);
+	r = post_asap("mcp.tool_call", payload, "01HZABC126", &code, &body);
+	ASSERT(r == 0);
+	if (code != 500)
+		fprintf(stderr, "FAIL: HTTP %ld want 500 body_len=%zu\n",
+			code, body ? strlen(body) : 0);
+	ASSERT(code == 500);
+	ASSERT(body != NULL);
+	parsed = cJSON_Parse(body);
+	if (!parsed)
+		fprintf(stderr, "FAIL: oversized ASAP body is not JSON: %.200s\n",
+			body);
+	ASSERT(parsed != NULL);
+	cJSON_Delete(parsed);
+	ASSERT(asap_error_code_is(body, -32603));
+	ASSERT(strstr(body, "exceeds gateway buffer") != NULL);
+	free(body);
+	return 0;
+}
+
 static int test_manifest(void)
 {
 	long code;
@@ -1195,6 +1253,10 @@ int main(int argc, char **argv)
 	if (test_asap_task_request() != 0) { fprintf(stderr, "test_asap_task_request failed\n"); failed++; }
 	if (test_asap_mcp_tool_call() != 0) { fprintf(stderr, "test_asap_mcp_tool_call failed\n"); failed++; }
 	if (test_asap_mcp_unknown_tool() != 0) { fprintf(stderr, "test_asap_mcp_unknown_tool failed\n"); failed++; }
+	if (test_asap_rejects_oversized_response() != 0) {
+		fprintf(stderr, "test_asap_rejects_oversized_response failed\n");
+		failed++;
+	}
 	if (test_api_asap_log_401() != 0) { fprintf(stderr, "test_api_asap_log_401 failed\n"); failed++; }
 	if (test_api_hardware_board_401() != 0) {
 		fprintf(stderr, "test_api_hardware_board_401 failed\n");
