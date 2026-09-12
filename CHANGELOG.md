@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- Inbound ASAP `mcp.tool_call` and `state.query` now hold `agent_lock()` around tool execute and SQLite `g_db` reads, matching `task.request`.
+
 ### Added
 - Phase 5 documentation suite (`docs/SECURITY.md`, `docs/ASAP.md`, and related guides).
 - `CONTRIBUTING.md` with PR workflow and pre-tag `gpio-mockup` ritual.

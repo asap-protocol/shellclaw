@@ -55,12 +55,14 @@ int agent_run(const config_t *cfg, const char *session_id, const char *user_mess
  * WebSocket dispatcher) must hold this mutex for the duration of agent_run().
  * /reset in handle_message must also hold it around session_delete().
  * Inbound mcp.tool_call must hold it around tool execute (see #60).
+ * Inbound state.query must hold it around memory_get_row_counts() (see #60).
  * Release before channel I/O (ch->send). The mutex is not recursive.
  */
 void agent_lock(void);
 
 /**
- * Release the global agent mutex after agent_run() or a locked session_delete().
+ * Release the global agent mutex after agent_run(), a locked session_delete(),
+ * inbound mcp.tool_call execute, or a locked state.query memory read.
  */
 void agent_unlock(void);
 
@@ -77,7 +79,7 @@ void shellclaw_agent_set_test_active_backend_name(const char *name_or_null);
  *
  * Used by dispatch tests to assert handle_message() holds the mutex
  * for the duration of agent_run() (see #54), and by ASAP server tests
- * for inbound mcp.tool_call (#60).
+ * for inbound mcp.tool_call and state.query (#60).
  */
 int agent_mutex_is_locked_for_test(void);
 
