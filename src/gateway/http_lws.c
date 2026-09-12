@@ -273,7 +273,8 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 			lws_callback_on_writable(wsi);
 		} else {
 			long cl = 0;
-			if (http_body_content_length(wsi, &cl) == 0 && cl > (long)BODY_BUF_SIZE)
+			if (http_body_content_length(wsi, &cl) == 0 &&
+			    asap_http_body_exceeds_static_cap(&conn->body, cl))
 				conn->body.body_too_large = 1;
 			conn->body.body[0] = '\0';
 			conn->body.body_len = 0;

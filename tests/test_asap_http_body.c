@@ -6,6 +6,7 @@
 
 #include "gateway/asap_http_body.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ASSERT(c) do { \
@@ -67,6 +68,19 @@ static int test_static_append_sets_too_large(void)
 	return 0;
 }
 
+static int test_exceeds_static_cap(void)
+{
+	asap_http_body_t body;
+
+	memset(&body, 0, sizeof(body));
+	ASSERT(asap_http_body_exceeds_static_cap(NULL, (long)BODY_BUF_SIZE + 1) == 0);
+	ASSERT(asap_http_body_exceeds_static_cap(&body, (long)BODY_BUF_SIZE) == 0);
+	ASSERT(asap_http_body_exceeds_static_cap(&body, (long)BODY_BUF_SIZE + 1) == 1);
+	body.use_dyn_body = 1;
+	ASSERT(asap_http_body_exceeds_static_cap(&body, (long)BODY_BUF_SIZE + 1) == 0);
+	return 0;
+}
+
 int main(void)
 {
 	int failed = 0;
@@ -84,6 +98,10 @@ int main(void)
 	}
 	if (test_static_append_sets_too_large() != 0) {
 		fprintf(stderr, "test_static_append_sets_too_large failed\n");
+		failed++;
+	}
+	if (test_exceeds_static_cap() != 0) {
+		fprintf(stderr, "test_exceeds_static_cap failed\n");
 		failed++;
 	}
 	if (failed == 0)
