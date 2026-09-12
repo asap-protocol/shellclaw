@@ -468,12 +468,53 @@ static int test_asap_body_over_max(void)
 	long code;
 	char *body = NULL;
 	const char payload[] = "{}";
-	int r = http_post_raw(gw_url("/asap"), payload, sizeof(payload) - 1, "1000001",
+	/* ASAP_BODY_MAX is 1 MiB (1048576). 1000001 is still under that cap. */
+	int r = http_post_raw(gw_url("/asap"), payload, sizeof(payload) - 1, "1048577",
 			      &code, &body);
 	ASSERT(r == 0);
 	ASSERT(code == 413);
 	if (body)
 		free(body);
+	return 0;
+}
+
+/*
+ * POST /asap allocates a 1 MiB dynamic buffer. A leftover Content-Length check
+ * still compared against the 64 KiB static cap used by PUT /api/config, so a
+ * valid state.query just over 64 KiB was 413'd before parse.
+ */
+static int test_asap_body_over_static_cap_accepted(void)
+{
+	enum { PAD = 70000 };
+	const char prefix[] =
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"asap.send\",\"params\":{"
+		"\"id\":\"e1\",\"asap_version\":\"2.1\","
+		"\"sender\":\"urn:from\",\"recipient\":\"urn:to\","
+		"\"payload_type\":\"state.query\",\"payload\":{\"pad\":\"";
+	const char suffix[] = "\"}}}";
+	size_t prefix_len = strlen(prefix);
+	size_t suffix_len = strlen(suffix);
+	size_t total = prefix_len + (size_t)PAD + suffix_len;
+	char *payload;
+	long code = 0;
+	char *body = NULL;
+	int r;
+
+	payload = malloc(total + 1U);
+	ASSERT(payload != NULL);
+	memcpy(payload, prefix, prefix_len);
+	memset(payload + prefix_len, 'A', (size_t)PAD);
+	memcpy(payload + prefix_len + (size_t)PAD, suffix, suffix_len + 1U);
+	ASSERT(total > 65536U);
+	ASSERT(total < (1024U * 1024U));
+	r = http_post(gw_url("/asap"), payload, &code, &body);
+	free(payload);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "\"result\"") != NULL);
+	ASSERT(strstr(body, "sessions") != NULL);
+	free(body);
 	return 0;
 }
 
@@ -1052,6 +1093,10 @@ int main(int argc, char **argv)
 	if (test_health_wellknown() != 0) { fprintf(stderr, "test_health_wellknown failed\n"); failed++; }
 	if (test_asap_body_over_max() != 0) {
 		fprintf(stderr, "test_asap_body_over_max failed\n");
+		failed++;
+	}
+	if (test_asap_body_over_static_cap_accepted() != 0) {
+		fprintf(stderr, "test_asap_body_over_static_cap_accepted failed\n");
 		failed++;
 	}
 	if (test_asap_invalid_body() != 0) { fprintf(stderr, "test_asap_invalid_body failed\n"); failed++; }
