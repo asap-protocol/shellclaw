@@ -197,10 +197,10 @@ $(DAEMON_O): src/core/daemon.c src/core/daemon.h src/core/config.h
 $(RELOAD_O): src/core/reload.c src/core/reload.h src/core/bootstrap.h src/core/config.h src/channels/channel.h src/channels/heartbeat.h src/providers/provider.h src/tools/tool.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/core/reload.c
 
-$(BOOTSTRAP_O): src/core/bootstrap.c src/core/bootstrap.h src/asap/manifest.h src/core/config.h src/core/memory.h src/core/skill.h src/channels/channel.h src/channels/heartbeat.h src/providers/provider.h src/tools/tool.h src/tools/cron.h
+$(BOOTSTRAP_O): src/core/bootstrap.c src/core/bootstrap.h src/asap/manifest.h src/core/agent.h src/core/config.h src/core/memory.h src/core/skill.h src/channels/channel.h src/channels/heartbeat.h src/providers/provider.h src/tools/tool.h src/tools/cron.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/core/bootstrap.c
 
-$(BOOTSTRAP_DISPATCH_STUB_O): tests/stubs/bootstrap_dispatch_stub.c src/core/bootstrap.h src/core/config.h src/providers/provider.h src/tools/tool.h
+$(BOOTSTRAP_DISPATCH_STUB_O): tests/stubs/bootstrap_dispatch_stub.c src/core/bootstrap.h src/core/agent.h src/core/config.h src/providers/provider.h src/tools/tool.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ tests/stubs/bootstrap_dispatch_stub.c
 
 $(TOOL_RELOAD_STUB_O): tests/stubs/tool_reload_stub.c src/tools/tool.h
@@ -364,7 +364,7 @@ $(HTTP_O): src/gateway/http.c src/gateway/http.h src/gateway/http_lws.h src/gate
 $(HTTP_LWS_O): src/gateway/http_lws.c src/gateway/http_lws.h src/gateway/asap_http_body.h src/gateway/routes.h src/gateway/auth.h src/gateway/static.h src/gateway/ws.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/http_lws.c
 
-$(ROUTES_O): src/gateway/routes.c src/gateway/routes.h src/gateway/routes_hardware.h src/gateway/http_lws.h src/gateway/auth.h src/gateway/rate_limit.h src/tools/context.h src/asap/manifest.h src/asap/envelope.h src/asap/server.h src/asap/log.h src/core/config.h src/core/memory.h src/core/skill.h src/providers/provider.h src/channels/channel.h src/tools/cron.h
+$(ROUTES_O): src/gateway/routes.c src/gateway/routes.h src/gateway/routes_hardware.h src/gateway/http_lws.h src/gateway/auth.h src/gateway/rate_limit.h src/tools/context.h src/asap/manifest.h src/asap/envelope.h src/asap/server.h src/asap/log.h src/core/bootstrap.h src/core/agent.h src/core/config.h src/core/memory.h src/core/skill.h src/providers/provider.h src/channels/channel.h src/tools/cron.h src/tools/tool.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/routes.c
 
 $(ROUTES_HARDWARE_O): src/gateway/routes_hardware.c src/gateway/routes_hardware.h src/gateway/routes.h src/gateway/http_lws.h src/gateway/uri_match.h src/hardware/hardware.h src/hardware/hardware_gpio_snapshot.h src/hardware/hardware_tegrastats.h src/hardware/board_detect.h src/core/config.h

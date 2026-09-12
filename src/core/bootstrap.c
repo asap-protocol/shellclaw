@@ -95,6 +95,28 @@ const tool_t *bootstrap_tool_at(size_t index)
 	return g_tools[index];
 }
 
+size_t bootstrap_fill_agent_tools(agent_tool_t *out, size_t cap)
+{
+	size_t tool_count = g_tool_count;
+	size_t i;
+	if (!out || cap == 0)
+		return 0;
+	if (tool_count > cap)
+		tool_count = cap;
+	for (i = 0; i < tool_count; i++) {
+		const tool_t *t = g_tools[i];
+		if (!t) {
+			tool_count = i;
+			break;
+		}
+		out[i].name = t->name;
+		out[i].description = t->description;
+		out[i].parameters_json = t->parameters_json;
+		out[i].execute = t->execute;
+	}
+	return tool_count;
+}
+
 static int memory_init_from_config(const config_t *cfg)
 {
 	const char *path = config_memory_db_path(cfg);

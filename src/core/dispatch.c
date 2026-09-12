@@ -33,19 +33,8 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 		return ch->send(msg->session_id, buf, NULL, 0);
 	}
 	char resp_buf[RESPONSE_BUF_SIZE];
-	size_t tool_count = bootstrap_tool_count();
 	agent_tool_t flat_tools[SHELLCLAW_MAX_TOOLS];
-	if (tool_count > SHELLCLAW_MAX_TOOLS)
-		tool_count = SHELLCLAW_MAX_TOOLS;
-	for (size_t i = 0; i < tool_count; i++) {
-		const tool_t *t = bootstrap_tool_at(i);
-		if (!t)
-			break;
-		flat_tools[i].name = t->name;
-		flat_tools[i].description = t->description;
-		flat_tools[i].parameters_json = t->parameters_json;
-		flat_tools[i].execute = t->execute;
-	}
+	size_t tool_count = bootstrap_fill_agent_tools(flat_tools, SHELLCLAW_MAX_TOOLS);
 	agent_lock();
 	int err = agent_run(bootstrap_get_cfg(), msg->session_id, text, bootstrap_get_provider(),
 	                    flat_tools, tool_count,

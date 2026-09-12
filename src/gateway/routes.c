@@ -14,6 +14,7 @@
 #include "asap/envelope.h"
 #include "asap/server.h"
 #include "asap/log.h"
+#include "core/bootstrap.h"
 #include "core/config.h"
 #include "core/memory.h"
 #include "core/skill.h"
@@ -555,6 +556,21 @@ static void handle_asap_log_get(char *buf, size_t size, int *status)
 	free(s);
 }
 
+/**
+ * Bind the running process into an inbound ASAP ctx. handle_asap used to
+ * set only cfg, so task.request always failed with "server missing cfg or
+ * provider" and mcp.tool_call saw an empty tool table (#53).
+ */
+static void asap_ctx_bind_bootstrap(asap_server_ctx_t *asap_ctx, const config_t *http_cfg,
+	agent_tool_t *flat_tools, size_t tools_cap)
+{
+	memset(asap_ctx, 0, sizeof *asap_ctx);
+	asap_ctx->cfg = http_cfg ? http_cfg : bootstrap_get_cfg();
+	asap_ctx->provider = bootstrap_get_provider();
+	asap_ctx->tool_count = bootstrap_fill_agent_tools(flat_tools, tools_cap);
+	asap_ctx->tools = flat_tools;
+}
+
 static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 	const char *body, size_t body_len, char *buf, size_t size, int *status)
 {
@@ -584,11 +600,14 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 	snippet = in.payload ? cJSON_PrintUnformatted(in.payload) : NULL;
 	asap_log_append_in(in.payload_type, in.id, snippet);
 	free(snippet);
-	memset(&asap_ctx, 0, sizeof asap_ctx);
-	asap_ctx.cfg = ctx ? ctx->cfg : NULL;
-	err_msg[0] = '\0';
-	asap_envelope_init(&out);
-	rc = asap_server_handle(&in, &out, &asap_ctx, err_msg, sizeof err_msg);
+	{
+		agent_tool_t flat_tools[SHELLCLAW_MAX_TOOLS];
+		asap_ctx_bind_bootstrap(&asap_ctx, ctx ? ctx->cfg : NULL,
+			flat_tools, SHELLCLAW_MAX_TOOLS);
+		err_msg[0] = '\0';
+		asap_envelope_init(&out);
+		rc = asap_server_handle(&in, &out, &asap_ctx, err_msg, sizeof err_msg);
+	}
 	asap_envelope_clear(&in);
 	if (rc != 0) {
 		asap_envelope_clear(&out);
