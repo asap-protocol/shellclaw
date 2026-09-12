@@ -46,10 +46,20 @@ static int test_hook_state_fail(const asap_server_ctx_t *ctx, cJSON **payload_ou
 	return -1;
 }
 
+static int g_agent_mutex_held_during_mcp_tool;
+
 static int echo_tool_execute(const char *args_json, char *result_buf, size_t max_len)
 {
 	(void)args_json;
 	snprintf(result_buf, max_len, "echo-ok");
+	return 0;
+}
+
+static int mutex_probe_tool_execute(const char *args_json, char *result_buf, size_t max_len)
+{
+	(void)args_json;
+	g_agent_mutex_held_during_mcp_tool = agent_mutex_is_locked_for_test();
+	snprintf(result_buf, max_len, "probe-ok");
 	return 0;
 }
 
@@ -78,6 +88,13 @@ static agent_tool_t s_echo_tool = {
 	.description = "",
 	.parameters_json = "{}",
 	.execute = echo_tool_execute,
+};
+
+static agent_tool_t s_mutex_probe_tool = {
+	.name = "mutex_probe",
+	.description = "",
+	.parameters_json = "{}",
+	.execute = mutex_probe_tool_execute,
 };
 
 static agent_tool_t s_flaky_tool = {
@@ -720,6 +737,34 @@ static int test_trust_sender_rejects_blank_sender_when_list_nonempty(void)
 	return 0;
 }
 
+static int test_mcp_tool_call_holds_agent_mutex(void)
+{
+	asap_envelope_t in;
+	asap_envelope_t out;
+	asap_server_ctx_t ctx;
+	char err[128];
+	cJSON *pl;
+	int rc;
+	asap_envelope_init(&in);
+	asap_envelope_init(&out);
+	pl = cJSON_CreateObject();
+	ASSERT(pl != NULL);
+	ASSERT(cJSON_AddStringToObject(pl, "name", "mutex_probe") != NULL);
+	ASSERT(cJSON_AddObjectToObject(pl, "arguments") != NULL);
+	ASSERT(wrap_build(&in, "mcp.tool_call", pl) == 0);
+	memset(&ctx, 0, sizeof ctx);
+	ctx.tools = &s_mutex_probe_tool;
+	ctx.tool_count = 1;
+	g_agent_mutex_held_during_mcp_tool = 0;
+	rc = asap_server_handle(&in, &out, &ctx, err, sizeof err);
+	ASSERT(rc == 0);
+	ASSERT(g_agent_mutex_held_during_mcp_tool == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
 int main(void)
 {
 	int r = 0;
@@ -747,5 +792,6 @@ int main(void)
 	r |= test_tool_call_hook_overrides_builtin_dispatch();
 	r |= test_tool_execute_nonzero_reports_error();
 	r |= test_trust_sender_rejects_blank_sender_when_list_nonempty();
+	r |= test_mcp_tool_call_holds_agent_mutex();
 	return r;
 }
