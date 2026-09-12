@@ -10,6 +10,7 @@
 void bootstrap_set_provider_for_test(const provider_t *provider);
 void bootstrap_reset_tools_for_test(void);
 void bootstrap_add_tool_for_test(const tool_t *tool);
+#include "core/agent.h"
 #include "core/config.h"
 #include "core/dispatch.h"
 #include "core/memory.h"
@@ -40,6 +41,7 @@ static char g_last_session[SEND_BUF_SIZE];
 static char g_last_text[SEND_BUF_SIZE];
 static int g_send_calls;
 static size_t g_last_provider_tool_count;
+static int g_agent_mutex_held_during_chat;
 
 static int mock_send(const char *session_id, const char *text,
 		     const channel_attachment_t *attachments, size_t attachments_count)
@@ -111,6 +113,29 @@ static const provider_t fail_provider = {
 	.name = "fail",
 	.init = spy_init,
 	.chat = fail_chat,
+	.cleanup = spy_cleanup,
+};
+
+static int lockcheck_chat(const provider_message_t *messages, size_t message_count,
+			  const provider_tool_def_t *tools, size_t tool_count,
+			  provider_response_t *response)
+{
+	(void)messages;
+	(void)message_count;
+	(void)tools;
+	(void)tool_count;
+	g_agent_mutex_held_during_chat = agent_mutex_is_locked_for_test();
+	response->error = 0;
+	response->content = strdup("agent-ok");
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	return 0;
+}
+
+static const provider_t lockcheck_provider = {
+	.name = "lockcheck",
+	.init = spy_init,
+	.chat = lockcheck_chat,
 	.cleanup = spy_cleanup,
 };
 
@@ -303,6 +328,34 @@ static int test_dispatch_forwards_full_hardware_tool_table(void)
 	return 0;
 }
 
+static int test_handle_message_holds_agent_mutex(void)
+{
+	channel_incoming_msg_t msg = {0};
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_lock_XXXXXX";
+	config_t *cfg = NULL;
+	int fd;
+
+	reset_send_spy();
+	g_agent_mutex_held_during_chat = 0;
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	bootstrap_set_cfg(cfg);
+	bootstrap_set_provider_for_test(&lockcheck_provider);
+	bootstrap_reset_tools_for_test();
+	msg.session_id = "cli:lock";
+	msg.text = "ping";
+	ASSERT(handle_message(&mock_channel, &msg) == 0);
+	ASSERT(g_send_calls == 1);
+	ASSERT(g_agent_mutex_held_during_chat == 1);
+	config_free(cfg);
+	unlink(tmpl);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_reset_clears_session());
@@ -310,6 +363,7 @@ int main(void)
 	RUN(test_agent_failure_fallback_message());
 	RUN(test_normal_message_uses_provider());
 	RUN(test_dispatch_forwards_full_hardware_tool_table());
+	RUN(test_handle_message_holds_agent_mutex());
 	puts("test_dispatch OK");
 	return 0;
 }

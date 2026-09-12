@@ -67,6 +67,15 @@ void agent_unlock(void);
 /** Test-only: non-empty @p name_or_null forces “active backend” for local/offline prompt suffix; NULL uses router. */
 void shellclaw_agent_set_test_active_backend_name(const char *name_or_null);
 
+/**
+ * Test-only: probe whether the global agent mutex is currently held.
+ * @return 1 if locked, 0 if free.
+ *
+ * Used by dispatch tests to assert handle_message() holds the mutex
+ * for the duration of agent_run() (see #54).
+ */
+int agent_mutex_is_locked_for_test(void);
+
 #ifdef __cplusplus
 }
 #endif

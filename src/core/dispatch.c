@@ -41,9 +41,11 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 		flat_tools[i].parameters_json = t->parameters_json;
 		flat_tools[i].execute = t->execute;
 	}
+	agent_lock();
 	int err = agent_run(bootstrap_get_cfg(), msg->session_id, text, bootstrap_get_provider(),
 	                    flat_tools, tool_count,
 	                    resp_buf, sizeof(resp_buf));
+	agent_unlock();
 	if (err != 0 && resp_buf[0] == '\0')
 		snprintf(resp_buf, sizeof(resp_buf), "Error: agent failed (code %d)", err);
 	return ch->send(msg->session_id, resp_buf, NULL, 0);
