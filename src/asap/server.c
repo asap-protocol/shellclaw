@@ -17,6 +17,7 @@
 #include <pthread.h>
 
 enum { ASAP_SERVER_AGENT_RESPONSE_CAP = 256 * 1024 };
+enum { ASAP_TASK_SESSION_ID_CAP = 512 };
 
 static void set_err(char *buf, size_t sz, const char *msg)
 {
@@ -112,16 +113,21 @@ static int fill_response_envelope(asap_envelope_t *out, const asap_envelope_t *i
 	return 0;
 }
 
-const char *asap_resolve_task_session_id(const char *ctx_session_id, const char *sender,
-					 char *buf, size_t buf_size)
+const char *asap_resolve_task_session_id(const char *sender, char *buf, size_t buf_size)
 {
-	if (ctx_session_id && ctx_session_id[0] != '\0')
-		return ctx_session_id;
-	if (sender && sender[0] != '\0' && buf != NULL && buf_size > 0) {
-		snprintf(buf, buf_size, "asap:%s", sender);
-		return buf;
-	}
-	return "asap:inbound";
+	size_t need;
+	int n;
+	if (!sender || sender[0] == '\0')
+		return "asap:inbound";
+	if (!buf || buf_size == 0)
+		return NULL;
+	need = strlen("asap:") + strlen(sender) + 1;
+	if (need > buf_size)
+		return NULL;
+	n = snprintf(buf, buf_size, "asap:%s", sender);
+	if (n < 0 || (size_t)n >= buf_size)
+		return NULL;
+	return buf;
 }
 
 static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
@@ -129,7 +135,7 @@ static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
 {
 	char *prompt;
 	char *resp_buf;
-	char sid_buf[256];
+	char sid_buf[ASAP_TASK_SESSION_ID_CAP];
 	const char *sid;
 	int ar;
 	cJSON *pl;
@@ -147,8 +153,21 @@ static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
 		return -32603;
 	}
 	resp_buf[0] = '\0';
-	/* Isolate SQLite history by sender URN; "asap:inbound" mixed clients (#64). */
-	sid = asap_resolve_task_session_id(ctx->session_id, in->sender, sid_buf, sizeof sid_buf);
+	/* Isolate SQLite history by sender URN; "asap:inbound" mixed clients (#64).
+	 * Ignore ctx->session_id so a later constant (including asap:inbound)
+	 * cannot restore a shared bucket. Authenticity is sender_is_trusted():
+	 * POST /asap is protocol-public; empty trusted_senders allows every URN. */
+	sid = asap_resolve_task_session_id(in->sender, sid_buf, sizeof sid_buf);
+	if (!sid) {
+		char too_long[128];
+		free(resp_buf);
+		free(prompt);
+		snprintf(too_long, sizeof too_long,
+			"task.request: sender URN length %zu exceeds session id cap %d",
+			in->sender ? strlen(in->sender) : 0, ASAP_TASK_SESSION_ID_CAP);
+		set_err(err_message, err_message_size, too_long);
+		return -32602;
+	}
 	if (ctx->task_request_hook)
 		ar = ctx->task_request_hook(ctx, in, resp_buf, (size_t)ASAP_SERVER_AGENT_RESPONSE_CAP);
 	else {

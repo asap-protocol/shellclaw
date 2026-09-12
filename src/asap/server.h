@@ -58,14 +58,15 @@ int asap_server_handle(const asap_envelope_t *in, asap_envelope_t *out,
 
 /**
  * Resolve the agent session id for inbound task.request.
- * Explicit @p ctx_session_id wins; otherwise derives `asap:<sender>` from the
- * envelope sender URN so unrelated clients do not share SQLite history (#64).
+ * Derives `asap:<sender>` from the envelope sender URN so unrelated clients
+ * do not share SQLite history (#64). Missing sender falls back to
+ * `asap:inbound`. Returns NULL when @p buf cannot hold the derived id
+ * (fail closed; do not truncate).
  *
- * Example: asap_resolve_task_session_id(NULL, "urn:alice", buf, sizeof buf)
+ * Example: asap_resolve_task_session_id("urn:alice", buf, sizeof buf)
  * returns "asap:urn:alice".
  */
-const char *asap_resolve_task_session_id(const char *ctx_session_id, const char *sender,
-					 char *buf, size_t buf_size);
+const char *asap_resolve_task_session_id(const char *sender, char *buf, size_t buf_size);
 
 #ifdef __cplusplus
 }

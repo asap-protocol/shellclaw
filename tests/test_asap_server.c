@@ -812,7 +812,7 @@ static int test_task_request_isolates_sessions_by_sender(void)
 	close(fd);
 	f = fopen(cfg_path, "w");
 	ASSERT(f != NULL);
-	fprintf(f, "[agent]\nmodel = \"test\"\n[memory]\npath = \"%s\"\n", tmpl);
+	fprintf(f, "[agent]\nmodel = \"test\"\n[memory]\ndb_path = \"%s\"\n", tmpl);
 	fclose(f);
 	ASSERT(memory_init(tmpl) == 0);
 	ASSERT(config_load(cfg_path, &cfg, NULL, 0) == 0);
@@ -826,6 +826,10 @@ static int test_task_request_isolates_sessions_by_sender(void)
 	ASSERT(session_load("asap:urn:bob", loaded, sizeof loaded) == 0);
 	ASSERT(strstr(loaded, "bob-hello") != NULL);
 	ASSERT(strstr(loaded, "alice-secret") == NULL);
+	ASSERT(session_load("asap:urn:alice", loaded, sizeof loaded) == 0);
+	ASSERT(strstr(loaded, "alice-secret") != NULL);
+	ASSERT(strstr(loaded, "bob-hello") == NULL);
+	ASSERT(session_load("asap:inbound", loaded, sizeof loaded) != 0);
 	rc = 0;
 	config_free(cfg);
 	memory_cleanup();
@@ -837,19 +841,49 @@ static int test_task_request_isolates_sessions_by_sender(void)
 static int test_resolve_task_session_id(void)
 {
 	char buf[128];
+	char tiny[8];
 	const char *sid;
-	sid = asap_resolve_task_session_id("cli:override", "urn:alice", buf, sizeof buf);
-	ASSERT(sid != NULL && strcmp(sid, "cli:override") == 0);
-	sid = asap_resolve_task_session_id(NULL, "urn:alice", buf, sizeof buf);
+	sid = asap_resolve_task_session_id("urn:alice", buf, sizeof buf);
 	ASSERT(sid == buf);
 	ASSERT(strcmp(sid, "asap:urn:alice") == 0);
-	sid = asap_resolve_task_session_id("", "urn:bob", buf, sizeof buf);
+	sid = asap_resolve_task_session_id("urn:bob", buf, sizeof buf);
 	ASSERT(sid == buf);
 	ASSERT(strcmp(sid, "asap:urn:bob") == 0);
-	sid = asap_resolve_task_session_id(NULL, NULL, buf, sizeof buf);
+	sid = asap_resolve_task_session_id(NULL, buf, sizeof buf);
 	ASSERT(sid != NULL && strcmp(sid, "asap:inbound") == 0);
-	sid = asap_resolve_task_session_id(NULL, "", buf, sizeof buf);
+	sid = asap_resolve_task_session_id("", buf, sizeof buf);
 	ASSERT(sid != NULL && strcmp(sid, "asap:inbound") == 0);
+	sid = asap_resolve_task_session_id("urn:alice", tiny, sizeof tiny);
+	ASSERT(sid == NULL);
+	sid = asap_resolve_task_session_id("urn:alice", buf, 0);
+	ASSERT(sid == NULL);
+	return 0;
+}
+
+static int test_task_request_rejects_oversized_sender(void)
+{
+	asap_envelope_t in;
+	asap_envelope_t out;
+	asap_server_ctx_t ctx;
+	char err[192];
+	char sender[600];
+	cJSON *pl;
+	int rc;
+	asap_envelope_init(&in);
+	asap_envelope_init(&out);
+	memset(sender, 'x', sizeof sender - 1);
+	sender[sizeof sender - 1] = '\0';
+	pl = cJSON_CreateObject();
+	ASSERT(pl != NULL);
+	ASSERT(cJSON_AddStringToObject(pl, "input", "hi") != NULL);
+	ASSERT(wrap_build_from(&in, "task.request", sender, pl) == 0);
+	memset(&ctx, 0, sizeof ctx);
+	ctx.task_request_hook = test_hook_task;
+	rc = asap_server_handle(&in, &out, &ctx, err, sizeof err);
+	ASSERT(rc == -32602);
+	ASSERT(strstr(err, "too long") != NULL || strstr(err, "exceeds") != NULL);
+	teardown_env(&in);
+	teardown_env(&out);
 	return 0;
 }
 
@@ -1027,6 +1061,7 @@ int main(void)
 	r |= test_state_query_memory_holds_agent_mutex();
 	r |= test_state_query_hook_holds_agent_mutex();
 	r |= test_resolve_task_session_id();
+	r |= test_task_request_rejects_oversized_sender();
 	r |= test_task_request_isolates_sessions_by_sender();
 	return r;
 }
