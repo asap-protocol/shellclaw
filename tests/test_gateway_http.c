@@ -420,29 +420,104 @@ static int test_asap_missing_fields(void)
 	return 0;
 }
 
+static int post_asap(const char *payload_type, const char *payload_json,
+	const char *env_id, long *code, char **body)
+{
+	char req[1536];
+	int n;
+	n = snprintf(req, sizeof req,
+		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\","
+		"\"params\":{"
+		"\"id\":\"%s\","
+		"\"asap_version\":\"2.1\","
+		"\"sender\":\"urn:asap:agent:a\","
+		"\"recipient\":\"urn:asap:agent:b\","
+		"\"payload_type\":\"%s\","
+		"\"payload\":%s,"
+		"\"correlation_id\":\"c1\","
+		"\"trace_id\":\"t1\","
+		"\"timestamp\":\"2026-01-01T00:00:00Z\""
+		"},\"id\":42}",
+		env_id, payload_type, payload_json);
+	if (n < 0 || (size_t)n >= sizeof req)
+		return -1;
+	return http_post(gw_url("/asap"), req, code, body);
+}
+
+static int asap_http_is(long code, long want, const char *body)
+{
+	if (code == want)
+		return 1;
+	fprintf(stderr, "FAIL: HTTP %ld want %ld body=%s\n",
+		code, want, body ? body : "(null)");
+	return 0;
+}
+
+static int asap_result_payload_type_is(const char *body, const char *want)
+{
+	cJSON *root = cJSON_Parse(body);
+	cJSON *result;
+	cJSON *ptype;
+	int ok = 0;
+	if (!root)
+		return 0;
+	result = cJSON_GetObjectItemCaseSensitive(root, "result");
+	ptype = result ? cJSON_GetObjectItemCaseSensitive(result, "payload_type") : NULL;
+	if (ptype && cJSON_IsString(ptype) && ptype->valuestring &&
+	    strcmp(ptype->valuestring, want) == 0)
+		ok = 1;
+	cJSON_Delete(root);
+	return ok;
+}
+
+static int asap_error_code_is(const char *body, int want)
+{
+	cJSON *root = cJSON_Parse(body);
+	cJSON *err;
+	cJSON *code;
+	int ok = 0;
+	if (!root)
+		return 0;
+	err = cJSON_GetObjectItemCaseSensitive(root, "error");
+	code = err ? cJSON_GetObjectItemCaseSensitive(err, "code") : NULL;
+	if (code && cJSON_IsNumber(code) && (int)code->valuedouble == want)
+		ok = 1;
+	cJSON_Delete(root);
+	return ok;
+}
+
+static int asap_mcp_result_is_json_array(const char *body)
+{
+	cJSON *root = cJSON_Parse(body);
+	cJSON *result;
+	cJSON *payload;
+	cJSON *result_str;
+	cJSON *inner = NULL;
+	int ok = 0;
+	if (!root)
+		return 0;
+	result = cJSON_GetObjectItemCaseSensitive(root, "result");
+	payload = result ? cJSON_GetObjectItemCaseSensitive(result, "payload") : NULL;
+	result_str = payload ? cJSON_GetObjectItemCaseSensitive(payload, "result") : NULL;
+	if (result_str && cJSON_IsString(result_str) && result_str->valuestring) {
+		inner = cJSON_Parse(result_str->valuestring);
+		ok = (inner && cJSON_IsArray(inner)) ? 1 : 0;
+		cJSON_Delete(inner);
+	}
+	cJSON_Delete(root);
+	return ok;
+}
+
 static int test_asap_task_request(void)
 {
 	long code;
 	char *body = NULL;
-	static const char *req =
-		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\","
-		"\"params\":{"
-		"\"id\":\"01HZABC123\","
-		"\"asap_version\":\"2.1\","
-		"\"sender\":\"urn:asap:agent:a\","
-		"\"recipient\":\"urn:asap:agent:b\","
-		"\"payload_type\":\"task.request\","
-		"\"payload\":{\"input\":\"hello\"},"
-		"\"correlation_id\":\"c1\","
-		"\"trace_id\":\"t1\","
-		"\"timestamp\":\"2026-01-01T00:00:00Z\""
-		"},\"id\":42}";
-	int r = http_post(gw_url("/asap"), req, &code, &body);
+	int r = post_asap("task.request", "{\"input\":\"hello\"}", "01HZABC123",
+		&code, &body);
 	ASSERT(r == 0);
-	ASSERT(code == 200);
+	ASSERT(asap_http_is(code, 200, body));
 	ASSERT(body != NULL);
-	ASSERT(strstr(body, "task.response") != NULL);
-	ASSERT(strstr(body, "server missing cfg or provider") == NULL);
+	ASSERT(asap_result_payload_type_is(body, "task.response"));
 	free(body);
 	return 0;
 }
@@ -451,25 +526,32 @@ static int test_asap_mcp_tool_call(void)
 {
 	long code;
 	char *body = NULL;
-	static const char *req =
-		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\","
-		"\"params\":{"
-		"\"id\":\"01HZABC124\","
-		"\"asap_version\":\"2.1\","
-		"\"sender\":\"urn:asap:agent:a\","
-		"\"recipient\":\"urn:asap:agent:b\","
-		"\"payload_type\":\"mcp.tool_call\","
-		"\"payload\":{\"name\":\"cron\",\"arguments\":{\"operation\":\"list\"}},"
-		"\"correlation_id\":\"c2\","
-		"\"trace_id\":\"t2\","
-		"\"timestamp\":\"2026-01-01T00:00:00Z\""
-		"},\"id\":43}";
-	int r = http_post(gw_url("/asap"), req, &code, &body);
+	int r = post_asap("mcp.tool_call",
+		"{\"name\":\"cron\",\"arguments\":{\"operation\":\"list\"}}",
+		"01HZABC124", &code, &body);
 	ASSERT(r == 0);
-	ASSERT(code == 200);
+	ASSERT(asap_http_is(code, 200, body));
 	ASSERT(body != NULL);
-	ASSERT(strstr(body, "mcp.tool_result") != NULL);
-	ASSERT(strstr(body, "unknown tool") == NULL);
+	ASSERT(asap_result_payload_type_is(body, "mcp.tool_result"));
+	ASSERT(asap_mcp_result_is_json_array(body));
+	free(body);
+	return 0;
+}
+
+static int test_asap_mcp_unknown_tool(void)
+{
+	long code;
+	char *body = NULL;
+	int r = post_asap("mcp.tool_call",
+		"{\"name\":\"no-such-tool\",\"arguments\":{}}",
+		"01HZABC125", &code, &body);
+	ASSERT(r == 0);
+	if (code != 400)
+		fprintf(stderr, "FAIL: HTTP %ld want 400 body=%s\n",
+			code, body ? body : "(null)");
+	ASSERT(code == 400);
+	ASSERT(body != NULL);
+	ASSERT(asap_error_code_is(body, -32001));
 	free(body);
 	return 0;
 }
@@ -1112,6 +1194,7 @@ int main(int argc, char **argv)
 	if (test_asap_missing_fields() != 0) { fprintf(stderr, "test_asap_missing_fields failed\n"); failed++; }
 	if (test_asap_task_request() != 0) { fprintf(stderr, "test_asap_task_request failed\n"); failed++; }
 	if (test_asap_mcp_tool_call() != 0) { fprintf(stderr, "test_asap_mcp_tool_call failed\n"); failed++; }
+	if (test_asap_mcp_unknown_tool() != 0) { fprintf(stderr, "test_asap_mcp_unknown_tool failed\n"); failed++; }
 	if (test_api_asap_log_401() != 0) { fprintf(stderr, "test_api_asap_log_401 failed\n"); failed++; }
 	if (test_api_hardware_board_401() != 0) {
 		fprintf(stderr, "test_api_hardware_board_401 failed\n");
