@@ -42,6 +42,7 @@ static char g_last_text[SEND_BUF_SIZE];
 static int g_send_calls;
 static size_t g_last_provider_tool_count;
 static int g_agent_mutex_held_during_chat;
+static int g_agent_mutex_held_during_reset;
 
 static int mock_send(const char *session_id, const char *text,
 		     const channel_attachment_t *attachments, size_t attachments_count)
@@ -139,6 +140,12 @@ static const provider_t lockcheck_provider = {
 	.cleanup = spy_cleanup,
 };
 
+static void reset_lock_probe(const char *session_id)
+{
+	(void)session_id;
+	g_agent_mutex_held_during_reset = agent_mutex_is_locked_for_test();
+}
+
 static config_t *load_minimal_cfg(const char *path)
 {
 	config_t *cfg = NULL;
@@ -199,9 +206,14 @@ static int test_reset_clears_session(void)
 
 	msg.session_id = "ws:test";
 	msg.text = "/reset";
+	g_agent_mutex_held_during_reset = 0;
+	session_delete_set_hook_for_test(reset_lock_probe);
 	ASSERT(handle_message(&mock_channel, &msg) == 0);
+	session_delete_set_hook_for_test(NULL);
 	ASSERT(g_send_calls == 1);
 	ASSERT(strstr(g_last_text, "Session cleared") != NULL);
+	ASSERT(g_agent_mutex_held_during_reset == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
 	ASSERT(session_load("ws:test", history, sizeof(history)) != 0);
 
 	config_free(cfg);
@@ -351,6 +363,7 @@ static int test_handle_message_holds_agent_mutex(void)
 	ASSERT(handle_message(&mock_channel, &msg) == 0);
 	ASSERT(g_send_calls == 1);
 	ASSERT(g_agent_mutex_held_during_chat == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
 	config_free(cfg);
 	unlink(tmpl);
 	return 0;

@@ -18,7 +18,12 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 {
 	const char *text = msg->text ? msg->text : "";
 	if (strcmp(text, "/reset") == 0) {
+		/* Serialize with ASAP agent_run so session_delete cannot race
+		 * the same session (see #54, review on #85). Drop the lock
+		 * before ch->send so channel I/O does not pin the mutex. */
+		agent_lock();
 		session_delete(msg->session_id);
+		agent_unlock();
 		return ch->send(msg->session_id, "Session cleared.", NULL, 0);
 	}
 	if (strcmp(text, "/status") == 0) {
