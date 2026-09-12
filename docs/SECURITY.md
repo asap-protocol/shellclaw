@@ -12,8 +12,8 @@ ShellClaw runs as a user-level agent on edge boards (Jetson Orin Nano Super, Ras
 
 - **Shell tool** — subprocess with optional Linux namespaces + allowlist.
 - **File tool** — workspace-scoped paths when configured.
-- **Hardware tools** — GPIO, I2C, camera (gateway-authenticated HTTP in v1.0).
-- **ASAP / gateway** — Bearer-authenticated HTTP and WebSocket.
+- **Hardware tools** — GPIO, I2C, camera (gateway `/api/hardware/*` is Bearer-authenticated in v1.0).
+- **ASAP / gateway** — Bearer-authenticated `/api/*` HTTP and WebSocket. `POST /asap` is protocol-public (rate-limited, not Bearer); authenticity is `[asap].trusted_senders`.
 
 The primary goals are: prevent sandboxed shell commands from escaping to host destruction, block direct GPU/camera daemon access from the shell sandbox, and keep signing keys and cloud credentials off disk with unsafe permissions.
 
@@ -171,6 +171,17 @@ Handlers: [`src/gateway/routes_hardware.c`](../src/gateway/routes_hardware.c). N
 ### Re-verification vs slice 02
 
 Slice 02 introduced these routes; this audit confirms Bearer gating remains centralized in `http_lws.c`. Rate limiting for camera POST is deferred with the capture implementation.
+
+## Inbound ASAP `POST /asap`
+
+`POST /asap` is excluded from Bearer pairing so ASAP peers can call without a ShellClaw token. Authenticity is `[asap].trusted_senders`. An empty list (local/dev default) allows every claimed URN.
+
+After provider/tool wiring in `handle_asap` (#53), a sender that passes that check can:
+
+- `task.request` — `agent_run()` with the same tool table as chat (`shell`, `file`, hardware, `asap_invoke`, …)
+- `mcp.tool_call` — `execute()` with attacker-chosen name and arguments (no LLM)
+
+Default gateway bind is `127.0.0.1`, which contains this for stock installs. Production MUST set `trusted_senders` before exposing the gateway (`allow_bind_all`, tunnel, marketplace URL). Restricting the inbound MCP tool table (or failing closed when the allowlist is empty and the host is not loopback) is a follow-up.
 
 ---
 

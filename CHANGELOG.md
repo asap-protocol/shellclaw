@@ -6,6 +6,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ### Fixed
 - Inbound ASAP `mcp.tool_call` and `state.query` now hold `agent_lock()` around tool execute and SQLite `g_db` reads, matching `task.request`.
+- Inbound `POST /asap` now wires the process provider and tool table into `asap_ctx`, so `task.request` and `mcp.tool_call` dispatch instead of failing with `server missing cfg or provider`.
 
 ### Added
 - Phase 5 documentation suite (`docs/SECURITY.md`, `docs/ASAP.md`, and related guides).
@@ -19,6 +20,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ### Security
 - Camera auto-output keeps the exclusive `mkstemp` inode (no unlink + `${tmpl}.jpg` sibling).
 - Reject I2C `bus` outside 0–255 at the tool JSON boundary.
+- Document that protocol-public `POST /asap` can invoke local tools; production must set `[asap].trusted_senders` before exposing the gateway.
 
 ---
 
