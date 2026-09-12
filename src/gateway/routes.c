@@ -14,7 +14,6 @@
 #include "asap/envelope.h"
 #include "asap/server.h"
 #include "asap/log.h"
-#include "core/agent.h"
 #include "core/bootstrap.h"
 #include "core/config.h"
 #include "core/memory.h"
@@ -565,26 +564,11 @@ static void handle_asap_log_get(char *buf, size_t size, int *status)
 static void asap_ctx_bind_bootstrap(asap_server_ctx_t *asap_ctx, const config_t *http_cfg,
 	agent_tool_t *flat_tools, size_t tools_cap)
 {
-	size_t tool_count = bootstrap_tool_count();
-	size_t i;
-	if (tool_count > tools_cap)
-		tool_count = tools_cap;
-	for (i = 0; i < tool_count; i++) {
-		const tool_t *t = bootstrap_tool_at(i);
-		if (!t) {
-			tool_count = i;
-			break;
-		}
-		flat_tools[i].name = t->name;
-		flat_tools[i].description = t->description;
-		flat_tools[i].parameters_json = t->parameters_json;
-		flat_tools[i].execute = t->execute;
-	}
 	memset(asap_ctx, 0, sizeof *asap_ctx);
 	asap_ctx->cfg = http_cfg ? http_cfg : bootstrap_get_cfg();
 	asap_ctx->provider = bootstrap_get_provider();
+	asap_ctx->tool_count = bootstrap_fill_agent_tools(flat_tools, tools_cap);
 	asap_ctx->tools = flat_tools;
-	asap_ctx->tool_count = tool_count;
 }
 
 static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
