@@ -16,7 +16,7 @@ When the gateway is enabled and signing keys load successfully, ShellClaw serves
 |-------|------|----------|
 | `GET /.well-known/asap/manifest.json` | Public | **SignedManifest** JSON (inner manifest + Ed25519 signature + public_key) |
 | `GET /.well-known/asap/health` | Public | Minimal health stub (`{"status":"ok"}` in v1.0) |
-| `POST /asap` | Rate-limited | JSON-RPC ASAP ingress: `task.request` / `mcp.tool_call` dispatch with the process provider and tool table. Compliance harness shape is still partial (see Known gaps). |
+| `POST /asap` | Rate-limited | JSON-RPC ASAP ingress: `task.request` / `mcp.tool_call` dispatch with the process provider and tool table. Serialized responses larger than the 64 KiB gateway HTTP buffer (`RESP_BUF_SIZE`) are rejected with HTTP 500 / JSON-RPC `-32603` rather than truncated. Compliance harness shape is still partial (see Known gaps). |
 | `GET /api/asap/log` | Bearer | Inbound ASAP message log |
 
 Implementation: `src/asap/manifest.c`, `src/gateway/routes.c`. If keys cannot load, manifest route returns **500** and agent startup fails fast (`init_subsystems()`).
