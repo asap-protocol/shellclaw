@@ -8,6 +8,7 @@
 #include "core/config.h"
 #include "core/memory.h"
 #include "providers/provider.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -718,6 +719,253 @@ static int test_local_offline_note_skipped_for_non_local(void)
 	return 0;
 }
 
+/* SESSION_JSON_MAX in agent.c is 128 KiB. A reply this large plus a near-full
+ * prior session forces append_exchange_to_session_json over the cap. */
+#define OVERFLOW_REPLY_BYTES (16 * 1024)
+
+static int overflow_reply_init(const config_t *cfg) { (void)cfg; return 0; }
+static int overflow_reply_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	char *big;
+	(void)messages;
+	(void)message_count;
+	(void)tools;
+	(void)tool_count;
+	response->error = 0;
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	big = malloc(OVERFLOW_REPLY_BYTES);
+	if (!big) return -1;
+	memset(big, 'R', OVERFLOW_REPLY_BYTES - 1);
+	big[OVERFLOW_REPLY_BYTES - 1] = '\0';
+	response->content = big;
+	return 0;
+}
+static void overflow_reply_cleanup(void) {}
+static const provider_t overflow_reply_provider = {
+	.name = "overflow_reply",
+	.init = overflow_reply_init,
+	.chat = overflow_reply_chat,
+	.cleanup = overflow_reply_cleanup,
+};
+
+static int keep_history_init(const config_t *cfg) { (void)cfg; return 0; }
+static int keep_history_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	(void)tools;
+	(void)tool_count;
+	response->error = 0;
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	response->content = strdup("ok");
+	spy_roles_clear();
+	spy_message_count = message_count;
+	for (size_t i = 0; i < message_count && i < SPY_SLOTS; i++) {
+		spy_roles[i] = messages[i].role ? strdup(messages[i].role) : NULL;
+		if (messages[i].content) {
+			size_t n = strlen(messages[i].content);
+			if (n >= SPY_CONTENT_SIZE) n = SPY_CONTENT_SIZE - 1;
+			memcpy(spy_content[i], messages[i].content, n);
+			spy_content[i][n] = '\0';
+		} else
+			spy_content[i][0] = '\0';
+	}
+	return 0;
+}
+static void keep_history_cleanup(void) {}
+static const provider_t keep_history_provider = {
+	.name = "keep_history",
+	.init = keep_history_init,
+	.chat = keep_history_chat,
+	.cleanup = keep_history_cleanup,
+};
+
+/**
+ * Concrete trigger: near-cap session JSON + fat assistant reply.
+ * Before the fix, append truncated mid-JSON, session_save persisted corrupt
+ * payload, and the next agent_run parse wiped history. After the fix, overflow
+ * refuses to save and prior history remains parseable.
+ */
+static int test_session_overflow_does_not_corrupt_history(void)
+{
+	int failed = 1;
+	config_t *cfg = NULL;
+	const char *db_path = "build/test_agent_overflow.db";
+	const char *config_path = "build/test_agent_overflow.toml";
+	const char *session_id = "cli:overflow";
+	const char *marker = "UNIQUE_HISTORY_MARKER_xyz";
+	/* Two large messages keep msg_count under max_context so compaction does not shrink first. */
+	enum { PAD_A = 62 * 1024, PAD_B = 62 * 1024, LOAD_CAP = 130 * 1024 };
+	char *session_json = NULL;
+	char *pad_a = NULL;
+	char *pad_b = NULL;
+	char *loaded = NULL;
+	size_t need;
+	size_t off = 0;
+	char response_buf[OVERFLOW_REPLY_BYTES + 64];
+	cJSON *parsed;
+
+	memory_cleanup();
+	if (memory_init(db_path) != 0) goto cleanup;
+	pad_a = malloc(PAD_A + 1);
+	pad_b = malloc(PAD_B + 1);
+	if (!pad_a || !pad_b) goto cleanup;
+	memset(pad_a, 'A', PAD_A);
+	pad_a[PAD_A] = '\0';
+	memset(pad_b, 'B', PAD_B);
+	pad_b[PAD_B] = '\0';
+	need = strlen(marker) + PAD_A + PAD_B + 128;
+	session_json = malloc(need);
+	if (!session_json) goto cleanup;
+	off = (size_t)snprintf(session_json, need,
+		"[{\"role\":\"user\",\"content\":\"%s%s\"},{\"role\":\"assistant\",\"content\":\"%s\"}]",
+		marker, pad_a, pad_b);
+	if (off == 0 || off >= need) goto cleanup;
+	if (session_save(session_id, session_json) != 0) goto cleanup;
+
+	{
+		FILE *cf = fopen(config_path, "w");
+		if (!cf) goto cleanup;
+		fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 40\n[memory]\npath = \"%s\"\n",
+			db_path);
+		fclose(cf);
+	}
+	{
+		char errbuf[256];
+		if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0) goto cleanup;
+	}
+	if (!cfg) goto cleanup;
+
+	response_buf[0] = '\0';
+	if (agent_run(cfg, session_id, "push over the limit", &overflow_reply_provider, NULL, 0,
+	              response_buf, sizeof(response_buf)) != 0) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: overflow agent_run failed\n");
+		goto cleanup;
+	}
+
+	loaded = malloc(LOAD_CAP);
+	if (!loaded) goto cleanup;
+	loaded[0] = '\0';
+	if (session_load(session_id, loaded, LOAD_CAP) != 0) goto cleanup;
+	parsed = cJSON_Parse(loaded);
+	if (!parsed || !cJSON_IsArray(parsed)) {
+		if (parsed) cJSON_Delete(parsed);
+		fprintf(stderr, "FAIL: tests/test_agent.c: overflow session JSON unparseable\n");
+		goto cleanup;
+	}
+	cJSON_Delete(parsed);
+	if (strstr(loaded, marker) == NULL) goto cleanup;
+
+	/* Next turn must still see prior history (not wiped to empty []). */
+	spy_roles_clear();
+	response_buf[0] = '\0';
+	if (agent_run(cfg, session_id, "still there?", &keep_history_provider, NULL, 0,
+	              response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	{
+		int found = 0;
+		for (size_t j = 0; j < spy_message_count && j < SPY_SLOTS; j++) {
+			if (strstr(spy_content[j], marker) != NULL) {
+				found = 1;
+				break;
+			}
+		}
+		if (!found) goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(pad_a);
+	free(pad_b);
+	free(loaded);
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+/**
+ * A stored blob larger than SESSION_JSON_MAX must not be replaced by a later
+ * small turn: session_load refuse leaves an empty buffer, and persist must not
+ * treat that as a new empty session.
+ */
+static int test_oversized_stored_session_not_wiped_by_small_turn(void)
+{
+	int failed = 1;
+	config_t *cfg = NULL;
+	const char *db_path = "build/test_agent_oversize_load.db";
+	const char *config_path = "build/test_agent_oversize_load.toml";
+	const char *session_id = "cli:oversize-load";
+	const char *marker = "OVERSIZE_LOAD_MARKER_xyz";
+	enum { PAD = 128 * 1024, LOAD_CAP = 160 * 1024 };
+	char *pad = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	size_t need;
+	size_t off = 0;
+	char response_buf[256];
+	cJSON *parsed;
+
+	memory_cleanup();
+	if (memory_init(db_path) != 0) goto cleanup;
+	pad = malloc(PAD + 1);
+	if (!pad) goto cleanup;
+	memset(pad, 'Z', PAD);
+	pad[PAD] = '\0';
+	need = strlen(marker) + PAD + 128;
+	session_json = malloc(need);
+	if (!session_json) goto cleanup;
+	off = (size_t)snprintf(session_json, need,
+		"[{\"role\":\"user\",\"content\":\"%s%s\"}]", marker, pad);
+	if (off == 0 || off >= need) goto cleanup;
+	if (session_save(session_id, session_json) != 0) goto cleanup;
+	{
+		FILE *cf = fopen(config_path, "w");
+		if (!cf) goto cleanup;
+		fprintf(cf, "[agent]\nmodel = \"test\"\n[memory]\npath = \"%s\"\n", db_path);
+		fclose(cf);
+	}
+	{
+		char errbuf[256];
+		if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0) goto cleanup;
+	}
+	if (!cfg) goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, session_id, "tiny", &persist_reply_provider, NULL, 0,
+	              response_buf, sizeof(response_buf)) != 0) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: oversize-load agent_run failed\n");
+		goto cleanup;
+	}
+	loaded = malloc(LOAD_CAP);
+	if (!loaded) goto cleanup;
+	loaded[0] = '\0';
+	if (session_load(session_id, loaded, LOAD_CAP) != 0) goto cleanup;
+	parsed = cJSON_Parse(loaded);
+	if (!parsed || !cJSON_IsArray(parsed)) {
+		if (parsed) cJSON_Delete(parsed);
+		fprintf(stderr, "FAIL: tests/test_agent.c: oversize stored session wiped or corrupt\n");
+		goto cleanup;
+	}
+	cJSON_Delete(parsed);
+	if (strstr(loaded, marker) == NULL) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: oversize stored session missing marker\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(pad);
+	free(session_json);
+	free(loaded);
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
 int main(void)
 {
 	RUN(test_agent_run_with_stub_and_no_tools());
@@ -730,6 +978,8 @@ int main(void)
 	RUN(test_context_compaction_when_history_exceeds_max());
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());
+	RUN(test_session_overflow_does_not_corrupt_history());
+	RUN(test_oversized_stored_session_not_wiped_by_small_turn());
 	RUN(test_agent_provider_error_response());
 	RUN(test_agent_unknown_tool_continues());
 	printf("test_agent: all tests passed\n");

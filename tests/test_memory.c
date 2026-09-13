@@ -109,6 +109,28 @@ static int test_session_crud(void)
 	return 0;
 }
 
+/** Oversized session blobs must not be silently truncated into invalid JSON. */
+static int test_session_load_rejects_oversized(void)
+{
+	const char *path = "/tmp/shellclaw_test_memory_oversized.db";
+	char big[2048];
+	char small[64];
+	size_t i;
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	big[0] = '[';
+	for (i = 1; i < sizeof(big) - 2; i++)
+		big[i] = 'x';
+	big[sizeof(big) - 2] = ']';
+	big[sizeof(big) - 1] = '\0';
+	ASSERT(session_save("cli:big", big) == 0);
+	ASSERT(session_load("cli:big", small, sizeof(small)) == SESSION_LOAD_TOO_LARGE);
+	ASSERT(small[0] == '\0');
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 static int test_gateway_schema_new_db(void)
 {
 	const char *path = "/tmp/shellclaw_test_gateway_schema.db";
@@ -198,6 +220,7 @@ int main(void)
 	RUN(test_existing_db_preserved_on_open_failure());
 	RUN(test_session_list());
 	RUN(test_session_crud());
+	RUN(test_session_load_rejects_oversized());
 	RUN(test_gateway_schema_new_db());
 	RUN(test_gateway_schema_migration_v01());
 	printf("test_memory: all tests passed\n");
