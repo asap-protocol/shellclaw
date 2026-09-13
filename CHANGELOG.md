@@ -5,6 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- `memory_init` no longer deletes an existing SQLite DB when `sqlite3_open` fails (permissions or transient I/O).
 - Anthropic `content` parse fails closed when growing the text buffer or `tool_use` array cannot `realloc`, instead of copying against an inflated cap.
 - HTTP 200 JSON-RPC results with a malformed ASAP envelope no longer double-free the duplicated request id.
 - Inbound ASAP `mcp.tool_call` and `state.query` now hold `agent_lock()` around tool execute and SQLite `g_db` reads, matching `task.request`.
