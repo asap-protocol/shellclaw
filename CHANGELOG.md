@@ -4,6 +4,17 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- Memory injection is skipped when the system prompt already fills its 64 KiB buffer, instead of writing the full `Relevant memories` prefix past the allocation after clamping recall to 0.
+- Session JSON that would exceed the 128 KiB cap is refused instead of truncated, so the next parse cannot wipe history. An oversized stored blob is left in place (distinct `SESSION_LOAD_TOO_LARGE`) rather than replaced by a later small turn.
+- Multi-round ReAct copies tool results into the in-flight message list so a later round cannot overwrite earlier outputs.
+- `memory_init` no longer deletes an existing SQLite DB when `sqlite3_open` fails (permissions or transient I/O).
+- Anthropic `content` parse fails closed when growing the text buffer or `tool_use` array cannot `realloc`, instead of copying against an inflated cap.
+- HTTP 200 JSON-RPC results with a malformed ASAP envelope no longer double-free the duplicated request id.
+- Inbound ASAP `mcp.tool_call` and `state.query` now hold `agent_lock()` around tool execute and SQLite `g_db` reads, matching `task.request`.
+- Inbound `POST /asap` now wires the process provider and tool table into `asap_ctx`, so `task.request` and `mcp.tool_call` dispatch instead of failing with `server missing cfg or provider`.
+- `POST /asap` rejects serialized JSON-RPC larger than the 64 KiB gateway HTTP buffer (HTTP 500 / JSON-RPC `-32603`) instead of truncating the body.
+
 ### Added
 - Phase 5 documentation suite (`docs/SECURITY.md`, `docs/ASAP.md`, and related guides).
 - `CONTRIBUTING.md` with PR workflow and pre-tag `gpio-mockup` ritual.
@@ -16,6 +27,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ### Security
 - Camera auto-output keeps the exclusive `mkstemp` inode (no unlink + `${tmpl}.jpg` sibling).
 - Reject I2C `bus` outside 0–255 at the tool JSON boundary.
+- Document that protocol-public `POST /asap` can invoke local tools; production must set `[asap].trusted_senders` before exposing the gateway.
 
 ---
 

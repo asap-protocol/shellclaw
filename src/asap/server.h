@@ -56,6 +56,18 @@ typedef struct asap_server_ctx {
 int asap_server_handle(const asap_envelope_t *in, asap_envelope_t *out,
 			asap_server_ctx_t *ctx, char *err_message, size_t err_message_size);
 
+/**
+ * Resolve the agent session id for inbound task.request.
+ * Derives `asap:<sender>` from the envelope sender URN so unrelated clients
+ * do not share SQLite history (#64). Missing sender falls back to
+ * `asap:inbound`. Returns NULL when @p buf cannot hold the derived id
+ * (fail closed; do not truncate).
+ *
+ * Example: asap_resolve_task_session_id("urn:alice", buf, sizeof buf)
+ * returns "asap:urn:alice".
+ */
+const char *asap_resolve_task_session_id(const char *sender, char *buf, size_t buf_size);
+
 #ifdef __cplusplus
 }
 #endif

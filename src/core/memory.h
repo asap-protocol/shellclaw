@@ -43,12 +43,21 @@ int memory_save(const char *key, const char *content, const char *metadata);
 int memory_recall(const char *query, char *results, size_t max_len, int limit);
 
 /**
+ * Stored session JSON does not fit the caller buffer. messages_out is left empty.
+ * Distinct from "not found" so callers can skip persist instead of overwriting.
+ */
+#define SESSION_LOAD_TOO_LARGE (-2)
+
+/**
  * Load session messages by session ID (e.g. "cli:default" or "telegram:123456789").
  *
  * @param session_id   Session identifier.
  * @param messages_out Output buffer for JSON array of messages; caller must free if allocated.
  * @param max_len      Size of messages_out buffer (or 0 if messages_out is to be allocated by implementation).
- * @return 0 on success, non-zero if not found or error.
+ * @return 0 on success, SESSION_LOAD_TOO_LARGE if the blob does not fit max_len,
+ *         -1 if not found or error.
+ *
+ * Example: `if (session_load(id, buf, sizeof(buf)) == SESSION_LOAD_TOO_LARGE) skip_save;`
  */
 int session_load(const char *session_id, char *messages_out, size_t max_len);
 
@@ -68,6 +77,20 @@ int session_save(const char *session_id, const char *messages);
  * @return 0 on success, non-zero on error.
  */
 int session_delete(const char *session_id);
+
+/**
+ * Test-only: invoke @p hook from session_delete before the SQL DELETE.
+ * Pass NULL to clear. Used by dispatch tests to assert /reset holds the
+ * agent mutex (see #54).
+ */
+void session_delete_set_hook_for_test(void (*hook)(const char *session_id));
+
+/**
+ * Test-only: invoke @p hook from memory_get_row_counts before the COUNT queries.
+ * Pass NULL to clear. Used by ASAP server tests to assert state.query holds
+ * the agent mutex (see #60).
+ */
+void memory_get_row_counts_set_hook_for_test(void (*hook)(void));
 
 /**
  * List session IDs from the database.

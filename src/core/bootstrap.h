@@ -7,6 +7,7 @@
 #define SHELLCLAW_BOOTSTRAP_H
 
 #include "channels/channel.h"
+#include "core/agent.h"
 #include "core/config.h"
 #include "providers/provider.h"
 #include "tools/tool.h"
@@ -39,6 +40,15 @@ const channel_t *bootstrap_channel_at(int index);
 
 size_t bootstrap_tool_count(void);
 const tool_t *bootstrap_tool_at(size_t index);
+
+/**
+ * Copy registered tools into an agent_tool_t table for agent_run / ASAP.
+ * Caps at @p cap and stops on a NULL slot so the returned count never
+ * overruns the filled prefix.
+ *
+ * Example: n = bootstrap_fill_agent_tools(flat, SHELLCLAW_MAX_TOOLS);
+ */
+size_t bootstrap_fill_agent_tools(agent_tool_t *out, size_t cap);
 
 #ifdef __cplusplus
 }

@@ -78,7 +78,7 @@ Convention: one primary `.c` + `.h` per module; new tools go in `src/tools/<name
 4. **Router** walks `providers.fallback_chain` (e.g. `anthropic` → `local` → `stub`) on transport/5xx errors; 4xx stops the chain.
 5. **Tools** execute when the model returns tool calls; results feed the next iteration until a final reply or `max_tool_iterations`.
 
-**Thread safety:** the main loop is single-threaded. Gateway worker threads (WebSocket chat, `POST /asap`) must hold `agent_lock()` around `agent_run()`. See README § Thread Safety.
+**Thread safety:** the main loop is single-threaded. Gateway worker threads (WebSocket chat, `POST /asap`) must hold `agent_lock()` around `agent_run()`, inbound `mcp.tool_call` execute, and `state.query` memory-store reads. See README § Thread Safety.
 
 ---
 

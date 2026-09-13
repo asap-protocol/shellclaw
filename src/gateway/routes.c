@@ -14,6 +14,7 @@
 #include "asap/envelope.h"
 #include "asap/server.h"
 #include "asap/log.h"
+#include "core/bootstrap.h"
 #include "core/config.h"
 #include "core/memory.h"
 #include "core/skill.h"
@@ -555,6 +556,47 @@ static void handle_asap_log_get(char *buf, size_t size, int *status)
 	free(s);
 }
 
+/**
+ * Bind the running process into an inbound ASAP ctx. handle_asap used to
+ * set only cfg, so task.request always failed with "server missing cfg or
+ * provider" and mcp.tool_call saw an empty tool table (#53).
+ */
+static void asap_ctx_bind_bootstrap(asap_server_ctx_t *asap_ctx, const config_t *http_cfg,
+	agent_tool_t *flat_tools, size_t tools_cap)
+{
+	memset(asap_ctx, 0, sizeof *asap_ctx);
+	asap_ctx->cfg = http_cfg ? http_cfg : bootstrap_get_cfg();
+	asap_ctx->provider = bootstrap_get_provider();
+	asap_ctx->tool_count = bootstrap_fill_agent_tools(flat_tools, tools_cap);
+	asap_ctx->tools = flat_tools;
+}
+
+/**
+ * Copy serialized JSON-RPC into the gateway HTTP buffer. Truncation
+ * produced invalid JSON for callers (#61); reject instead.
+ * Takes ownership of @p resp_json.
+ * @return 0 if copied, -1 if rejected as too large.
+ */
+static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_json)
+{
+	size_t rlen;
+	rlen = strlen(resp_json);
+	if (rlen >= size) {
+		char too_big[96];
+		snprintf(too_big, sizeof too_big,
+			"ASAP response length %zu exceeds gateway buffer %zu",
+			rlen, size);
+		free(resp_json);
+		jsonrpc_error(buf, size, status, 500, -32603, too_big);
+		return -1;
+	}
+	*status = 200;
+	memcpy(buf, resp_json, rlen);
+	buf[rlen] = '\0';
+	free(resp_json);
+	return 0;
+}
+
 static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 	const char *body, size_t body_len, char *buf, size_t size, int *status)
 {
@@ -584,11 +626,14 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 	snippet = in.payload ? cJSON_PrintUnformatted(in.payload) : NULL;
 	asap_log_append_in(in.payload_type, in.id, snippet);
 	free(snippet);
-	memset(&asap_ctx, 0, sizeof asap_ctx);
-	asap_ctx.cfg = ctx ? ctx->cfg : NULL;
-	err_msg[0] = '\0';
-	asap_envelope_init(&out);
-	rc = asap_server_handle(&in, &out, &asap_ctx, err_msg, sizeof err_msg);
+	{
+		agent_tool_t flat_tools[SHELLCLAW_MAX_TOOLS];
+		asap_ctx_bind_bootstrap(&asap_ctx, ctx ? ctx->cfg : NULL,
+			flat_tools, SHELLCLAW_MAX_TOOLS);
+		err_msg[0] = '\0';
+		asap_envelope_init(&out);
+		rc = asap_server_handle(&in, &out, &asap_ctx, err_msg, sizeof err_msg);
+	}
 	asap_envelope_clear(&in);
 	if (rc != 0) {
 		asap_envelope_clear(&out);
@@ -596,22 +641,19 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 		return;
 	}
 	resp_json = asap_envelope_to_jsonrpc_string(&out, NULL);
+	if (!resp_json) {
+		asap_envelope_clear(&out);
+		jsonrpc_error(buf, size, status, 500, -32603, "failed to serialize response");
+		return;
+	}
+	if (write_asap_jsonrpc(buf, size, status, resp_json) != 0) {
+		asap_envelope_clear(&out);
+		return;
+	}
 	snippet = out.payload ? cJSON_PrintUnformatted(out.payload) : NULL;
 	asap_log_append_out(out.payload_type, out.id, snippet);
 	free(snippet);
 	asap_envelope_clear(&out);
-	if (!resp_json) {
-		jsonrpc_error(buf, size, status, 500, -32603, "failed to serialize response");
-		return;
-	}
-	*status = 200;
-	{
-		size_t rlen = strlen(resp_json);
-		if (rlen >= size) rlen = size - 1;
-		memcpy(buf, resp_json, rlen);
-		buf[rlen] = '\0';
-	}
-	free(resp_json);
 }
 
 static void handle_well_known(http_server_ctx_t *ctx, const char *uri, int uri_len,

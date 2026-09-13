@@ -18,7 +18,12 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 {
 	const char *text = msg->text ? msg->text : "";
 	if (strcmp(text, "/reset") == 0) {
+		/* Serialize with ASAP agent_run so session_delete cannot race
+		 * the same session (see #54, review on #85). Drop the lock
+		 * before ch->send so channel I/O does not pin the mutex. */
+		agent_lock();
 		session_delete(msg->session_id);
+		agent_unlock();
 		return ch->send(msg->session_id, "Session cleared.", NULL, 0);
 	}
 	if (strcmp(text, "/status") == 0) {
@@ -28,22 +33,13 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 		return ch->send(msg->session_id, buf, NULL, 0);
 	}
 	char resp_buf[RESPONSE_BUF_SIZE];
-	size_t tool_count = bootstrap_tool_count();
 	agent_tool_t flat_tools[SHELLCLAW_MAX_TOOLS];
-	if (tool_count > SHELLCLAW_MAX_TOOLS)
-		tool_count = SHELLCLAW_MAX_TOOLS;
-	for (size_t i = 0; i < tool_count; i++) {
-		const tool_t *t = bootstrap_tool_at(i);
-		if (!t)
-			break;
-		flat_tools[i].name = t->name;
-		flat_tools[i].description = t->description;
-		flat_tools[i].parameters_json = t->parameters_json;
-		flat_tools[i].execute = t->execute;
-	}
+	size_t tool_count = bootstrap_fill_agent_tools(flat_tools, SHELLCLAW_MAX_TOOLS);
+	agent_lock();
 	int err = agent_run(bootstrap_get_cfg(), msg->session_id, text, bootstrap_get_provider(),
 	                    flat_tools, tool_count,
 	                    resp_buf, sizeof(resp_buf));
+	agent_unlock();
 	if (err != 0 && resp_buf[0] == '\0')
 		snprintf(resp_buf, sizeof(resp_buf), "Error: agent failed (code %d)", err);
 	return ch->send(msg->session_id, resp_buf, NULL, 0);

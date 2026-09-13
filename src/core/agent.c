@@ -11,6 +11,7 @@
 #include "providers/provider.h"
 #include "cJSON.h"
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,16 @@ void agent_unlock(void)
 	pthread_mutex_unlock(&g_agent_mutex);
 }
 
+int agent_mutex_is_locked_for_test(void)
+{
+	int rc = pthread_mutex_trylock(&g_agent_mutex);
+	if (rc == 0) {
+		pthread_mutex_unlock(&g_agent_mutex);
+		return 0;
+	}
+	return 1;
+}
+
 #define SYSTEM_PROMPT_MAX      65536
 #define SKILLS_BUF_SIZE        32768
 #define SESSION_JSON_MAX       (128 * 1024)
@@ -48,6 +59,26 @@ void agent_unlock(void)
 #define TOOL_RESULT_SIZE       4096
 #define SUMMARY_SOURCE_MAX     (64 * 1024)
 #define SUMMARY_RESULT_MAX     4096
+
+/** Copy cJSON_PrintUnformatted output or refuse mid-JSON truncation (Refs: #70). */
+static int copy_printed_session_json(char *dst, size_t dst_size, char *printed,
+	const char *session_id)
+{
+	size_t len;
+	if (!printed)
+		return -1;
+	len = strlen(printed);
+	if (len >= dst_size) {
+		fprintf(stderr,
+			"agent: refuse session JSON truncation session_id=%s len=%zu cap=%zu\n",
+			session_id ? session_id : "", len, dst_size);
+		cJSON_free(printed);
+		return -1;
+	}
+	memcpy(dst, printed, len + 1);
+	cJSON_free(printed);
+	return 0;
+}
 
 static const char SUMMARIZE_SYSTEM[] = "Summarize the following conversation in one short paragraph. Output only the summary, no preamble.";
 
@@ -117,12 +148,8 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	cJSON_Delete(root);
 	char *printed = cJSON_PrintUnformatted(new_arr);
 	cJSON_Delete(new_arr);
-	if (!printed) return -1;
-	size_t plen = strlen(printed);
-	if (plen >= session_buf_size) plen = session_buf_size - 1;
-	memcpy(session_buf, printed, plen);
-	session_buf[plen] = '\0';
-	cJSON_free(printed);
+	if (copy_printed_session_json(session_buf, session_buf_size, printed, session_id) != 0)
+		return -1;
 	session_save(session_id, session_buf);
 	return 0;
 }
@@ -185,13 +212,27 @@ static void copy_response_to_buf(const char *content, char *response_buf, size_t
 static size_t append_memories_to_system(char *system_buf, size_t buf_size, const char *recall_buf)
 {
 	size_t len = strlen(system_buf);
-	if (len == 0 || !recall_buf || recall_buf[0] == '\0') return len;
+	size_t prefix_len;
+	size_t recall_len;
+	size_t remain;
 	const char *prefix = "\n\nRelevant memories:\n\n";
-	size_t prefix_len = strlen(prefix);
-	size_t recall_len = strlen(recall_buf);
-	if (len + prefix_len + recall_len + 1 > buf_size)
-		recall_len = buf_size > len + prefix_len ? (buf_size - len - prefix_len - 1) : 0;
-	if (prefix_len + recall_len == 0) return len;
+	if (len == 0 || !recall_buf || recall_buf[0] == '\0')
+		return len;
+	/* prefix_len is never 0, so the old `prefix_len + recall_len == 0` guard
+	 * never fired. When the prompt filled SYSTEM_PROMPT_MAX, recall_len was
+	 * clamped to 0 and memcpy still wrote the prefix (and a NUL) past the heap
+	 * buffer (Refs: #75). Skip unless prefix + at least one recall byte + NUL fit. */
+	prefix_len = strlen(prefix);
+	if (len >= buf_size || buf_size - len < prefix_len + 2U) {
+		fprintf(stderr, "agent: skip memory injection len=%zu cap=%zu\n", len, buf_size);
+		return len;
+	}
+	recall_len = strlen(recall_buf);
+	remain = buf_size - len - prefix_len - 1U;
+	if (recall_len > remain)
+		recall_len = remain;
+	if (recall_len == 0)
+		return len;
 	memcpy(system_buf + len, prefix, prefix_len);
 	len += prefix_len;
 	memcpy(system_buf + len, recall_buf, recall_len);
@@ -248,20 +289,28 @@ static const agent_tool_t *find_tool(const agent_tool_t *tools, size_t tool_coun
 	return NULL;
 }
 
-static void free_tool_calls_copy(provider_tool_call_t *copy, size_t n)
+static void agent_free_owned_ptr(const void *p)
 {
+	free((void *)(uintptr_t)p);
+}
+
+static void free_tool_calls_copy(const provider_tool_call_t *copy, size_t n)
+{
+	provider_tool_call_t *owned;
+	size_t i;
 	if (!copy) return;
-	for (size_t i = 0; i < n; i++) {
-		free(copy[i].id);
-		free(copy[i].name);
-		free(copy[i].arguments);
+	owned = (provider_tool_call_t *)(uintptr_t)copy;
+	for (i = 0; i < n; i++) {
+		free(owned[i].id);
+		free(owned[i].name);
+		free(owned[i].arguments);
 	}
-	free(copy);
+	free(owned);
 }
 
 /** Append user+assistant exchange to session JSON. Invalid or empty existing becomes []. */
 static int append_exchange_to_session_json(const char *existing_json, const char *user_message,
-	const char *assistant_content, char *out_buf, size_t out_size)
+	const char *assistant_content, char *out_buf, size_t out_size, const char *session_id)
 {
 	cJSON *arr = NULL;
 	if (existing_json && existing_json[0] == '[') {
@@ -287,13 +336,7 @@ static int append_exchange_to_session_json(const char *existing_json, const char
 	}
 	char *printed = cJSON_PrintUnformatted(arr);
 	cJSON_Delete(arr);
-	if (!printed) return -1;
-	size_t len = strlen(printed);
-	if (len >= out_size) len = out_size - 1;
-	memcpy(out_buf, printed, len);
-	out_buf[len] = '\0';
-	cJSON_free(printed);
-	return 0;
+	return copy_printed_session_json(out_buf, out_size, printed, session_id);
 }
 
 static provider_tool_call_t *copy_tool_calls(const provider_tool_call_t *src, size_t n)
@@ -333,10 +376,12 @@ typedef struct agent_run_ctx {
 	char *tool_result_bufs;
 	provider_message_t *messages;
 	size_t total_msgs;
+	size_t base_msg_count;
 	int history_count;
 	int max_iter;
 	int max_ctx;
 	int ret;
+	int skip_session_persist;
 } agent_run_ctx_t;
 
 static void agent_oom_msg(agent_run_ctx_t *ctx)
@@ -344,6 +389,23 @@ static void agent_oom_msg(agent_run_ctx_t *ctx)
 	if (ctx->response_buf && ctx->response_size > 0) {
 		strncpy(ctx->response_buf, "agent_run: out of memory", ctx->response_size - 1);
 		ctx->response_buf[ctx->response_size - 1] = '\0';
+	}
+}
+
+/** Free ReAct-owned slots (assistant text, tool results, tool_calls copies). */
+static void agent_free_heap_messages(agent_run_ctx_t *ctx, size_t from_idx)
+{
+	size_t i;
+	if (!ctx->messages) return;
+	/* tool_use_id aliases our_calls[k].id; drop it before freeing tool_calls. */
+	for (i = from_idx; i < ctx->total_msgs; i++)
+		ctx->messages[i].tool_use_id = NULL;
+	for (i = from_idx; i < ctx->total_msgs; i++) {
+		agent_free_owned_ptr(ctx->messages[i].content);
+		ctx->messages[i].content = NULL;
+		free_tool_calls_copy(ctx->messages[i].tool_calls, ctx->messages[i].tool_calls_count);
+		ctx->messages[i].tool_calls = NULL;
+		ctx->messages[i].tool_calls_count = 0;
 	}
 }
 
@@ -383,7 +445,10 @@ static int agent_prepare_context(agent_run_ctx_t *ctx)
 	if (ctx->max_ctx <= 0 || ctx->max_ctx > MAX_HISTORY_MESSAGES)
 		ctx->max_ctx = MAX_HISTORY_MESSAGES;
 	ctx->session_buf[0] = '\0';
-	session_load(ctx->session_id, ctx->session_buf, SESSION_JSON_MAX);
+	{
+		int load_rc = session_load(ctx->session_id, ctx->session_buf, SESSION_JSON_MAX);
+		ctx->skip_session_persist = (load_rc == SESSION_LOAD_TOO_LARGE);
+	}
 	parsed = cJSON_Parse(ctx->session_buf);
 	msg_count = (parsed && cJSON_IsArray(parsed)) ? cJSON_GetArraySize(parsed) : 0;
 	if (parsed)
@@ -419,16 +484,24 @@ static int agent_build_messages(agent_run_ctx_t *ctx)
 	}
 	ctx->messages[1 + ctx->history_count].role = "user";
 	ctx->messages[1 + ctx->history_count].content = ctx->user_message;
+	ctx->base_msg_count = ctx->total_msgs;
 	return 0;
 }
 
 static void agent_persist_session(agent_run_ctx_t *ctx, const char *assistant_content)
 {
-	char *updated = malloc(SESSION_JSON_MAX);
+	char *updated;
+	if (ctx->skip_session_persist) {
+		fprintf(stderr,
+			"agent: skip session persist session_id=%s (stored blob exceeds cap)\n",
+			ctx->session_id ? ctx->session_id : "");
+		return;
+	}
+	updated = malloc(SESSION_JSON_MAX);
 	if (!updated)
 		return;
 	if (append_exchange_to_session_json(ctx->session_buf, ctx->user_message, assistant_content,
-	                                    updated, SESSION_JSON_MAX) == 0)
+	                                    updated, SESSION_JSON_MAX, ctx->session_id) == 0)
 		session_save(ctx->session_id, updated);
 	free(updated);
 }
@@ -438,32 +511,20 @@ static int agent_react_loop(agent_run_ctx_t *ctx)
 {
 	int iteration = 0;
 	provider_response_t response = {0};
-	char *prev_assistant = NULL;
-	provider_tool_call_t *prev_calls = NULL;
-	size_t prev_n = 0;
 	for (;;) {
 		int err = ctx->provider->chat(ctx->messages, ctx->total_msgs, ctx->tool_defs, ctx->tool_count,
 		                              &response);
 		if (err != 0) {
 			copy_response_to_buf(response.content, ctx->response_buf, ctx->response_size);
 			provider_response_clear(&response);
-			free(prev_assistant);
-			free_tool_calls_copy(prev_calls, prev_n);
 			return -1;
 		}
 		if (response.tool_calls_count == 0 || iteration >= ctx->max_iter) {
 			copy_response_to_buf(response.content, ctx->response_buf, ctx->response_size);
 			provider_response_clear(&response);
 			agent_persist_session(ctx, ctx->response_buf);
-			free(prev_assistant);
-			free_tool_calls_copy(prev_calls, prev_n);
 			return 0;
 		}
-		free(prev_assistant);
-		free_tool_calls_copy(prev_calls, prev_n);
-		prev_assistant = NULL;
-		prev_calls = NULL;
-		prev_n = 0;
 		{
 			size_t nc = response.tool_calls_count;
 			char *assistant_content;
@@ -472,14 +533,12 @@ static int agent_react_loop(agent_run_ctx_t *ctx)
 			size_t new_count;
 			if (nc > MAX_TOOL_CALLS)
 				nc = MAX_TOOL_CALLS;
-			assistant_content = response.content ? strdup(response.content) : NULL;
-			if (!assistant_content && response.content && response.content[0] != '\0') {
+			assistant_content = response.content ? strdup(response.content) : strdup("");
+			if (!assistant_content) {
 				provider_response_clear(&response);
 				agent_oom_msg(ctx);
 				return -1;
 			}
-			if (!assistant_content)
-				assistant_content = strdup("");
 			our_calls = copy_tool_calls(response.tool_calls, nc);
 			provider_response_clear(&response);
 			if (!our_calls) {
@@ -513,24 +572,34 @@ static int agent_react_loop(agent_run_ctx_t *ctx)
 			new_messages[ctx->total_msgs].tool_calls = our_calls;
 			new_messages[ctx->total_msgs].tool_calls_count = nc;
 			for (size_t k = 0; k < nc; k++) {
+				char *one_buf = ctx->tool_result_bufs + k * TOOL_RESULT_SIZE;
+				/* Scratch is reused each round; history must own a copy (Refs: #59). */
+				char *tool_content = strdup(one_buf);
+				if (!tool_content) {
+					for (size_t j = 0; j < k; j++)
+						agent_free_owned_ptr(new_messages[ctx->total_msgs + 1 + j].content);
+					free(new_messages);
+					free_tool_calls_copy(our_calls, nc);
+					free(assistant_content);
+					agent_oom_msg(ctx);
+					return -1;
+				}
 				new_messages[ctx->total_msgs + 1 + k].role = "user";
-				new_messages[ctx->total_msgs + 1 + k].content =
-				    ctx->tool_result_bufs + k * TOOL_RESULT_SIZE;
+				new_messages[ctx->total_msgs + 1 + k].content = tool_content;
 				new_messages[ctx->total_msgs + 1 + k].tool_use_id = our_calls[k].id;
 			}
 			free(ctx->messages);
 			ctx->messages = new_messages;
 			ctx->total_msgs = new_count;
 			iteration++;
-			prev_assistant = assistant_content;
-			prev_calls = our_calls;
-			prev_n = nc;
 		}
 	}
 }
 
 static void agent_run_cleanup(agent_run_ctx_t *ctx)
 {
+	if (ctx->messages && ctx->base_msg_count < ctx->total_msgs)
+		agent_free_heap_messages(ctx, ctx->base_msg_count);
 	free(ctx->system_buf);
 	free(ctx->skills_buf);
 	free(ctx->session_buf);

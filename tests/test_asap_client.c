@@ -246,6 +246,29 @@ static int test_parse_response_jsonrpc_error(void)
 	return 0;
 }
 
+/* HTTP 200 result missing required envelope fields used to double-free rpc_id (Refs: #84). */
+static const char jsonrpc_result_missing_payload[] =
+	"{\"jsonrpc\":\"2.0\","
+	"\"id\":\"1\","
+	"\"result\":{"
+	"\"id\":\"t1\","
+	"\"asap_version\":\"2.1\","
+	"\"sender\":\"a\",\"recipient\":\"b\","
+	"\"payload_type\":\"task.response\""
+	"}}";
+
+static int test_parse_response_missing_payload(void)
+{
+	char err[128];
+	asap_envelope_t out;
+	asap_envelope_init(&out);
+	err[0] = 0;
+	ASSERT(asap_envelope_parse_jsonrpc_response(jsonrpc_result_missing_payload, &out, err, sizeof err) == -1);
+	ASSERT(strstr(err, "payload") != NULL);
+	asap_envelope_clear(&out);
+	return 0;
+}
+
 static int test_config_defaults(void)
 {
 	asap_client_config_t c;
@@ -386,6 +409,27 @@ static int test_live_http_non_two_hundred(void)
 	return 0;
 }
 
+static int test_live_http_malformed_result_envelope(void)
+{
+	asap_envelope_t env;
+	asap_envelope_t resp;
+	struct tiny_http_srv srv;
+	char err[256];
+	char url[96];
+	ASSERT(fill_min_task_request(&env) == 0);
+	ASSERT(tiny_http_start(&srv, 200L, jsonrpc_result_missing_payload, strlen(jsonrpc_result_missing_payload)) == 0);
+	asap_envelope_init(&resp);
+	err[0] = '\0';
+	ASSERT(snprintf(url, sizeof url, "http://127.0.0.1:%hu/", srv.bind_port) < (int)sizeof url);
+	ASSERT(asap_client_send_task(url, NULL, ASAP_DEFAULT_JSONRPC_METHOD, &env, NULL, NULL, &resp,
+				     err, sizeof err) == -1);
+	ASSERT(strstr(err, "payload") != NULL);
+	asap_envelope_clear(&env);
+	asap_envelope_clear(&resp);
+	tiny_http_join(&srv);
+	return 0;
+}
+
 static int test_empty_jsonrpc_method_uses_default(void)
 {
 	asap_envelope_t env;
@@ -442,11 +486,13 @@ int main(int argc, char **argv)
 	if (test_request_roundtrip_string() != 0) { fprintf(stderr, "test_request_roundtrip_string failed\n"); failed++; }
 	if (test_parse_response_ok() != 0) { fprintf(stderr, "test_parse_response_ok failed\n"); failed++; }
 	if (test_parse_response_jsonrpc_error() != 0) { fprintf(stderr, "test_parse_response_jsonrpc_error failed\n"); failed++; }
+	if (test_parse_response_missing_payload() != 0) { fprintf(stderr, "test_parse_response_missing_payload failed\n"); failed++; }
 	if (test_config_defaults() != 0) { fprintf(stderr, "test_config_defaults failed\n"); failed++; }
 	if (test_config_from_config_timeout() != 0) { fprintf(stderr, "test_config_from_config_timeout failed\n"); failed++; }
 	if (test_send_invalid_arguments() != 0) { fprintf(stderr, "test_send_invalid_arguments failed\n"); failed++; }
 	if (test_live_http_roundtrip_success() != 0) { fprintf(stderr, "test_live_http_roundtrip_success failed\n"); failed++; }
 	if (test_live_http_non_two_hundred() != 0) { fprintf(stderr, "test_live_http_non_two_hundred failed\n"); failed++; }
+	if (test_live_http_malformed_result_envelope() != 0) { fprintf(stderr, "test_live_http_malformed_result_envelope failed\n"); failed++; }
 	if (test_empty_jsonrpc_method_uses_default() != 0) { fprintf(stderr, "test_empty_jsonrpc_method_uses_default failed\n"); failed++; }
 	if (test_send_with_explicit_jsonrpc_request_id() != 0) { fprintf(stderr, "test_send_with_explicit_jsonrpc_request_id failed\n"); failed++; }
 	if (test_send_fails_no_server() != 0) { fprintf(stderr, "test_send_fails_no_server failed\n"); failed++; }

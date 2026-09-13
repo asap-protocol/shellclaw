@@ -15,6 +15,18 @@
 #define WARN_RECREATED "Warning: memory DB invalid or corrupted, recreated at %s\n"
 
 static sqlite3 *g_db;
+static void (*g_session_delete_hook_for_test)(const char *session_id);
+static void (*g_memory_get_row_counts_hook_for_test)(void);
+
+void session_delete_set_hook_for_test(void (*hook)(const char *session_id))
+{
+	g_session_delete_hook_for_test = hook;
+}
+
+void memory_get_row_counts_set_hook_for_test(void (*hook)(void))
+{
+	g_memory_get_row_counts_hook_for_test = hook;
+}
 
 static const char *SCHEMA_MEMORIES =
 	"CREATE TABLE IF NOT EXISTS memories ("
@@ -118,6 +130,13 @@ int memory_init(const char *path)
 	int file_existed = path_exists(path);
 	int recreated = 0;
 	if (sqlite3_open(path, &g_db) != SQLITE_OK) {
+		/* Never delete an existing DB on open failure (permissions, transient I/O). */
+		if (file_existed) {
+			fprintf(stderr, "Error: cannot open existing memory DB at %s: %s\n",
+			        path, g_db ? sqlite3_errmsg(g_db) : "unknown");
+			if (g_db) { sqlite3_close(g_db); g_db = NULL; }
+			return -1;
+		}
 		if (g_db) { sqlite3_close(g_db); g_db = NULL; }
 		remove(path);
 		if (sqlite3_open(path, &g_db) != SQLITE_OK) {
@@ -226,9 +245,13 @@ int session_load(const char *session_id, char *messages_out, size_t max_len)
 		const char *msg = (const char *)sqlite3_column_text(stmt, 0);
 		if (msg) {
 			size_t n = strlen(msg);
-			if (n >= max_len) n = max_len - 1;
-			memcpy(messages_out, msg, n);
-			messages_out[n] = '\0';
+			/* Refuse silent truncation: a clipped messages blob is invalid JSON
+			 * and agent_run would treat the session as empty history. */
+			if (n >= max_len) {
+				sqlite3_finalize(stmt);
+				return SESSION_LOAD_TOO_LARGE;
+			}
+			memcpy(messages_out, msg, n + 1);
 			ret = 0;
 		}
 	}
@@ -253,6 +276,8 @@ int session_save(const char *session_id, const char *messages)
 
 int session_delete(const char *session_id)
 {
+	if (g_session_delete_hook_for_test)
+		g_session_delete_hook_for_test(session_id);
 	if (!g_db || !session_id) return -1;
 	const char *sql = "DELETE FROM sessions WHERE id = ?1";
 	sqlite3_stmt *stmt = NULL;
@@ -459,6 +484,8 @@ static int count_table(const char *sql, int *out_count)
 
 int memory_get_row_counts(int *sessions_out, int *memories_out, int *cron_jobs_out)
 {
+	if (g_memory_get_row_counts_hook_for_test)
+		g_memory_get_row_counts_hook_for_test();
 	if (!g_db) return -1;
 	if (sessions_out) {
 		if (count_table("SELECT COUNT(*) FROM sessions", sessions_out) != 0) return -1;
