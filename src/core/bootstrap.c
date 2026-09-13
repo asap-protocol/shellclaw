@@ -335,12 +335,14 @@ int init_subsystems(config_t *cfg)
 void cleanup_subsystems(void)
 {
 #ifdef SHELLCLAW_GATEWAY
+	/* HTTP/WS callbacks still call auth_validate_token(ctx->auth). Join the
+	 * lws thread before freeing auth_ctx (same order as tools_init failure). */
 	ws_shutdown_signal();
+	http_stop();
 	if (g_auth_ctx) {
 		auth_cleanup(g_auth_ctx);
 		g_auth_ctx = NULL;
 	}
-	http_stop();
 	ws_cleanup();
 #endif
 	tools_cleanup();

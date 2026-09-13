@@ -28,7 +28,7 @@ int init_subsystems(config_t *cfg);
 /** Register tools from config (called from init_subsystems). */
 int tools_init(const config_t *cfg);
 
-/** Tear down all subsystems in reverse init order. */
+/** Tear down all subsystems in reverse init order (HTTP thread before auth_ctx). */
 void cleanup_subsystems(void);
 
 config_t *bootstrap_get_cfg(void);
