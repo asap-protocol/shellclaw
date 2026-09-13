@@ -556,6 +556,111 @@ static int test_asap_mcp_unknown_tool(void)
 	return 0;
 }
 
+/* Gateway HTTP buffer is RESP_BUF_SIZE (65536). A (64 KiB - 1) file
+ * read wraps into JSON-RPC larger than that; truncation was #61. */
+enum { ASAP_OVERSIZE_FILE_BYTES = 65535 };
+
+static int write_asap_oversize_file(char *path, size_t path_sz)
+{
+	FILE *f;
+	char *block;
+	size_t nw;
+	snprintf(path, path_sz, "%s/.shellclaw/asap_oversize.txt", g_test_home);
+	block = malloc(ASAP_OVERSIZE_FILE_BYTES);
+	if (!block)
+		return -1;
+	memset(block, 'A', ASAP_OVERSIZE_FILE_BYTES);
+	f = fopen(path, "wb");
+	if (!f) {
+		free(block);
+		return -1;
+	}
+	nw = fwrite(block, 1, ASAP_OVERSIZE_FILE_BYTES, f);
+	fclose(f);
+	free(block);
+	return nw == ASAP_OVERSIZE_FILE_BYTES ? 0 : -1;
+}
+
+static int asap_log_outbound_count(const char *token, int *count_out)
+{
+	long code;
+	char *body = NULL;
+	cJSON *root;
+	cJSON *ent;
+	int i;
+	int n;
+	int count = 0;
+	if (!token || !token[0] || !count_out)
+		return -1;
+	if (http_get_auth(gw_url("/api/asap/log"), token, &code, &body) != 0)
+		return -1;
+	if (code != 200 || !body) {
+		free(body);
+		return -1;
+	}
+	root = cJSON_Parse(body);
+	free(body);
+	if (!root)
+		return -1;
+	ent = cJSON_GetObjectItemCaseSensitive(root, "entries");
+	if (!ent || !cJSON_IsArray(ent)) {
+		cJSON_Delete(root);
+		return -1;
+	}
+	n = cJSON_GetArraySize(ent);
+	for (i = 0; i < n; i++) {
+		cJSON *e = cJSON_GetArrayItem(ent, i);
+		cJSON *dir = e ? cJSON_GetObjectItemCaseSensitive(e, "direction") : NULL;
+		if (dir && cJSON_IsString(dir) && dir->valuestring &&
+		    strcmp(dir->valuestring, "out") == 0)
+			count++;
+	}
+	cJSON_Delete(root);
+	*count_out = count;
+	return 0;
+}
+
+static int test_asap_rejects_oversized_response(const char *token)
+{
+	char path[256];
+	char payload[640];
+	long code;
+	char *body = NULL;
+	int n;
+	int r;
+	int out_before = 0;
+	int out_after = 0;
+	cJSON *parsed;
+	ASSERT(write_asap_oversize_file(path, sizeof path) == 0);
+	n = snprintf(payload, sizeof payload,
+		"{\"name\":\"file\",\"arguments\":{\"operation\":\"read_file\",\"path\":\"%s\"}}",
+		path);
+	ASSERT(n > 0 && (size_t)n < sizeof payload);
+	if (token && token[0])
+		ASSERT(asap_log_outbound_count(token, &out_before) == 0);
+	r = post_asap("mcp.tool_call", payload, "01HZABC126", &code, &body);
+	ASSERT(r == 0);
+	if (code != 500)
+		fprintf(stderr, "FAIL: HTTP %ld want 500 body_len=%zu\n",
+			code, body ? strlen(body) : 0);
+	ASSERT(code == 500);
+	ASSERT(body != NULL);
+	parsed = cJSON_Parse(body);
+	if (!parsed)
+		fprintf(stderr, "FAIL: oversized ASAP body is not JSON: %.200s\n",
+			body);
+	ASSERT(parsed != NULL);
+	cJSON_Delete(parsed);
+	ASSERT(asap_error_code_is(body, -32603));
+	ASSERT(strstr(body, "exceeds gateway buffer") != NULL);
+	free(body);
+	if (token && token[0]) {
+		ASSERT(asap_log_outbound_count(token, &out_after) == 0);
+		ASSERT(out_after == out_before);
+	}
+	return 0;
+}
+
 static int test_manifest(void)
 {
 	long code;
@@ -1195,6 +1300,10 @@ int main(int argc, char **argv)
 	if (test_asap_task_request() != 0) { fprintf(stderr, "test_asap_task_request failed\n"); failed++; }
 	if (test_asap_mcp_tool_call() != 0) { fprintf(stderr, "test_asap_mcp_tool_call failed\n"); failed++; }
 	if (test_asap_mcp_unknown_tool() != 0) { fprintf(stderr, "test_asap_mcp_unknown_tool failed\n"); failed++; }
+	if (test_asap_rejects_oversized_response(token) != 0) {
+		fprintf(stderr, "test_asap_rejects_oversized_response failed\n");
+		failed++;
+	}
 	if (test_api_asap_log_401() != 0) { fprintf(stderr, "test_api_asap_log_401 failed\n"); failed++; }
 	if (test_api_hardware_board_401() != 0) {
 		fprintf(stderr, "test_api_hardware_board_401 failed\n");
