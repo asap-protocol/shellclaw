@@ -27,6 +27,33 @@
 /** Must match MSG_MAX in src/gateway/ws.c */
 #define WS_MSG_MAX 8192
 
+/**
+ * Agent replies can be up to RESPONSE_BUF_SIZE (32 KiB) in dispatch.c.
+ * A ~10 KiB payload is above the historical 8 KiB WS cap and must still
+ * enqueue and dequeue intact.
+ */
+static int test_send_to_accepts_dispatch_sized_payload(void)
+{
+	char *payload;
+	char buf[10000];
+	size_t len_out;
+	const size_t payload_len = 9999;
+
+	ws_cleanup();
+	ASSERT(ws_register_conn(8, (ws_conn_t)(intptr_t)8) == 0);
+	payload = malloc(payload_len + 1);
+	ASSERT(payload != NULL);
+	memset(payload, 'c', payload_len);
+	payload[payload_len] = '\0';
+	ASSERT(ws_send_to("webchat:8", payload) == 0);
+	ASSERT(ws_dequeue_outgoing(8, buf, sizeof(buf), &len_out) == 1);
+	ASSERT(len_out == payload_len);
+	ASSERT(memcmp(buf, payload, payload_len) == 0);
+	free(payload);
+	ws_cleanup();
+	return 0;
+}
+
 static int test_register_conn_full_table(void)
 {
 	int i;
@@ -186,6 +213,7 @@ int main(void)
 	RUN(test_register_conn_full_table());
 	RUN(test_push_incoming_msg_max());
 	RUN(test_send_to_rejects_oversized());
+	RUN(test_send_to_accepts_dispatch_sized_payload());
 	RUN(test_next_conn_id_and_unregister());
 	RUN(test_send_to_rejects_bad_session());
 	RUN(test_dequeue_outgoing_and_pending());
