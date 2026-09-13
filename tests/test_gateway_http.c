@@ -6,6 +6,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/auth.h"
+#include "gateway/http.h"
 #include "gateway/rate_limit.h"
 #include "core/config.h"
 #include "core/version.h"
@@ -103,16 +104,54 @@ static int ipv6_hex_kind(const char *hex32)
 	static const char z32[] = "00000000000000000000000000000000";
 	static const char lo[] = "00000000000000000000000001000000";
 	static const char v4map[] = "0000000000000000FFFF00000100007F";
+	static const char v4any[] = "0000000000000000FFFF000000000000";
 
 	if (!hex32 || strlen(hex32) < 32)
 		return LISTEN_BIND_OTHER;
 	if (strncasecmp(hex32, z32, 32) == 0)
+		return LISTEN_BIND_ANY;
+	if (strncasecmp(hex32, v4any, 32) == 0)
 		return LISTEN_BIND_ANY;
 	if (strncasecmp(hex32, lo, 32) == 0)
 		return LISTEN_BIND_LOOPBACK;
 	if (strncasecmp(hex32, v4map, 32) == 0)
 		return LISTEN_BIND_LOOPBACK;
 	return LISTEN_BIND_OTHER;
+}
+
+static int test_ipv6_hex_kind_v4mapped_any(void)
+{
+	/* ::ffff:0.0.0.0 is IPv4-mapped INADDR_ANY in /proc/net/tcp6. */
+	ASSERT(ipv6_hex_kind("0000000000000000FFFF000000000000") == LISTEN_BIND_ANY);
+	ASSERT(ipv6_hex_kind("0000000000000000FFFF00000100007F") == LISTEN_BIND_LOOPBACK);
+	ASSERT(ipv6_hex_kind("00000000000000000000000000000000") == LISTEN_BIND_ANY);
+	return 0;
+}
+
+static int test_http_listen_iface(void)
+{
+	const char *iface;
+
+	ASSERT(http_listen_iface("0.0.0.0", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("*", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("::", 0, &iface) != 0);
+	ASSERT(http_listen_iface("[::]", 0, &iface) != 0);
+	ASSERT(http_listen_iface("", 0, &iface) != 0);
+	ASSERT(http_listen_iface("::", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("[::]", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("127.0.0.1", 0, &iface) == 0);
+	ASSERT(iface != NULL && strcmp(iface, "127.0.0.1") == 0);
+	ASSERT(http_listen_iface("::1", 0, &iface) == 0);
+	ASSERT(iface != NULL && strcmp(iface, "::1") == 0);
+	ASSERT(http_listen_iface("0.0.0.0", 0, &iface) != 0);
+	ASSERT(http_listen_iface("127.0.0.1", 0, NULL) != 0);
+	return 0;
 }
 
 static int parse_proc_listen_kind(const char *line, int port, int ipv6)
@@ -171,6 +210,12 @@ static int test_listen_bound_to_loopback(int port)
 	int saw_loop = 0;
 
 	/* /health can succeed on 127.0.0.1 even when LWS bound INADDR_ANY. */
+	if (access("/proc/net/tcp", R_OK) != 0 &&
+	    access("/proc/net/tcp6", R_OK) != 0) {
+		fprintf(stderr,
+			"test_listen_bound_to_loopback: skip (/proc/net/tcp{,6} missing)\n");
+		return 0;
+	}
 
 	ASSERT(scan_proc_tcp("/proc/net/tcp", port, 0, &saw_any, &saw_loop) == 0);
 	(void)scan_proc_tcp("/proc/net/tcp6", port, 1, &saw_any, &saw_loop);
@@ -1492,6 +1537,14 @@ int main(int argc, char **argv)
 	char token[128] = {0};
 	int failed = 0;
 	int shutdown_reaped = 0;
+	if (test_ipv6_hex_kind_v4mapped_any() != 0) {
+		fprintf(stderr, "test_ipv6_hex_kind_v4mapped_any failed\n");
+		failed++;
+	}
+	if (test_http_listen_iface() != 0) {
+		fprintf(stderr, "test_http_listen_iface failed\n");
+		failed++;
+	}
 	if (test_listen_bound_to_loopback(port) != 0) {
 		fprintf(stderr, "test_listen_bound_to_loopback failed\n");
 		failed++;
