@@ -106,21 +106,26 @@ static void *http_thread_fn(void *arg)
 
 int http_start(const config_t *cfg, struct auth_ctx *auth_ctx, const char *config_path)
 {
+	const char *host;
+	const char *iface;
+	http_server_ctx_t *ctx;
+	struct lws_context_creation_info info;
+
 	if (!cfg || !auth_ctx || g_ctx) return -1;
-	const char *host = config_gateway_host(cfg);
-	int port = config_gateway_port(cfg);
-	if (strcmp(host, "0.0.0.0") == 0 && !config_gateway_allow_bind_all(cfg))
+	host = config_gateway_host(cfg);
+	if (http_listen_iface(host, config_gateway_allow_bind_all(cfg), &iface) != 0)
 		return -1;
-	http_server_ctx_t *ctx = calloc(1, sizeof(*ctx));
+	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) return -1;
 	ctx->cfg = cfg;
 	ctx->auth = auth_ctx;
 	ctx->config_path = config_path ? strdup(config_path) : NULL;
 	ctx->start_time = time(NULL);
 	ctx->running = 1;
-	struct lws_context_creation_info info;
 	memset(&info, 0, sizeof(info));
-	info.port = port;
+	info.port = config_gateway_port(cfg);
+	/* LWS iface NULL = INADDR_ANY. Pass host so 127.0.0.1 is not all-NICs. */
+	info.iface = iface;
 	info.protocols = protocols;
 #if defined(LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE)
 	info.options = LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE;

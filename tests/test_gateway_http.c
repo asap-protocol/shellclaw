@@ -1,11 +1,12 @@
 /**
  * @file test_gateway_http.c
- * @brief Integration tests for gateway HTTP: health, pair, auth, manifest, config, skills, memory, cron.
+ * @brief Integration tests for gateway HTTP: health, pair, auth, listen bind, manifest, config, skills, memory, cron.
  * Requires libwebsockets and SHELLCLAW_GATEWAY. Starts server in subprocess.
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/auth.h"
+#include "gateway/http.h"
 #include "gateway/rate_limit.h"
 #include "core/config.h"
 #include "core/version.h"
@@ -18,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -64,6 +66,168 @@ static int pick_ephemeral_port(void)
 	}
 	close(fd);
 	return (int)ntohs(addr.sin_port);
+}
+
+enum listen_bind_kind {
+	LISTEN_BIND_NONE = 0,
+	LISTEN_BIND_ANY = 1,
+	LISTEN_BIND_LOOPBACK = 2,
+	LISTEN_BIND_OTHER = 3
+};
+
+static int hex_port_matches(const char *port_hex, int port)
+{
+	unsigned long parsed;
+	char *end = NULL;
+
+	if (!port_hex || !port_hex[0])
+		return 0;
+	parsed = strtoul(port_hex, &end, 16);
+	if (!end || end == port_hex)
+		return 0;
+	return parsed == (unsigned long)port;
+}
+
+static int ipv4_hex_kind(const char *hex8)
+{
+	if (!hex8 || strlen(hex8) < 8)
+		return LISTEN_BIND_OTHER;
+	if (strncasecmp(hex8, "00000000", 8) == 0)
+		return LISTEN_BIND_ANY;
+	if (strncasecmp(hex8, "0100007F", 8) == 0)
+		return LISTEN_BIND_LOOPBACK;
+	return LISTEN_BIND_OTHER;
+}
+
+static int ipv6_hex_kind(const char *hex32)
+{
+	static const char z32[] = "00000000000000000000000000000000";
+	static const char lo[] = "00000000000000000000000001000000";
+	static const char v4map[] = "0000000000000000FFFF00000100007F";
+	static const char v4any[] = "0000000000000000FFFF000000000000";
+
+	if (!hex32 || strlen(hex32) < 32)
+		return LISTEN_BIND_OTHER;
+	if (strncasecmp(hex32, z32, 32) == 0)
+		return LISTEN_BIND_ANY;
+	if (strncasecmp(hex32, v4any, 32) == 0)
+		return LISTEN_BIND_ANY;
+	if (strncasecmp(hex32, lo, 32) == 0)
+		return LISTEN_BIND_LOOPBACK;
+	if (strncasecmp(hex32, v4map, 32) == 0)
+		return LISTEN_BIND_LOOPBACK;
+	return LISTEN_BIND_OTHER;
+}
+
+static int test_ipv6_hex_kind_v4mapped_any(void)
+{
+	/* ::ffff:0.0.0.0 is IPv4-mapped INADDR_ANY in /proc/net/tcp6. */
+	ASSERT(ipv6_hex_kind("0000000000000000FFFF000000000000") == LISTEN_BIND_ANY);
+	ASSERT(ipv6_hex_kind("0000000000000000FFFF00000100007F") == LISTEN_BIND_LOOPBACK);
+	ASSERT(ipv6_hex_kind("00000000000000000000000000000000") == LISTEN_BIND_ANY);
+	return 0;
+}
+
+static int test_http_listen_iface(void)
+{
+	const char *iface;
+
+	ASSERT(http_listen_iface("0.0.0.0", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("*", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("::", 0, &iface) != 0);
+	ASSERT(http_listen_iface("[::]", 0, &iface) != 0);
+	ASSERT(http_listen_iface("", 0, &iface) != 0);
+	ASSERT(http_listen_iface("::", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("[::]", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("127.0.0.1", 0, &iface) == 0);
+	ASSERT(iface != NULL && strcmp(iface, "127.0.0.1") == 0);
+	ASSERT(http_listen_iface("::1", 0, &iface) == 0);
+	ASSERT(iface != NULL && strcmp(iface, "::1") == 0);
+	ASSERT(http_listen_iface("0.0.0.0", 0, &iface) != 0);
+	ASSERT(http_listen_iface("127.0.0.1", 0, NULL) != 0);
+	return 0;
+}
+
+static int parse_proc_listen_kind(const char *line, int port, int ipv6)
+{
+	unsigned int sl;
+	unsigned int st;
+	char local[40];
+	char rem[40];
+	char *colon;
+
+	if (sscanf(line, "%u: %39s %39s %X", &sl, local, rem, &st) != 4)
+		return LISTEN_BIND_NONE;
+	(void)sl;
+	(void)rem;
+	if (st != 0x0A)
+		return LISTEN_BIND_NONE;
+	colon = strrchr(local, ':');
+	if (!colon)
+		return LISTEN_BIND_NONE;
+	*colon = '\0';
+	if (!hex_port_matches(colon + 1, port))
+		return LISTEN_BIND_NONE;
+	return ipv6 ? ipv6_hex_kind(local) : ipv4_hex_kind(local);
+}
+
+static int scan_proc_tcp(const char *path, int port, int ipv6, int *saw_any,
+			 int *saw_loop)
+{
+	FILE *fp;
+	char line[512];
+
+	if (!path || !saw_any || !saw_loop)
+		return -1;
+	fp = fopen(path, "r");
+	if (!fp)
+		return 0;
+	if (!fgets(line, sizeof(line), fp)) {
+		fclose(fp);
+		return -1;
+	}
+	while (fgets(line, sizeof(line), fp)) {
+		int kind = parse_proc_listen_kind(line, port, ipv6);
+
+		if (kind == LISTEN_BIND_ANY)
+			*saw_any = 1;
+		if (kind == LISTEN_BIND_LOOPBACK)
+			*saw_loop = 1;
+	}
+	fclose(fp);
+	return 0;
+}
+
+static int test_listen_bound_to_loopback(int port)
+{
+	int saw_any = 0;
+	int saw_loop = 0;
+
+	/* /health can succeed on 127.0.0.1 even when LWS bound INADDR_ANY. */
+	if (access("/proc/net/tcp", R_OK) != 0 &&
+	    access("/proc/net/tcp6", R_OK) != 0) {
+		fprintf(stderr,
+			"test_listen_bound_to_loopback: skip (/proc/net/tcp{,6} missing)\n");
+		return 0;
+	}
+
+	ASSERT(scan_proc_tcp("/proc/net/tcp", port, 0, &saw_any, &saw_loop) == 0);
+	(void)scan_proc_tcp("/proc/net/tcp6", port, 1, &saw_any, &saw_loop);
+	if (saw_any) {
+		fprintf(stderr,
+			"FAIL: gateway LISTEN on 0.0.0.0/:: port %d "
+			"(config host is 127.0.0.1)\n",
+			port);
+		return 1;
+	}
+	ASSERT(saw_loop);
+	return 0;
 }
 
 static int http_get(const char *url, long *code_out, char **body_out);
@@ -1373,6 +1537,18 @@ int main(int argc, char **argv)
 	char token[128] = {0};
 	int failed = 0;
 	int shutdown_reaped = 0;
+	if (test_ipv6_hex_kind_v4mapped_any() != 0) {
+		fprintf(stderr, "test_ipv6_hex_kind_v4mapped_any failed\n");
+		failed++;
+	}
+	if (test_http_listen_iface() != 0) {
+		fprintf(stderr, "test_http_listen_iface failed\n");
+		failed++;
+	}
+	if (test_listen_bound_to_loopback(port) != 0) {
+		fprintf(stderr, "test_listen_bound_to_loopback failed\n");
+		failed++;
+	}
 	if (test_health() != 0) { fprintf(stderr, "test_health failed\n"); failed++; }
 	if (test_pair(pairing_code, token, sizeof(token)) != 0) {
 		fprintf(stderr, "test_pair failed\n");
