@@ -25,6 +25,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Gateway `/health` `version` matches `SHELLCLAW_RELEASE_VERSION`.
 
 ### Security
+- Gateway shutdown joins the HTTP thread before `auth_cleanup`, so in-flight `/api/*`, `/pair`, and WebSocket upgrades cannot call `auth_validate_token` / `auth_pair` on a freed `auth_ctx`.
 - Camera auto-output keeps the exclusive `mkstemp` inode (no unlink + `${tmpl}.jpg` sibling).
 - Reject I2C `bus` outside 0–255 at the tool JSON boundary.
 - Document that protocol-public `POST /asap` can invoke local tools; production must set `[asap].trusted_senders` before exposing the gateway.
