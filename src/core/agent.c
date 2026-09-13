@@ -212,13 +212,27 @@ static void copy_response_to_buf(const char *content, char *response_buf, size_t
 static size_t append_memories_to_system(char *system_buf, size_t buf_size, const char *recall_buf)
 {
 	size_t len = strlen(system_buf);
-	if (len == 0 || !recall_buf || recall_buf[0] == '\0') return len;
+	size_t prefix_len;
+	size_t recall_len;
+	size_t remain;
 	const char *prefix = "\n\nRelevant memories:\n\n";
-	size_t prefix_len = strlen(prefix);
-	size_t recall_len = strlen(recall_buf);
-	if (len + prefix_len + recall_len + 1 > buf_size)
-		recall_len = buf_size > len + prefix_len ? (buf_size - len - prefix_len - 1) : 0;
-	if (prefix_len + recall_len == 0) return len;
+	if (len == 0 || !recall_buf || recall_buf[0] == '\0')
+		return len;
+	/* prefix_len is never 0, so the old `prefix_len + recall_len == 0` guard
+	 * never fired. When the prompt filled SYSTEM_PROMPT_MAX, recall_len was
+	 * clamped to 0 and memcpy still wrote the prefix (and a NUL) past the heap
+	 * buffer (Refs: #75). Skip unless prefix + at least one recall byte + NUL fit. */
+	prefix_len = strlen(prefix);
+	if (len >= buf_size || buf_size - len < prefix_len + 2U) {
+		fprintf(stderr, "agent: skip memory injection len=%zu cap=%zu\n", len, buf_size);
+		return len;
+	}
+	recall_len = strlen(recall_buf);
+	remain = buf_size - len - prefix_len - 1U;
+	if (recall_len > remain)
+		recall_len = remain;
+	if (recall_len == 0)
+		return len;
 	memcpy(system_buf + len, prefix, prefix_len);
 	len += prefix_len;
 	memcpy(system_buf + len, recall_buf, recall_len);

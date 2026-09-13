@@ -9,6 +9,7 @@
 #include "core/memory.h"
 #include "providers/provider.h"
 #include "cJSON.h"
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,8 @@
 #define SPY_CONTENT_SIZE 4096
 #define SPY_SLOTS 8
 static size_t spy_message_count;
+static size_t spy_first_content_len;
+static char spy_first_last_char;
 static char spy_content[SPY_SLOTS][SPY_CONTENT_SIZE];
 static char *spy_roles[SPY_SLOTS];
 
@@ -43,12 +46,17 @@ static int spy_chat(const provider_message_t *messages, size_t message_count,
 	response->tool_calls_count = 0;
 	spy_roles_clear();
 	spy_message_count = message_count;
+	spy_first_content_len = (message_count > 0 && messages[0].content)
+		? strlen(messages[0].content) : 0;
+	spy_first_last_char = (spy_first_content_len > 0 && messages[0].content)
+		? messages[0].content[spy_first_content_len - 1] : '\0';
 	for (size_t i = 0; i < message_count && i < SPY_SLOTS; i++) {
 		spy_roles[i] = messages[i].role ? strdup(messages[i].role) : NULL;
 		if (messages[i].content) {
 			size_t n = strlen(messages[i].content);
 			if (n >= SPY_CONTENT_SIZE) n = SPY_CONTENT_SIZE - 1;
-			memcpy(spy_content[i], messages[i].content, n + 1);
+			memcpy(spy_content[i], messages[i].content, n);
+			spy_content[i][n] = '\0';
 		} else
 			spy_content[i][0] = '\0';
 	}
@@ -966,6 +974,208 @@ cleanup:
 	return failed;
 }
 
+static int write_filled_soul_file(const char *path, size_t nbytes)
+{
+	char chunk[4096];
+	size_t remaining = nbytes;
+	FILE *sf = fopen(path, "w");
+	if (!sf)
+		return -1;
+	memset(chunk, 'A', sizeof(chunk));
+	while (remaining > 0) {
+		size_t n = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+		if (fwrite(chunk, 1, n, sf) != n) {
+			fclose(sf);
+			return -1;
+		}
+		remaining -= n;
+	}
+	fclose(sf);
+	return 0;
+}
+
+static int write_mem_overflow_config(const char *config_path, const char *soul_path,
+	const char *db_path)
+{
+	FILE *cf = fopen(config_path, "w");
+	if (!cf)
+		return -1;
+	fprintf(cf,
+	        "[agent]\nmodel = \"test\"\n[agent.identity]\nsoul = \"%s\"\n"
+	        "[memory]\ndb_path = \"%s\"\n[skills]\ndir = \"build/test_agent_mem_noskills\"\n",
+	        soul_path, db_path);
+	fclose(cf);
+	return 0;
+}
+
+static int prepare_coffee_memory_store(const char *db_path)
+{
+	char recall_check[512];
+	memory_cleanup();
+	if (memory_init(db_path) != 0)
+		return -1;
+	if (memory_save("pref", "User likes coffee. New message context.", NULL) != 0)
+		return -1;
+	if (memory_recall("coffee", recall_check, sizeof(recall_check), 5) != 0)
+		return -1;
+	if (recall_check[0] == '\0')
+		return -1;
+	return 0;
+}
+
+static int test_full_system_prompt_skips_memory_append_without_overflow(void)
+{
+	int failed = 1;
+	const char *db_path = "build/test_agent_mem_overflow.db";
+	const char *soul_path = "build/test_agent_mem_overflow_soul.md";
+	const char *config_path = "build/test_agent_mem_overflow.toml";
+	const char *err_path = "build/test_agent_mem_overflow.err";
+	config_t *cfg = NULL;
+	char response_buf[4096];
+	char errbuf[256] = {0};
+	char captured[2048];
+	int saved_stderr = -1;
+	int errfd = -1;
+	FILE *ef;
+
+	/* SYSTEM_PROMPT_MAX is 65536; a 65535-byte SOUL fills it so the 22-byte
+	 * "Relevant memories" prefix cannot fit. The old clamp still memcpy'd
+	 * the prefix past the heap allocation (Refs: #75). */
+	if (prepare_coffee_memory_store(db_path) != 0)
+		goto cleanup;
+	if (write_filled_soul_file(soul_path, 65535U) != 0)
+		goto cleanup;
+	if (write_mem_overflow_config(config_path, soul_path, db_path) != 0)
+		goto cleanup;
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	if (!cfg)
+		goto cleanup;
+	spy_roles_clear();
+	spy_first_content_len = 0;
+	errfd = open(err_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (errfd < 0)
+		goto cleanup;
+	saved_stderr = dup(STDERR_FILENO);
+	if (saved_stderr < 0)
+		goto cleanup;
+	if (dup2(errfd, STDERR_FILENO) < 0)
+		goto cleanup;
+	close(errfd);
+	errfd = -1;
+	if (agent_run(cfg, "cli:memoverflow", "coffee", &spy_provider, NULL, 0,
+	              response_buf, sizeof(response_buf)) != 0) {
+		if (saved_stderr >= 0) {
+			fflush(stderr);
+			dup2(saved_stderr, STDERR_FILENO);
+			close(saved_stderr);
+			saved_stderr = -1;
+		}
+		fprintf(stderr, "FAIL: tests/test_agent.c: full-prompt memory skip agent_run failed\n");
+		goto cleanup;
+	}
+	fflush(stderr);
+	dup2(saved_stderr, STDERR_FILENO);
+	close(saved_stderr);
+	saved_stderr = -1;
+	if (spy_message_count < 1)
+		goto cleanup;
+	if (!spy_roles[0] || strcmp(spy_roles[0], "system") != 0)
+		goto cleanup;
+	if (spy_first_content_len != 65535U) {
+		fprintf(stderr,
+		        "FAIL: tests/test_agent.c: system prompt len %zu (expected 65535, memories not skipped)\n",
+		        spy_first_content_len);
+		goto cleanup;
+	}
+	if (spy_content[0][0] != 'A')
+		goto cleanup;
+	ef = fopen(err_path, "r");
+	if (!ef)
+		goto cleanup;
+	{
+		size_t n = fread(captured, 1, sizeof(captured) - 1, ef);
+		captured[n] = '\0';
+		fclose(ef);
+	}
+	if (strstr(captured, "agent: skip memory injection") == NULL) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: missing skip memory injection log\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	if (errfd >= 0)
+		close(errfd);
+	if (saved_stderr >= 0) {
+		fflush(stderr);
+		dup2(saved_stderr, STDERR_FILENO);
+		close(saved_stderr);
+	}
+	config_free(cfg);
+	remove(config_path);
+	remove(soul_path);
+	remove(db_path);
+	remove(err_path);
+	memory_cleanup();
+	return failed;
+}
+
+static int test_near_full_system_prompt_keeps_one_recall_byte(void)
+{
+	int failed = 1;
+	const char *db_path = "build/test_agent_mem_trunc.db";
+	const char *soul_path = "build/test_agent_mem_trunc_soul.md";
+	const char *config_path = "build/test_agent_mem_trunc.toml";
+	config_t *cfg = NULL;
+	char response_buf[4096];
+	char errbuf[256] = {0};
+
+	/* Prefix is 22 bytes. Soul 65510 plus PROMPT_SEP "\\n\\n" yields len 65512
+	 * so len + prefix + 1 recall byte + NUL == SYSTEM_PROMPT_MAX. One FTS byte
+	 * ('U' from "User likes coffee") must be kept (Refs: #75). */
+	if (prepare_coffee_memory_store(db_path) != 0)
+		goto cleanup;
+	if (write_filled_soul_file(soul_path, 65510U) != 0)
+		goto cleanup;
+	if (write_mem_overflow_config(config_path, soul_path, db_path) != 0)
+		goto cleanup;
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	if (!cfg)
+		goto cleanup;
+	spy_roles_clear();
+	spy_first_content_len = 0;
+	if (agent_run(cfg, "cli:memtrunc", "coffee", &spy_provider, NULL, 0,
+	              response_buf, sizeof(response_buf)) != 0) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: near-full memory clip agent_run failed\n");
+		goto cleanup;
+	}
+	if (spy_message_count < 1)
+		goto cleanup;
+	if (!spy_roles[0] || strcmp(spy_roles[0], "system") != 0)
+		goto cleanup;
+	if (spy_first_content_len != 65535U) {
+		fprintf(stderr,
+		        "FAIL: tests/test_agent.c: clipped prompt len %zu (expected 65535)\n",
+		        spy_first_content_len);
+		goto cleanup;
+	}
+	if (spy_first_last_char != 'U') {
+		fprintf(stderr,
+		        "FAIL: tests/test_agent.c: last byte 0x%02x (expected clipped recall 'U')\n",
+		        (unsigned char)spy_first_last_char);
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	remove(config_path);
+	remove(soul_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
 int main(void)
 {
 	RUN(test_agent_run_with_stub_and_no_tools());
@@ -980,6 +1190,8 @@ int main(void)
 	RUN(test_local_offline_note_skipped_for_non_local());
 	RUN(test_session_overflow_does_not_corrupt_history());
 	RUN(test_oversized_stored_session_not_wiped_by_small_turn());
+	RUN(test_full_system_prompt_skips_memory_append_without_overflow());
+	RUN(test_near_full_system_prompt_keeps_one_recall_byte());
 	RUN(test_agent_provider_error_response());
 	RUN(test_agent_unknown_tool_continues());
 	printf("test_agent: all tests passed\n");
