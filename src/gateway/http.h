@@ -16,7 +16,8 @@ struct auth_ctx;
 
 /**
  * Start HTTP+WebSocket server on config host:port.
- * Rejects bind to 0.0.0.0 if allow_bind_all is false.
+ * Binds the listen socket to config_gateway_host (default 127.0.0.1 via
+ * info.iface). Rejects host 0.0.0.0/"*" unless allow_bind_all is true.
  *
  * @param cfg         Configuration (host, port, allow_bind_all).
  * @param auth_ctx    Auth context for token validation.
