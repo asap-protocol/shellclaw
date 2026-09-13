@@ -245,9 +245,13 @@ int session_load(const char *session_id, char *messages_out, size_t max_len)
 		const char *msg = (const char *)sqlite3_column_text(stmt, 0);
 		if (msg) {
 			size_t n = strlen(msg);
-			if (n >= max_len) n = max_len - 1;
-			memcpy(messages_out, msg, n);
-			messages_out[n] = '\0';
+			/* Refuse silent truncation: a clipped messages blob is invalid JSON
+			 * and agent_run would treat the session as empty history. */
+			if (n >= max_len) {
+				sqlite3_finalize(stmt);
+				return -1;
+			}
+			memcpy(messages_out, msg, n + 1);
 			ret = 0;
 		}
 	}

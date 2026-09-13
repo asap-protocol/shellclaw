@@ -130,9 +130,13 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	cJSON_Delete(new_arr);
 	if (!printed) return -1;
 	size_t plen = strlen(printed);
-	if (plen >= session_buf_size) plen = session_buf_size - 1;
-	memcpy(session_buf, printed, plen);
-	session_buf[plen] = '\0';
+	/* Refuse mid-JSON truncation: a clipped payload corrupts the session and
+	 * the next agent_run parse treats history as empty (permanent wipe). */
+	if (plen >= session_buf_size) {
+		cJSON_free(printed);
+		return -1;
+	}
+	memcpy(session_buf, printed, plen + 1);
 	cJSON_free(printed);
 	session_save(session_id, session_buf);
 	return 0;
@@ -308,9 +312,13 @@ static int append_exchange_to_session_json(const char *existing_json, const char
 	cJSON_Delete(arr);
 	if (!printed) return -1;
 	size_t len = strlen(printed);
-	if (len >= out_size) len = out_size - 1;
-	memcpy(out_buf, printed, len);
-	out_buf[len] = '\0';
+	/* Do not truncate: partial JSON saved via session_save is unparseable and
+	 * wipes conversation history on the next agent_run (see agent_prepare_context). */
+	if (len >= out_size) {
+		cJSON_free(printed);
+		return -1;
+	}
+	memcpy(out_buf, printed, len + 1);
 	cJSON_free(printed);
 	return 0;
 }
