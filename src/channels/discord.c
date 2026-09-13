@@ -298,7 +298,6 @@ static int discord_try_route_message(struct discord_ctx *dc, cJSON *d,
                                      char *sess_buf, size_t sess_sz)
 {
 	int n;
-	int i;
 	int route;
 	const char **allowed;
 	char *bid;
@@ -306,6 +305,8 @@ static int discord_try_route_message(struct discord_ctx *dc, cJSON *d,
 	n = config_discord_allowed_user_ids_count(dc->cfg);
 	allowed = NULL;
 	if (n > 0) {
+		int i;
+
 		allowed = malloc(sizeof(*allowed) * (size_t)n);
 		if (!allowed)
 			return 0;
