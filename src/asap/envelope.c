@@ -148,7 +148,7 @@ int asap_envelope_from_object(const cJSON *obj, cJSON *rpc_id, asap_envelope_t *
 	cJSON *rid_temp = NULL;
 
 	if (err_out) *err_out = NULL;
-	if (!obj || !cJSON_IsObject(r) || !out) return -1;
+	if (!obj || !cJSON_IsObject(r) || !out) return -1; /* caller still owns rpc_id */
 	if (!rpc_id) {
 		rid_temp = cJSON_CreateNull();
 		if (!rid_temp) return -1;
