@@ -372,6 +372,9 @@ static void agent_free_heap_messages(agent_run_ctx_t *ctx, size_t from_idx)
 {
 	size_t i;
 	if (!ctx->messages) return;
+	/* tool_use_id aliases our_calls[k].id; drop it before freeing tool_calls. */
+	for (i = from_idx; i < ctx->total_msgs; i++)
+		ctx->messages[i].tool_use_id = NULL;
 	for (i = from_idx; i < ctx->total_msgs; i++) {
 		agent_free_owned_ptr(ctx->messages[i].content);
 		ctx->messages[i].content = NULL;
