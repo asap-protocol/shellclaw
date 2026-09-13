@@ -567,6 +567,134 @@ static int test_agent_unknown_tool_continues(void)
 	return 0;
 }
 
+static int seq_tool_exec_count;
+static int seq_tool_execute(const char *args_json, char *result_buf, size_t max_len)
+{
+	(void)args_json;
+	seq_tool_exec_count++;
+	if (max_len > 0) {
+		snprintf(result_buf, max_len, "tool_output_%d", seq_tool_exec_count);
+		result_buf[max_len - 1] = '\0';
+	}
+	return 0;
+}
+static const agent_tool_t seq_echo_tool = {
+	.name = "echo",
+	.description = "Echo test with sequence counter",
+	.parameters_json = "{}",
+	.execute = seq_tool_execute,
+};
+
+static int multi_tool_round_call_count;
+static int multi_tool_round_saw_live_tool_calls;
+static int multi_tool_round_init(const config_t *cfg)
+{
+	(void)cfg;
+	multi_tool_round_call_count = 0;
+	seq_tool_exec_count = 0;
+	multi_tool_round_saw_live_tool_calls = 0;
+	return 0;
+}
+static int multi_tool_history_is_intact(const provider_message_t *messages, size_t message_count)
+{
+	size_t i;
+	int saw_first_tool_output = 0;
+	const char *first_call_id = NULL;
+	int saw_matching_use_id = 0;
+	for (i = 0; i < message_count; i++) {
+		if (messages[i].content && strstr(messages[i].content, "tool_output_1") != NULL)
+			saw_first_tool_output = 1;
+		if (!first_call_id && messages[i].tool_calls && messages[i].tool_calls_count == 1 &&
+		    messages[i].tool_calls[0].id) {
+			first_call_id = messages[i].tool_calls[0].id;
+			if (first_call_id[0] == '\0')
+				return 0;
+		}
+	}
+	if (!saw_first_tool_output || !first_call_id)
+		return 0;
+	for (i = 0; i < message_count; i++) {
+		if (messages[i].tool_use_id && strcmp(messages[i].tool_use_id, first_call_id) == 0) {
+			saw_matching_use_id = 1;
+			break;
+		}
+	}
+	return saw_matching_use_id;
+}
+static int multi_tool_round_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	(void)tools;
+	(void)tool_count;
+	response->error = 0;
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	response->content = NULL;
+	multi_tool_round_call_count++;
+	if (multi_tool_round_call_count >= 3) {
+		if (!multi_tool_history_is_intact(messages, message_count)) {
+			response->content = strdup("CORRUPTED_TOOL_HISTORY");
+			return 0;
+		}
+		multi_tool_round_saw_live_tool_calls = 1;
+	}
+	if (multi_tool_round_call_count <= 2) {
+		response->tool_calls = malloc(sizeof(provider_tool_call_t));
+		if (!response->tool_calls) {
+			response->error = 1;
+			return -1;
+		}
+		response->tool_calls[0].id = strdup("mt1");
+		response->tool_calls[0].name = strdup("echo");
+		response->tool_calls[0].arguments = strdup("{}");
+		response->tool_calls_count = 1;
+		response->content = strdup("");
+		return 0;
+	}
+	response->content = strdup("multi tool done");
+	return 0;
+}
+static void multi_tool_round_cleanup(void) {}
+static const provider_t multi_tool_round_provider = {
+	.name = "multi_tool_round",
+	.init = multi_tool_round_init,
+	.chat = multi_tool_round_chat,
+	.cleanup = multi_tool_round_cleanup,
+};
+
+static int test_react_loop_preserves_prior_tool_results(void)
+{
+	int failed = 1;
+	const char *path = "build/test_agent_multi_tool.toml";
+	FILE *f = fopen(path, "w");
+	ASSERT(f);
+	fprintf(f, "[agent]\nmodel = \"test\"\nmax_tool_iterations = 5\n");
+	fclose(f);
+	config_t *cfg = NULL;
+	char errbuf[256];
+	char response_buf[4096];
+	int ret;
+	if (config_load(path, &cfg, errbuf, sizeof(errbuf)) != 0) goto cleanup;
+	if (cfg == NULL) goto cleanup;
+	multi_tool_round_call_count = 0;
+	seq_tool_exec_count = 0;
+	multi_tool_round_saw_live_tool_calls = 0;
+	response_buf[0] = '\0';
+	ret = agent_run(cfg, "cli:multitool", "hi", &multi_tool_round_provider, &seq_echo_tool, 1,
+	                response_buf, sizeof(response_buf));
+	if (ret != 0) goto cleanup;
+	if (strstr(response_buf, "multi tool done") == NULL) goto cleanup;
+	if (strstr(response_buf, "CORRUPTED_TOOL_HISTORY") != NULL) goto cleanup;
+	if (multi_tool_round_call_count != 3) goto cleanup;
+	if (seq_tool_exec_count != 2) goto cleanup;
+	if (!multi_tool_round_saw_live_tool_calls) goto cleanup;
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	remove(path);
+	return failed;
+}
+
 static int test_local_offline_note_skipped_for_non_local(void)
 {
 	const char *path = "build/test_agent_nonlocal_note.toml";
@@ -597,6 +725,7 @@ int main(void)
 	RUN(test_context_assembly_system_prompt_history_memories());
 	RUN(test_react_loop_tool_then_text());
 	RUN(test_react_loop_max_iterations());
+	RUN(test_react_loop_preserves_prior_tool_results());
 	RUN(test_session_persisted_after_exchange());
 	RUN(test_context_compaction_when_history_exceeds_max());
 	RUN(test_local_offline_note_when_active_is_local());

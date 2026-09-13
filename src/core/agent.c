@@ -11,6 +11,7 @@
 #include "providers/provider.h"
 #include "cJSON.h"
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -258,15 +259,23 @@ static const agent_tool_t *find_tool(const agent_tool_t *tools, size_t tool_coun
 	return NULL;
 }
 
-static void free_tool_calls_copy(provider_tool_call_t *copy, size_t n)
+static void agent_free_owned_ptr(const void *p)
 {
+	free((void *)(uintptr_t)p);
+}
+
+static void free_tool_calls_copy(const provider_tool_call_t *copy, size_t n)
+{
+	provider_tool_call_t *owned;
+	size_t i;
 	if (!copy) return;
-	for (size_t i = 0; i < n; i++) {
-		free(copy[i].id);
-		free(copy[i].name);
-		free(copy[i].arguments);
+	owned = (provider_tool_call_t *)(uintptr_t)copy;
+	for (i = 0; i < n; i++) {
+		free(owned[i].id);
+		free(owned[i].name);
+		free(owned[i].arguments);
 	}
-	free(copy);
+	free(owned);
 }
 
 /** Append user+assistant exchange to session JSON. Invalid or empty existing becomes []. */
@@ -343,6 +352,7 @@ typedef struct agent_run_ctx {
 	char *tool_result_bufs;
 	provider_message_t *messages;
 	size_t total_msgs;
+	size_t base_msg_count;
 	int history_count;
 	int max_iter;
 	int max_ctx;
@@ -354,6 +364,23 @@ static void agent_oom_msg(agent_run_ctx_t *ctx)
 	if (ctx->response_buf && ctx->response_size > 0) {
 		strncpy(ctx->response_buf, "agent_run: out of memory", ctx->response_size - 1);
 		ctx->response_buf[ctx->response_size - 1] = '\0';
+	}
+}
+
+/** Free ReAct-owned slots (assistant text, tool results, tool_calls copies). */
+static void agent_free_heap_messages(agent_run_ctx_t *ctx, size_t from_idx)
+{
+	size_t i;
+	if (!ctx->messages) return;
+	/* tool_use_id aliases our_calls[k].id; drop it before freeing tool_calls. */
+	for (i = from_idx; i < ctx->total_msgs; i++)
+		ctx->messages[i].tool_use_id = NULL;
+	for (i = from_idx; i < ctx->total_msgs; i++) {
+		agent_free_owned_ptr(ctx->messages[i].content);
+		ctx->messages[i].content = NULL;
+		free_tool_calls_copy(ctx->messages[i].tool_calls, ctx->messages[i].tool_calls_count);
+		ctx->messages[i].tool_calls = NULL;
+		ctx->messages[i].tool_calls_count = 0;
 	}
 }
 
@@ -429,6 +456,7 @@ static int agent_build_messages(agent_run_ctx_t *ctx)
 	}
 	ctx->messages[1 + ctx->history_count].role = "user";
 	ctx->messages[1 + ctx->history_count].content = ctx->user_message;
+	ctx->base_msg_count = ctx->total_msgs;
 	return 0;
 }
 
@@ -448,32 +476,20 @@ static int agent_react_loop(agent_run_ctx_t *ctx)
 {
 	int iteration = 0;
 	provider_response_t response = {0};
-	char *prev_assistant = NULL;
-	provider_tool_call_t *prev_calls = NULL;
-	size_t prev_n = 0;
 	for (;;) {
 		int err = ctx->provider->chat(ctx->messages, ctx->total_msgs, ctx->tool_defs, ctx->tool_count,
 		                              &response);
 		if (err != 0) {
 			copy_response_to_buf(response.content, ctx->response_buf, ctx->response_size);
 			provider_response_clear(&response);
-			free(prev_assistant);
-			free_tool_calls_copy(prev_calls, prev_n);
 			return -1;
 		}
 		if (response.tool_calls_count == 0 || iteration >= ctx->max_iter) {
 			copy_response_to_buf(response.content, ctx->response_buf, ctx->response_size);
 			provider_response_clear(&response);
 			agent_persist_session(ctx, ctx->response_buf);
-			free(prev_assistant);
-			free_tool_calls_copy(prev_calls, prev_n);
 			return 0;
 		}
-		free(prev_assistant);
-		free_tool_calls_copy(prev_calls, prev_n);
-		prev_assistant = NULL;
-		prev_calls = NULL;
-		prev_n = 0;
 		{
 			size_t nc = response.tool_calls_count;
 			char *assistant_content;
@@ -482,14 +498,12 @@ static int agent_react_loop(agent_run_ctx_t *ctx)
 			size_t new_count;
 			if (nc > MAX_TOOL_CALLS)
 				nc = MAX_TOOL_CALLS;
-			assistant_content = response.content ? strdup(response.content) : NULL;
-			if (!assistant_content && response.content && response.content[0] != '\0') {
+			assistant_content = response.content ? strdup(response.content) : strdup("");
+			if (!assistant_content) {
 				provider_response_clear(&response);
 				agent_oom_msg(ctx);
 				return -1;
 			}
-			if (!assistant_content)
-				assistant_content = strdup("");
 			our_calls = copy_tool_calls(response.tool_calls, nc);
 			provider_response_clear(&response);
 			if (!our_calls) {
@@ -523,24 +537,34 @@ static int agent_react_loop(agent_run_ctx_t *ctx)
 			new_messages[ctx->total_msgs].tool_calls = our_calls;
 			new_messages[ctx->total_msgs].tool_calls_count = nc;
 			for (size_t k = 0; k < nc; k++) {
+				char *one_buf = ctx->tool_result_bufs + k * TOOL_RESULT_SIZE;
+				/* Scratch is reused each round; history must own a copy (Refs: #59). */
+				char *tool_content = strdup(one_buf);
+				if (!tool_content) {
+					for (size_t j = 0; j < k; j++)
+						agent_free_owned_ptr(new_messages[ctx->total_msgs + 1 + j].content);
+					free(new_messages);
+					free_tool_calls_copy(our_calls, nc);
+					free(assistant_content);
+					agent_oom_msg(ctx);
+					return -1;
+				}
 				new_messages[ctx->total_msgs + 1 + k].role = "user";
-				new_messages[ctx->total_msgs + 1 + k].content =
-				    ctx->tool_result_bufs + k * TOOL_RESULT_SIZE;
+				new_messages[ctx->total_msgs + 1 + k].content = tool_content;
 				new_messages[ctx->total_msgs + 1 + k].tool_use_id = our_calls[k].id;
 			}
 			free(ctx->messages);
 			ctx->messages = new_messages;
 			ctx->total_msgs = new_count;
 			iteration++;
-			prev_assistant = assistant_content;
-			prev_calls = our_calls;
-			prev_n = nc;
 		}
 	}
 }
 
 static void agent_run_cleanup(agent_run_ctx_t *ctx)
 {
+	if (ctx->messages && ctx->base_msg_count < ctx->total_msgs)
+		agent_free_heap_messages(ctx, ctx->base_msg_count);
 	free(ctx->system_buf);
 	free(ctx->skills_buf);
 	free(ctx->session_buf);
