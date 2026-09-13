@@ -51,6 +51,76 @@ static int test_send_to_accepts_dispatch_sized_payload(void)
 	return 0;
 }
 
+static int assert_outgoing_roundtrip(int conn_id, size_t payload_len, size_t dest_size)
+{
+	char *payload;
+	char *buf;
+	size_t len_out;
+	char session[32];
+	int n;
+
+	ws_cleanup();
+	ASSERT(ws_register_conn(conn_id, (ws_conn_t)(intptr_t)conn_id) == 0);
+	payload = malloc(payload_len + 1);
+	buf = malloc(dest_size);
+	ASSERT(payload != NULL);
+	ASSERT(buf != NULL);
+	memset(payload, 'd', payload_len);
+	payload[payload_len] = '\0';
+	n = snprintf(session, sizeof(session), "webchat:%d", conn_id);
+	ASSERT(n > 0 && (size_t)n < sizeof(session));
+	ASSERT(ws_send_to(session, payload) == 0);
+	ASSERT(ws_dequeue_outgoing(conn_id, buf, dest_size, &len_out) == 1);
+	ASSERT(len_out == payload_len);
+	ASSERT(memcmp(buf, payload, payload_len) == 0);
+	if (dest_size > payload_len)
+		ASSERT(buf[payload_len] == '\0');
+	free(payload);
+	free(buf);
+	ws_cleanup();
+	return 0;
+}
+
+/** Dispatch copy_response_to_buf leaves one byte for NUL (32767). */
+static int test_send_to_accepts_ws_text_max_minus_one(void)
+{
+	return assert_outgoing_roundtrip(9, (size_t)WS_TEXT_MAX - 1, (size_t)WS_TEXT_MAX);
+}
+
+/**
+ * Production dest is currently WS_TEXT_MAX; dequeue then clamps
+ * strlen == dest_size and the memcpy of len+1 is not a NUL.
+ */
+static int test_send_to_preserves_exact_ws_text_max(void)
+{
+	return assert_outgoing_roundtrip(9, (size_t)WS_TEXT_MAX, (size_t)WS_TEXT_MAX);
+}
+
+static int test_pop_incoming_preserves_exact_ws_text_max(void)
+{
+	char *payload;
+	char *text;
+	char session[32];
+	const size_t payload_len = (size_t)WS_TEXT_MAX;
+
+	ws_cleanup();
+	ASSERT(ws_register_conn(10, (ws_conn_t)(intptr_t)10) == 0);
+	payload = malloc(payload_len + 1);
+	text = malloc((size_t)WS_TEXT_MAX);
+	ASSERT(payload != NULL);
+	ASSERT(text != NULL);
+	memset(payload, 'e', payload_len);
+	payload[payload_len] = '\0';
+	ws_push_incoming(10, payload);
+	ASSERT(ws_pop_incoming(session, sizeof(session), text, (size_t)WS_TEXT_MAX, 500) == 1);
+	ASSERT(strlen(text) == payload_len);
+	ASSERT(memcmp(text, payload, payload_len) == 0);
+	free(payload);
+	free(text);
+	ws_cleanup();
+	return 0;
+}
+
 static int test_register_conn_full_table(void)
 {
 	int i;
@@ -211,6 +281,9 @@ int main(void)
 	RUN(test_push_incoming_msg_max());
 	RUN(test_send_to_rejects_oversized());
 	RUN(test_send_to_accepts_dispatch_sized_payload());
+	RUN(test_send_to_accepts_ws_text_max_minus_one());
+	RUN(test_send_to_preserves_exact_ws_text_max());
+	RUN(test_pop_incoming_preserves_exact_ws_text_max());
 	RUN(test_next_conn_id_and_unregister());
 	RUN(test_send_to_rejects_bad_session());
 	RUN(test_dequeue_outgoing_and_pending());
