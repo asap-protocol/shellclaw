@@ -157,12 +157,29 @@ static int test_gateway_schema_migration_v01(void)
 static int test_existing_db_preserved_on_open_failure(void)
 {
 	const char *path = "/tmp/shellclaw_test_open_fail.db";
+	sqlite3 *probe = NULL;
+	int open_rc;
 	remove(path);
 	ASSERT(memory_init(path) == 0);
 	ASSERT(memory_save("preserve", "important data", NULL) == 0);
 	memory_cleanup();
 	ASSERT(chmod(path, 0000) == 0);
-	ASSERT(memory_init(path) == -1);
+	open_rc = sqlite3_open(path, &probe);
+	if (probe)
+		sqlite3_close(probe);
+	if (open_rc == SQLITE_OK) {
+		/* Root / DAC override: mode 000 still opens. Do not delete. */
+		(void)chmod(path, 0600);
+		remove(path);
+		return 0;
+	}
+	if (memory_init(path) != -1) {
+		fprintf(stderr, "FAIL: %s:%d memory_init(path) == -1\n", __FILE__, __LINE__);
+		(void)chmod(path, 0600);
+		memory_cleanup();
+		remove(path);
+		return 1;
+	}
 	ASSERT(chmod(path, 0600) == 0);
 	ASSERT(memory_init(path) == 0);
 	char buf[256];
