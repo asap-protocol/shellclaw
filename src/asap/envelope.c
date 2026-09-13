@@ -328,7 +328,7 @@ int asap_envelope_parse_jsonrpc_response(const char *json, asap_envelope_t *out,
 				if (errmsg && errlen && cJSON_IsString(m) && m->valuestring) (void)snprintf(errmsg, errlen, "%s", m->valuestring);
 				cJSON_Delete(tmp_err);
 			} else if (errmsg && errlen) (void)snprintf(errmsg, errlen, "Invalid result envelope");
-			cJSON_Delete(rpc_id);
+			/* parse_fail already freed rpc_id; inbound parse does not delete again (Refs: #84). */
 			cJSON_Delete(root);
 			return -1;
 		}
