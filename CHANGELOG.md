@@ -17,6 +17,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - `POST /asap` rejects serialized JSON-RPC larger than the 64 KiB gateway HTTP buffer (HTTP 500 / JSON-RPC `-32603`) instead of truncating the body.
 
 ### Added
+- Discord helper tests reject null MESSAGE_CREATE payloads, bot authors, empty author ids, and guild messages without bot identity so allowlist/mention gating cannot silently widen.
 - Phase 5 documentation suite (`docs/SECURITY.md`, `docs/ASAP.md`, and related guides).
 - `CONTRIBUTING.md` with PR workflow and pre-tag `gpio-mockup` ritual.
 - Jetson-aware `[hardware]` defaults in `config.example.toml` and `.env.example`.
