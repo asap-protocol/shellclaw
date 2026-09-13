@@ -12,6 +12,9 @@
 extern "C" {
 #endif
 
+/** Max WebSocket text payload (matches RESPONSE_BUF_SIZE in dispatch.c). */
+#define WS_TEXT_MAX (32 * 1024)
+
 /** Opaque WebSocket connection handle (lws wsi cast to void*). */
 typedef void *ws_conn_t;
 

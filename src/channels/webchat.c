@@ -25,7 +25,7 @@ static int webchat_poll(channel_incoming_msg_t *out, int timeout_ms)
 	if (!out) return -1;
 	memset(out, 0, sizeof(*out));
 	char session_id[128];
-	char text[8192];
+	char text[WS_TEXT_MAX];
 	int r = ws_pop_incoming(session_id, sizeof(session_id), text, sizeof(text), timeout_ms);
 	if (r != 1) return r;
 	out->session_id = strdup(session_id);

@@ -1,6 +1,6 @@
 /**
  * @file test_ws.c
- * @brief WebSocket connection table and MSG_MAX enforcement (no libwebsockets).
+ * @brief WebSocket connection table and WS_TEXT_MAX enforcement (no libwebsockets).
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -24,9 +24,6 @@
 			return _r;                                                             \
 	} while (0)
 
-/** Must match MSG_MAX in src/gateway/ws.c */
-#define WS_MSG_MAX 8192
-
 /**
  * Agent replies can be up to RESPONSE_BUF_SIZE (32 KiB) in dispatch.c.
  * A ~10 KiB payload is above the historical 8 KiB WS cap and must still
@@ -35,7 +32,7 @@
 static int test_send_to_accepts_dispatch_sized_payload(void)
 {
 	char *payload;
-	char buf[10000];
+	char buf[WS_TEXT_MAX];
 	size_t len_out;
 	const size_t payload_len = 9999;
 
@@ -73,10 +70,10 @@ static int test_push_incoming_msg_max(void)
 	int got;
 	ws_cleanup();
 	ASSERT(ws_register_conn(1, (ws_conn_t)(intptr_t)1) == 0);
-	big = malloc((size_t)WS_MSG_MAX + 2);
+	big = malloc((size_t)WS_TEXT_MAX + 2);
 	ASSERT(big != NULL);
-	memset(big, 'a', (size_t)WS_MSG_MAX + 1);
-	big[WS_MSG_MAX + 1] = '\0';
+	memset(big, 'a', (size_t)WS_TEXT_MAX + 1);
+	big[WS_TEXT_MAX + 1] = '\0';
 	ws_push_incoming(1, big);
 	got = ws_pop_incoming(session, sizeof(session), text, sizeof(text), 50);
 	ASSERT(got == 0);
@@ -94,10 +91,10 @@ static int test_send_to_rejects_oversized(void)
 	char *big;
 	ws_cleanup();
 	ASSERT(ws_register_conn(2, (ws_conn_t)(intptr_t)2) == 0);
-	big = malloc((size_t)WS_MSG_MAX + 2);
+	big = malloc((size_t)WS_TEXT_MAX + 2);
 	ASSERT(big != NULL);
-	memset(big, 'b', (size_t)WS_MSG_MAX + 1);
-	big[WS_MSG_MAX + 1] = '\0';
+	memset(big, 'b', (size_t)WS_TEXT_MAX + 1);
+	big[WS_TEXT_MAX + 1] = '\0';
 	ASSERT(ws_send_to("webchat:2", big) != 0);
 	ASSERT(ws_send_to("webchat:2", "hi") == 0);
 	free(big);

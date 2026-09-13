@@ -437,10 +437,10 @@ int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 	case LWS_CALLBACK_SERVER_WRITEABLE: {
 		int conn_id = (int)(intptr_t)lws_wsi_user(wsi);
 		if (conn_id <= 0) break;
-		char buf[8192];
+		char buf[WS_TEXT_MAX];
 		size_t len_out = 0;
 		if (ws_dequeue_outgoing(conn_id, buf, sizeof(buf), &len_out)) {
-			unsigned char frame[LWS_PRE + 8192];
+			unsigned char frame[LWS_PRE + WS_TEXT_MAX];
 			if (len_out < sizeof(frame) - LWS_PRE) {
 				memcpy(frame + LWS_PRE, buf, len_out);
 				if (lws_write(wsi, frame + LWS_PRE, len_out, LWS_WRITE_TEXT) < 0)
