@@ -14,6 +14,19 @@ extern "C" {
 
 /** Max WebSocket text payload (matches RESPONSE_BUF_SIZE in dispatch.c). */
 #define WS_TEXT_MAX (32 * 1024)
+/** C-string dest bytes for a WS_TEXT_MAX payload, including the NUL. */
+#define WS_TEXT_BUF_SIZE (WS_TEXT_MAX + 1)
+
+/**
+ * True when @p len_out bytes fit in a WS_TEXT_MAX on-wire text frame.
+ * Inclusive so a full 32 KiB payload is written after dequeue, not dropped.
+ *
+ * Example: `if (ws_text_payload_fits(len_out)) lws_write(...)`
+ */
+static inline int ws_text_payload_fits(size_t len_out)
+{
+	return len_out <= (size_t)WS_TEXT_MAX;
+}
 
 /** Opaque WebSocket connection handle (lws wsi cast to void*). */
 typedef void *ws_conn_t;

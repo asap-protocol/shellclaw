@@ -32,7 +32,7 @@
 static int test_send_to_accepts_dispatch_sized_payload(void)
 {
 	char *payload;
-	char buf[WS_TEXT_MAX];
+	char buf[WS_TEXT_BUF_SIZE];
 	size_t len_out;
 	const size_t payload_len = 9999;
 
@@ -84,16 +84,12 @@ static int assert_outgoing_roundtrip(int conn_id, size_t payload_len, size_t des
 /** Dispatch copy_response_to_buf leaves one byte for NUL (32767). */
 static int test_send_to_accepts_ws_text_max_minus_one(void)
 {
-	return assert_outgoing_roundtrip(9, (size_t)WS_TEXT_MAX - 1, (size_t)WS_TEXT_MAX);
+	return assert_outgoing_roundtrip(9, (size_t)WS_TEXT_MAX - 1, (size_t)WS_TEXT_BUF_SIZE);
 }
 
-/**
- * Production dest is currently WS_TEXT_MAX; dequeue then clamps
- * strlen == dest_size and the memcpy of len+1 is not a NUL.
- */
 static int test_send_to_preserves_exact_ws_text_max(void)
 {
-	return assert_outgoing_roundtrip(9, (size_t)WS_TEXT_MAX, (size_t)WS_TEXT_MAX);
+	return assert_outgoing_roundtrip(9, (size_t)WS_TEXT_MAX, (size_t)WS_TEXT_BUF_SIZE);
 }
 
 static int test_pop_incoming_preserves_exact_ws_text_max(void)
@@ -106,18 +102,27 @@ static int test_pop_incoming_preserves_exact_ws_text_max(void)
 	ws_cleanup();
 	ASSERT(ws_register_conn(10, (ws_conn_t)(intptr_t)10) == 0);
 	payload = malloc(payload_len + 1);
-	text = malloc((size_t)WS_TEXT_MAX);
+	text = malloc((size_t)WS_TEXT_BUF_SIZE);
 	ASSERT(payload != NULL);
 	ASSERT(text != NULL);
 	memset(payload, 'e', payload_len);
 	payload[payload_len] = '\0';
 	ws_push_incoming(10, payload);
-	ASSERT(ws_pop_incoming(session, sizeof(session), text, (size_t)WS_TEXT_MAX, 500) == 1);
+	ASSERT(ws_pop_incoming(session, sizeof(session), text, (size_t)WS_TEXT_BUF_SIZE, 500) == 1);
 	ASSERT(strlen(text) == payload_len);
 	ASSERT(memcmp(text, payload, payload_len) == 0);
+	ASSERT(text[payload_len] == '\0');
 	free(payload);
 	free(text);
 	ws_cleanup();
+	return 0;
+}
+
+static int test_ws_text_payload_fits(void)
+{
+	ASSERT(ws_text_payload_fits(0) == 1);
+	ASSERT(ws_text_payload_fits((size_t)WS_TEXT_MAX) == 1);
+	ASSERT(ws_text_payload_fits((size_t)WS_TEXT_MAX + 1) == 0);
 	return 0;
 }
 
@@ -284,6 +289,7 @@ int main(void)
 	RUN(test_send_to_accepts_ws_text_max_minus_one());
 	RUN(test_send_to_preserves_exact_ws_text_max());
 	RUN(test_pop_incoming_preserves_exact_ws_text_max());
+	RUN(test_ws_text_payload_fits());
 	RUN(test_next_conn_id_and_unregister());
 	RUN(test_send_to_rejects_bad_session());
 	RUN(test_dequeue_outgoing_and_pending());
