@@ -5,6 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- HTTP 200 JSON-RPC results with a malformed ASAP envelope no longer double-free the duplicated request id.
 - Inbound ASAP `mcp.tool_call` and `state.query` now hold `agent_lock()` around tool execute and SQLite `g_db` reads, matching `task.request`.
 - Inbound `POST /asap` now wires the process provider and tool table into `asap_ctx`, so `task.request` and `mcp.tool_call` dispatch instead of failing with `server missing cfg or provider`.
 - `POST /asap` rejects serialized JSON-RPC larger than the 64 KiB gateway HTTP buffer (HTTP 500 / JSON-RPC `-32603`) instead of truncating the body.
