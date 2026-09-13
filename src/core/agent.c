@@ -222,11 +222,11 @@ static size_t append_memories_to_system(char *system_buf, size_t buf_size, const
 	 * never fired. When the prompt filled SYSTEM_PROMPT_MAX, recall_len was
 	 * clamped to 0 and memcpy still wrote the prefix (and a NUL) past the heap
 	 * buffer (Refs: #75). Skip unless prefix + at least one recall byte + NUL fit. */
-	if (len >= buf_size)
-		return len;
 	prefix_len = strlen(prefix);
-	if (len + prefix_len + 2U > buf_size)
+	if (len >= buf_size || buf_size - len < prefix_len + 2U) {
+		fprintf(stderr, "agent: skip memory injection len=%zu cap=%zu\n", len, buf_size);
 		return len;
+	}
 	recall_len = strlen(recall_buf);
 	remain = buf_size - len - prefix_len - 1U;
 	if (recall_len > remain)

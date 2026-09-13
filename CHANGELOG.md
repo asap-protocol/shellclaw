@@ -5,7 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
-- Memory injection is skipped when the system prompt already fills its 64 KiB buffer, instead of clamping a truncated `Relevant memories` prefix past the allocation.
+- Memory injection is skipped when the system prompt already fills its 64 KiB buffer, instead of writing the full `Relevant memories` prefix past the allocation after clamping recall to 0.
 - Session JSON that would exceed the 128 KiB cap is refused instead of truncated, so the next parse cannot wipe history. An oversized stored blob is left in place (distinct `SESSION_LOAD_TOO_LARGE`) rather than replaced by a later small turn.
 - Multi-round ReAct copies tool results into the in-flight message list so a later round cannot overwrite earlier outputs.
 - `memory_init` no longer deletes an existing SQLite DB when `sqlite3_open` fails (permissions or transient I/O).
