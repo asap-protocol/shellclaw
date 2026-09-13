@@ -90,6 +90,8 @@ static int test_route_message_create_fixture(void)
 	ASSERT(dm && g0 && g1);
 	ASSERT(discord_helpers_route_message_create(dm, allowed, 1, "bot-9", sess, sizeof(sess)) == 1);
 	ASSERT(strcmp(sess, "discord:c:chan-1") == 0);
+	ASSERT(discord_helpers_route_message_create(dm, allowed, 1, NULL, sess, sizeof(sess)) == 1);
+	ASSERT(discord_helpers_route_message_create(dm, allowed, 1, "", sess, sizeof(sess)) == 1);
 	ASSERT(discord_helpers_route_message_create(g0, allowed, 1, "bot-9", sess, sizeof(sess)) == 0);
 	ASSERT(discord_helpers_route_message_create(g1, allowed, 1, "bot-9", sess, sizeof(sess)) == 1);
 	ASSERT(strcmp(sess, "discord:c:chan-2") == 0);
@@ -121,11 +123,17 @@ static int test_route_message_create_rejects_edge_cases(void)
 	empty_id = cJSON_Parse(empty_author_id);
 	guild = cJSON_Parse(guild_empty_bot);
 	ASSERT(bot && empty_id && guild);
+	memset(sess, 'x', sizeof(sess));
+	sess[sizeof(sess) - 1] = '\0';
 	ASSERT(discord_helpers_route_message_create(NULL, allowed, 1, "bot-9", sess, sizeof(sess)) == -1);
 	ASSERT(discord_helpers_route_message_create(bot, allowed, 1, "bot-9", sess, sizeof(sess)) == 0);
+	ASSERT(sess[0] == '\0');
 	ASSERT(discord_helpers_route_message_create(empty_id, allowed, 1, "bot-9", sess, sizeof(sess)) == 0);
+	ASSERT(sess[0] == '\0');
 	ASSERT(discord_helpers_route_message_create(guild, allowed, 1, "", sess, sizeof(sess)) == 0);
+	ASSERT(sess[0] == '\0');
 	ASSERT(discord_helpers_route_message_create(guild, allowed, 1, NULL, sess, sizeof(sess)) == 0);
+	ASSERT(sess[0] == '\0');
 	cJSON_Delete(bot);
 	cJSON_Delete(empty_id);
 	cJSON_Delete(guild);
