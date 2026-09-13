@@ -181,7 +181,7 @@ After provider/tool wiring in `handle_asap` (#53), a sender that passes that che
 - `task.request` — `agent_run()` with the same tool table as chat (`shell`, `file`, hardware, `asap_invoke`, …)
 - `mcp.tool_call` — `execute()` with attacker-chosen name and arguments (no LLM)
 
-Default gateway bind is `127.0.0.1`, which contains this for stock installs. Production MUST set `trusted_senders` before exposing the gateway (`allow_bind_all`, tunnel, marketplace URL). Restricting the inbound MCP tool table (or failing closed when the allowlist is empty and the host is not loopback) is a follow-up.
+Default gateway bind is `127.0.0.1` (`http_start` sets libwebsockets `info.iface` from `gateway.host`), which contains this for stock installs. Production MUST set `trusted_senders` before exposing the gateway (`allow_bind_all`, tunnel, marketplace URL). Restricting the inbound MCP tool table (or failing closed when the allowlist is empty and the host is not loopback) is a follow-up.
 
 ---
 
