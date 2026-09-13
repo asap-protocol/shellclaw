@@ -124,7 +124,7 @@ static int test_session_load_rejects_oversized(void)
 	big[sizeof(big) - 2] = ']';
 	big[sizeof(big) - 1] = '\0';
 	ASSERT(session_save("cli:big", big) == 0);
-	ASSERT(session_load("cli:big", small, sizeof(small)) == -1);
+	ASSERT(session_load("cli:big", small, sizeof(small)) == SESSION_LOAD_TOO_LARGE);
 	ASSERT(small[0] == '\0');
 	memory_cleanup();
 	remove(path);

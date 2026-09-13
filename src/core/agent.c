@@ -60,6 +60,26 @@ int agent_mutex_is_locked_for_test(void)
 #define SUMMARY_SOURCE_MAX     (64 * 1024)
 #define SUMMARY_RESULT_MAX     4096
 
+/** Copy cJSON_PrintUnformatted output or refuse mid-JSON truncation (Refs: #70). */
+static int copy_printed_session_json(char *dst, size_t dst_size, char *printed,
+	const char *session_id)
+{
+	size_t len;
+	if (!printed)
+		return -1;
+	len = strlen(printed);
+	if (len >= dst_size) {
+		fprintf(stderr,
+			"agent: refuse session JSON truncation session_id=%s len=%zu cap=%zu\n",
+			session_id ? session_id : "", len, dst_size);
+		cJSON_free(printed);
+		return -1;
+	}
+	memcpy(dst, printed, len + 1);
+	cJSON_free(printed);
+	return 0;
+}
+
 static const char SUMMARIZE_SYSTEM[] = "Summarize the following conversation in one short paragraph. Output only the summary, no preamble.";
 
 /** Summarize oldest messages when over max_ctx; replace with one summary + trailing. */
@@ -128,16 +148,8 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	cJSON_Delete(root);
 	char *printed = cJSON_PrintUnformatted(new_arr);
 	cJSON_Delete(new_arr);
-	if (!printed) return -1;
-	size_t plen = strlen(printed);
-	/* Refuse mid-JSON truncation: a clipped payload corrupts the session and
-	 * the next agent_run parse treats history as empty (permanent wipe). */
-	if (plen >= session_buf_size) {
-		cJSON_free(printed);
+	if (copy_printed_session_json(session_buf, session_buf_size, printed, session_id) != 0)
 		return -1;
-	}
-	memcpy(session_buf, printed, plen + 1);
-	cJSON_free(printed);
 	session_save(session_id, session_buf);
 	return 0;
 }
@@ -284,7 +296,7 @@ static void free_tool_calls_copy(const provider_tool_call_t *copy, size_t n)
 
 /** Append user+assistant exchange to session JSON. Invalid or empty existing becomes []. */
 static int append_exchange_to_session_json(const char *existing_json, const char *user_message,
-	const char *assistant_content, char *out_buf, size_t out_size)
+	const char *assistant_content, char *out_buf, size_t out_size, const char *session_id)
 {
 	cJSON *arr = NULL;
 	if (existing_json && existing_json[0] == '[') {
@@ -310,17 +322,7 @@ static int append_exchange_to_session_json(const char *existing_json, const char
 	}
 	char *printed = cJSON_PrintUnformatted(arr);
 	cJSON_Delete(arr);
-	if (!printed) return -1;
-	size_t len = strlen(printed);
-	/* Do not truncate: partial JSON saved via session_save is unparseable and
-	 * wipes conversation history on the next agent_run (see agent_prepare_context). */
-	if (len >= out_size) {
-		cJSON_free(printed);
-		return -1;
-	}
-	memcpy(out_buf, printed, len + 1);
-	cJSON_free(printed);
-	return 0;
+	return copy_printed_session_json(out_buf, out_size, printed, session_id);
 }
 
 static provider_tool_call_t *copy_tool_calls(const provider_tool_call_t *src, size_t n)
@@ -365,6 +367,7 @@ typedef struct agent_run_ctx {
 	int max_iter;
 	int max_ctx;
 	int ret;
+	int skip_session_persist;
 } agent_run_ctx_t;
 
 static void agent_oom_msg(agent_run_ctx_t *ctx)
@@ -428,7 +431,10 @@ static int agent_prepare_context(agent_run_ctx_t *ctx)
 	if (ctx->max_ctx <= 0 || ctx->max_ctx > MAX_HISTORY_MESSAGES)
 		ctx->max_ctx = MAX_HISTORY_MESSAGES;
 	ctx->session_buf[0] = '\0';
-	session_load(ctx->session_id, ctx->session_buf, SESSION_JSON_MAX);
+	{
+		int load_rc = session_load(ctx->session_id, ctx->session_buf, SESSION_JSON_MAX);
+		ctx->skip_session_persist = (load_rc == SESSION_LOAD_TOO_LARGE);
+	}
 	parsed = cJSON_Parse(ctx->session_buf);
 	msg_count = (parsed && cJSON_IsArray(parsed)) ? cJSON_GetArraySize(parsed) : 0;
 	if (parsed)
@@ -470,11 +476,18 @@ static int agent_build_messages(agent_run_ctx_t *ctx)
 
 static void agent_persist_session(agent_run_ctx_t *ctx, const char *assistant_content)
 {
-	char *updated = malloc(SESSION_JSON_MAX);
+	char *updated;
+	if (ctx->skip_session_persist) {
+		fprintf(stderr,
+			"agent: skip session persist session_id=%s (stored blob exceeds cap)\n",
+			ctx->session_id ? ctx->session_id : "");
+		return;
+	}
+	updated = malloc(SESSION_JSON_MAX);
 	if (!updated)
 		return;
 	if (append_exchange_to_session_json(ctx->session_buf, ctx->user_message, assistant_content,
-	                                    updated, SESSION_JSON_MAX) == 0)
+	                                    updated, SESSION_JSON_MAX, ctx->session_id) == 0)
 		session_save(ctx->session_id, updated);
 	free(updated);
 }

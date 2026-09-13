@@ -887,6 +887,85 @@ cleanup:
 	return failed;
 }
 
+/**
+ * A stored blob larger than SESSION_JSON_MAX must not be replaced by a later
+ * small turn: session_load refuse leaves an empty buffer, and persist must not
+ * treat that as a new empty session.
+ */
+static int test_oversized_stored_session_not_wiped_by_small_turn(void)
+{
+	int failed = 1;
+	config_t *cfg = NULL;
+	const char *db_path = "build/test_agent_oversize_load.db";
+	const char *config_path = "build/test_agent_oversize_load.toml";
+	const char *session_id = "cli:oversize-load";
+	const char *marker = "OVERSIZE_LOAD_MARKER_xyz";
+	enum { PAD = 128 * 1024, LOAD_CAP = 160 * 1024 };
+	char *pad = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	size_t need;
+	size_t off = 0;
+	char response_buf[256];
+	cJSON *parsed;
+
+	memory_cleanup();
+	if (memory_init(db_path) != 0) goto cleanup;
+	pad = malloc(PAD + 1);
+	if (!pad) goto cleanup;
+	memset(pad, 'Z', PAD);
+	pad[PAD] = '\0';
+	need = strlen(marker) + PAD + 128;
+	session_json = malloc(need);
+	if (!session_json) goto cleanup;
+	off = (size_t)snprintf(session_json, need,
+		"[{\"role\":\"user\",\"content\":\"%s%s\"}]", marker, pad);
+	if (off == 0 || off >= need) goto cleanup;
+	if (session_save(session_id, session_json) != 0) goto cleanup;
+	{
+		FILE *cf = fopen(config_path, "w");
+		if (!cf) goto cleanup;
+		fprintf(cf, "[agent]\nmodel = \"test\"\n[memory]\npath = \"%s\"\n", db_path);
+		fclose(cf);
+	}
+	{
+		char errbuf[256];
+		if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0) goto cleanup;
+	}
+	if (!cfg) goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, session_id, "tiny", &persist_reply_provider, NULL, 0,
+	              response_buf, sizeof(response_buf)) != 0) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: oversize-load agent_run failed\n");
+		goto cleanup;
+	}
+	loaded = malloc(LOAD_CAP);
+	if (!loaded) goto cleanup;
+	loaded[0] = '\0';
+	if (session_load(session_id, loaded, LOAD_CAP) != 0) goto cleanup;
+	parsed = cJSON_Parse(loaded);
+	if (!parsed || !cJSON_IsArray(parsed)) {
+		if (parsed) cJSON_Delete(parsed);
+		fprintf(stderr, "FAIL: tests/test_agent.c: oversize stored session wiped or corrupt\n");
+		goto cleanup;
+	}
+	cJSON_Delete(parsed);
+	if (strstr(loaded, marker) == NULL) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: oversize stored session missing marker\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(pad);
+	free(session_json);
+	free(loaded);
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
 int main(void)
 {
 	RUN(test_agent_run_with_stub_and_no_tools());
@@ -900,6 +979,7 @@ int main(void)
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());
 	RUN(test_session_overflow_does_not_corrupt_history());
+	RUN(test_oversized_stored_session_not_wiped_by_small_turn());
 	RUN(test_agent_provider_error_response());
 	RUN(test_agent_unknown_tool_continues());
 	printf("test_agent: all tests passed\n");

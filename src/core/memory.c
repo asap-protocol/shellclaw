@@ -249,7 +249,7 @@ int session_load(const char *session_id, char *messages_out, size_t max_len)
 			 * and agent_run would treat the session as empty history. */
 			if (n >= max_len) {
 				sqlite3_finalize(stmt);
-				return -1;
+				return SESSION_LOAD_TOO_LARGE;
 			}
 			memcpy(messages_out, msg, n + 1);
 			ret = 0;
