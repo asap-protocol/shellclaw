@@ -23,6 +23,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Jetson-aware `[hardware]` defaults in `config.example.toml` and `.env.example`.
 
 ### Changed
+- Discord `MESSAGE_CREATE` routing calls `discord_helpers_route_message_create` so helper allowlist/mention tests cover live gating; empty content, strdup, and queue stay in `discord.c`.
 - `main` is the active line. On-device Jetson sign-off is a known pending item, not a merge gate ([`docs/JETSON_SIGNOFF.md`](docs/JETSON_SIGNOFF.md)).
 - Gateway `/health` `version` matches `SHELLCLAW_RELEASE_VERSION`.
 
