@@ -13,6 +13,7 @@
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1049,29 +1050,103 @@ static int test_api_asap_log_401(void)
 	return 0;
 }
 
-static int test_shutdown_does_not_crash(pid_t pid, const char *token)
+#define SHUTDOWN_LOAD_THREADS 4
+#define SHUTDOWN_LOAD_START_SPINS 50
+
+/* Bearer GETs that stay in-flight across SIGTERM so auth_validate_token
+ * still runs while cleanup_subsystems joins the lws thread. */
+struct shutdown_load {
+	char url[256];
+	const char *token;
+	volatile sig_atomic_t stop;
+	volatile sig_atomic_t started;
+};
+
+static void *shutdown_load_thread(void *arg)
+{
+	struct shutdown_load *load = (struct shutdown_load *)arg;
+	while (!load->stop) {
+		long code = 0;
+		char *body = NULL;
+		load->started = 1;
+		(void)http_get_auth(load->url, load->token, &code, &body);
+		free(body);
+	}
+	return NULL;
+}
+
+static int shutdown_load_spawn(struct shutdown_load *load, pthread_t *thds, int n)
 {
 	int i;
-	int status = 0;
-
-	if (token && token[0]) {
-		for (i = 0; i < 16; i++) {
-			long code = 0;
-			char *body = NULL;
-			(void)http_get_auth(gw_url("/api/status"), token, &code, &body);
-			free(body);
-		}
+	int ncreated = 0;
+	for (i = 0; i < n; i++) {
+		if (pthread_create(&thds[ncreated], NULL, shutdown_load_thread, load) != 0)
+			continue;
+		ncreated++;
 	}
-	ASSERT(kill(pid, SIGTERM) == 0);
-	ASSERT(waitpid(pid, &status, 0) == pid);
-	if (WIFSIGNALED(status)) {
-		int sig = WTERMSIG(status);
-		if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS || sig == SIGILL) {
-			fprintf(stderr, "FAIL: gateway crashed on shutdown with signal %d\n", sig);
-			return 1;
-		}
+	return ncreated;
+}
+
+static void shutdown_load_wait_started(const struct shutdown_load *load)
+{
+	int i;
+	for (i = 0; i < SHUTDOWN_LOAD_START_SPINS; i++) {
+		struct timespec delay = { 0, 10000000L };
+		if (load->started)
+			return;
+		(void)nanosleep(&delay, NULL);
+	}
+}
+
+static void shutdown_load_join(struct shutdown_load *load, pthread_t *thds, int ncreated)
+{
+	int i;
+	load->stop = 1;
+	for (i = 0; i < ncreated; i++)
+		(void)pthread_join(thds[i], NULL);
+}
+
+static int shutdown_crash_status(int status)
+{
+	int sig;
+	if (!WIFSIGNALED(status))
+		return 0;
+	sig = WTERMSIG(status);
+	if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS || sig == SIGILL) {
+		fprintf(stderr, "FAIL: gateway crashed on shutdown with signal %d\n", sig);
+		return 1;
 	}
 	return 0;
+}
+
+static int test_shutdown_does_not_crash(pid_t pid, const char *token, int *reaped)
+{
+	struct shutdown_load load;
+	pthread_t thds[SHUTDOWN_LOAD_THREADS];
+	int ncreated = 0;
+	int status = 0;
+	if (reaped)
+		*reaped = 0;
+	memset(&load, 0, sizeof(load));
+	if (token && token[0]) {
+		(void)curl_global_init(CURL_GLOBAL_DEFAULT);
+		load.token = token;
+		snprintf(load.url, sizeof(load.url), "%s/api/status", g_base_url);
+		ncreated = shutdown_load_spawn(&load, thds, SHUTDOWN_LOAD_THREADS);
+		shutdown_load_wait_started(&load);
+	}
+	if (kill(pid, SIGTERM) != 0) {
+		shutdown_load_join(&load, thds, ncreated);
+		return 1;
+	}
+	if (waitpid(pid, &status, 0) != pid) {
+		shutdown_load_join(&load, thds, ncreated);
+		return 1;
+	}
+	if (reaped)
+		*reaped = 1;
+	shutdown_load_join(&load, thds, ncreated);
+	return shutdown_crash_status(status);
 }
 
 static int test_api_asap_log(const char *token)
@@ -1297,6 +1372,7 @@ int main(int argc, char **argv)
 	}
 	char token[128] = {0};
 	int failed = 0;
+	int shutdown_reaped = 0;
 	if (test_health() != 0) { fprintf(stderr, "test_health failed\n"); failed++; }
 	if (test_pair(pairing_code, token, sizeof(token)) != 0) {
 		fprintf(stderr, "test_pair failed\n");
@@ -1383,11 +1459,13 @@ int main(int argc, char **argv)
 			failed++;
 		}
 	}
-	if (test_shutdown_does_not_crash(pid, token) != 0) {
+	if (test_shutdown_does_not_crash(pid, token, &shutdown_reaped) != 0) {
 		fprintf(stderr, "test_shutdown_does_not_crash failed\n");
 		failed++;
-		kill(pid, SIGKILL);
-		waitpid(pid, NULL, 0);
+		if (!shutdown_reaped) {
+			kill(pid, SIGKILL);
+			waitpid(pid, NULL, 0);
+		}
 	}
 	unlink(config_path);
 	unlink(tokens_path);
