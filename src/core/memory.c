@@ -131,6 +131,11 @@ int memory_init(const char *path)
 	int recreated = 0;
 	if (sqlite3_open(path, &g_db) != SQLITE_OK) {
 		if (g_db) { sqlite3_close(g_db); g_db = NULL; }
+		/* Never delete an existing DB on open failure (permissions, transient I/O). */
+		if (file_existed) {
+			fprintf(stderr, "Error: cannot open existing memory DB at %s\n", path);
+			return -1;
+		}
 		remove(path);
 		if (sqlite3_open(path, &g_db) != SQLITE_OK) {
 			if (g_db) sqlite3_close(g_db);

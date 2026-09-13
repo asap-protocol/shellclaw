@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "sqlite3.h"
 
@@ -153,11 +154,31 @@ static int test_gateway_schema_migration_v01(void)
 	return 0;
 }
 
+static int test_existing_db_preserved_on_open_failure(void)
+{
+	const char *path = "/tmp/shellclaw_test_open_fail.db";
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	ASSERT(memory_save("preserve", "important data", NULL) == 0);
+	memory_cleanup();
+	ASSERT(chmod(path, 0000) == 0);
+	ASSERT(memory_init(path) == -1);
+	ASSERT(chmod(path, 0600) == 0);
+	ASSERT(memory_init(path) == 0);
+	char buf[256];
+	ASSERT(memory_recall("important", buf, sizeof(buf), 5) == 0);
+	ASSERT(strstr(buf, "important data") != NULL);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_schema_and_fts5());
 	RUN(test_save_overwrite());
 	RUN(test_corrupted_db_recreated());
+	RUN(test_existing_db_preserved_on_open_failure());
 	RUN(test_session_list());
 	RUN(test_session_crud());
 	RUN(test_gateway_schema_new_db());
