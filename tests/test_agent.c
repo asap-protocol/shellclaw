@@ -21,6 +21,7 @@
 #define SPY_CONTENT_SIZE 4096
 #define SPY_SLOTS 8
 static size_t spy_message_count;
+static size_t spy_first_content_len;
 static char spy_content[SPY_SLOTS][SPY_CONTENT_SIZE];
 static char *spy_roles[SPY_SLOTS];
 
@@ -43,12 +44,15 @@ static int spy_chat(const provider_message_t *messages, size_t message_count,
 	response->tool_calls_count = 0;
 	spy_roles_clear();
 	spy_message_count = message_count;
+	spy_first_content_len = (message_count > 0 && messages[0].content)
+		? strlen(messages[0].content) : 0;
 	for (size_t i = 0; i < message_count && i < SPY_SLOTS; i++) {
 		spy_roles[i] = messages[i].role ? strdup(messages[i].role) : NULL;
 		if (messages[i].content) {
 			size_t n = strlen(messages[i].content);
 			if (n >= SPY_CONTENT_SIZE) n = SPY_CONTENT_SIZE - 1;
-			memcpy(spy_content[i], messages[i].content, n + 1);
+			memcpy(spy_content[i], messages[i].content, n);
+			spy_content[i][n] = '\0';
 		} else
 			spy_content[i][0] = '\0';
 	}
@@ -966,6 +970,94 @@ cleanup:
 	return failed;
 }
 
+static int write_filled_soul_file(const char *path, size_t nbytes)
+{
+	char chunk[4096];
+	size_t remaining = nbytes;
+	FILE *sf = fopen(path, "w");
+	if (!sf)
+		return -1;
+	memset(chunk, 'A', sizeof(chunk));
+	while (remaining > 0) {
+		size_t n = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+		if (fwrite(chunk, 1, n, sf) != n) {
+			fclose(sf);
+			return -1;
+		}
+		remaining -= n;
+	}
+	fclose(sf);
+	return 0;
+}
+
+static int test_full_system_prompt_skips_memory_append_without_overflow(void)
+{
+	int failed = 1;
+	const char *db_path = "build/test_agent_mem_overflow.db";
+	const char *soul_path = "build/test_agent_mem_overflow_soul.md";
+	const char *config_path = "build/test_agent_mem_overflow.toml";
+	config_t *cfg = NULL;
+	char response_buf[4096];
+	char errbuf[256] = {0};
+	FILE *cf;
+
+	/* SYSTEM_PROMPT_MAX is 65536; a 65535-byte SOUL fills it so the 22-byte
+	 * "Relevant memories" prefix cannot fit. The old clamp still memcpy'd
+	 * the prefix past the heap allocation (Refs: #75). */
+	memory_cleanup();
+	if (memory_init(db_path) != 0)
+		goto cleanup;
+	if (memory_save("pref", "User likes coffee. New message context.", NULL) != 0)
+		goto cleanup;
+	{
+		char recall_check[512];
+		if (memory_recall("coffee", recall_check, sizeof(recall_check), 5) != 0)
+			goto cleanup;
+		if (recall_check[0] == '\0')
+			goto cleanup;
+	}
+	if (write_filled_soul_file(soul_path, 65535U) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf,
+	        "[agent]\nmodel = \"test\"\n[agent.identity]\nsoul = \"%s\"\n[memory]\ndb_path = \"%s\"\n",
+	        soul_path, db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	if (!cfg)
+		goto cleanup;
+	spy_roles_clear();
+	spy_first_content_len = 0;
+	if (agent_run(cfg, "cli:memoverflow", "coffee", &spy_provider, NULL, 0,
+	              response_buf, sizeof(response_buf)) != 0) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: full-prompt memory skip agent_run failed\n");
+		goto cleanup;
+	}
+	if (spy_message_count < 1)
+		goto cleanup;
+	if (!spy_roles[0] || strcmp(spy_roles[0], "system") != 0)
+		goto cleanup;
+	if (spy_first_content_len != 65535U) {
+		fprintf(stderr,
+		        "FAIL: tests/test_agent.c: system prompt len %zu (expected 65535, memories not skipped)\n",
+		        spy_first_content_len);
+		goto cleanup;
+	}
+	if (spy_content[0][0] != 'A')
+		goto cleanup;
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	remove(config_path);
+	remove(soul_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
 int main(void)
 {
 	RUN(test_agent_run_with_stub_and_no_tools());
@@ -980,6 +1072,7 @@ int main(void)
 	RUN(test_local_offline_note_skipped_for_non_local());
 	RUN(test_session_overflow_does_not_corrupt_history());
 	RUN(test_oversized_stored_session_not_wiped_by_small_turn());
+	RUN(test_full_system_prompt_skips_memory_append_without_overflow());
 	RUN(test_agent_provider_error_response());
 	RUN(test_agent_unknown_tool_continues());
 	printf("test_agent: all tests passed\n");
