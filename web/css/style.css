@@ -151,3 +151,107 @@ button.danger { background: #f85149; border-color: #f85149; }
 }
 .asap-log-table td { padding: 0.3rem 0.5rem; border-bottom: 1px solid #21262d; }
 .asap-log-table .mono { font-family: monospace; color: var(--dim); font-size: 0.78rem; }
+
+/** Hardware page: tabs, GPIO SVG grid, GPU gauges, v1.2 placeholders */
+.hw-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0 0 1rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+.hw-tab {
+  font-family: inherit;
+  font-size: 0.82rem;
+  background: #161b22;
+  color: var(--dim);
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.65rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.hw-tab:hover { color: var(--fg); border-color: var(--dim); }
+.hw-tab.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.hw-panel { display: none; }
+.hw-panel.active { display: block; }
+.hw-pin-grid-wrap {
+  overflow-x: auto;
+  padding: 0.5rem 0;
+  max-width: 100%;
+}
+.hw-pin-grid {
+  display: block;
+  min-width: 120px;
+  height: auto;
+}
+.hw-pin-rect {
+  fill: #21262d;
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.hw-pin-num { fill: var(--dim); font-size: 7px; font-family: inherit; }
+.hw-pin-lbl { fill: var(--fg); font-size: 6px; font-family: inherit; }
+.hw-pin-input .hw-pin-rect { fill: #1a2e1a; stroke: #3fb950; }
+.hw-pin-output .hw-pin-rect { fill: #2a2418; stroke: #d29922; }
+.hw-pin-sfio .hw-pin-rect { fill: #1c2333; stroke: #58a6ff; }
+.hw-pin-high .hw-pin-rect { stroke-width: 2; stroke: var(--accent); }
+.hw-pin-low .hw-pin-rect { opacity: 0.85; }
+.hw-pin-other .hw-pin-rect { fill: #21262d; }
+.hw-legend {
+  display: inline-block;
+  padding: 0.1rem 0.35rem;
+  margin-right: 0.25rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+}
+.hw-gauges {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.hw-gauge-label { font-size: 0.75rem; color: var(--dim); margin-bottom: 0.25rem; }
+.hw-gauge-track {
+  height: 10px;
+  background: #21262d;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.hw-gauge-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.hw-gauge-value { font-size: 0.8rem; margin-top: 0.25rem; color: var(--fg); }
+.hw-power-badge {
+  display: inline-block;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  background: #1c2333;
+  border: 1px solid #58a6ff;
+  color: #58a6ff;
+  border-radius: 4px;
+}
+.hw-deferred-card {
+  background: #161b22;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 1.25rem 1rem;
+  max-width: 520px;
+}
+.hw-deferred-card h2 { margin-top: 0; font-size: 1.1rem; }
+.hw-deferred-title {
+  color: #d29922;
+  font-weight: 600;
+  margin: 0.5rem 0;
+}
+.hw-roadmap-link { color: var(--accent); }
+.hw-roadmap-link:hover { text-decoration: underline; }

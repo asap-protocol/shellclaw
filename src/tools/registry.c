@@ -10,6 +10,7 @@
 #include "tools/cron.h"
 #include "tools/asap_invoke.h"
 #include "tools/context.h"
+#include "tools/hardware_tools.h"
 #include "hardware/hardware.h"
 #include "core/config.h"
 #include <stddef.h>
@@ -21,7 +22,8 @@ void tool_set_config(const config_t *cfg)
 	tool_web_search_set_config(cfg);
 	tool_asap_invoke_set_config(cfg);
 	tool_context_set_config(cfg);
-	hardware_stub_init(cfg);
+	hardware_init(cfg);
+	tool_hardware_set_config(cfg);
 }
 
 size_t tool_get_all(const tool_t **out, size_t max_count)
@@ -44,5 +46,6 @@ size_t tool_get_all(const tool_t **out, size_t max_count)
 		out[n++] = ctx;
 	if (n < max_count && asap_invoke)
 		out[n++] = asap_invoke;
+	n += tool_hardware_get_all(out + n, max_count - n);
 	return n;
 }

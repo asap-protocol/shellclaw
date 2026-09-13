@@ -69,6 +69,18 @@ int skill_list_names(const config_t *cfg, char **names_out, int max_count);
 int skill_get_content(const config_t *cfg, const char *name, char *out_buf, size_t out_size);
 
 /**
+ * Short description for ASAP manifest skills: config override, else first line of the .md file
+ * (leading "# " stripped), else NULL when none available.
+ *
+ * @param cfg       Configuration.
+ * @param name      Skill id (file base name without .md).
+ * @param out_buf   Buffer for description text.
+ * @param out_size  Size of out_buf.
+ * @return 0 when a description was written, -1 on error or missing description.
+ */
+int skill_get_description(const config_t *cfg, const char *name, char *out_buf, size_t out_size);
+
+/**
  * Create a new skill file.
  *
  * @param cfg             Configuration (uses config_skills_dir).

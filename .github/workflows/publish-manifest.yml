@@ -1,0 +1,165 @@
+# Publish SignedManifest to GitHub Pages on release tags (Phase 5 task 6.1).
+# Target URL: https://<owner>.github.io/<repo>/manifest.json
+name: Publish manifest
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    branches: [development, main]
+    paths:
+      - ".github/workflows/publish-manifest.yml"
+      - "scripts/dump_manifest.sh"
+      - "src/asap/**"
+      - "src/crypto/jcs.c"
+      - "src/crypto/crypto.c"
+      - "src/crypto/crypto.h"
+      - "src/crypto/jcs.h"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages-${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: false
+
+jobs:
+  validate-manifest:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SHELLCLAW_ASAP_PUBLIC_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libgpiod-dev
+
+      - name: Build shellclaw (gateway)
+        run: make clean && GATEWAY=1 make shellclaw
+        env:
+          CI: true
+
+      - name: Dump and validate SignedManifest
+        run: |
+          chmod +x scripts/dump_manifest.sh
+          ./scripts/dump_manifest.sh -o /tmp/manifest.json
+          test -s /tmp/manifest.json
+          python3 -c "import json; json.load(open('/tmp/manifest.json'))"
+          pip3 install --quiet 'asap-protocol==2.5.0'
+          # Validate the inner manifest against the upstream Pydantic model and the
+          # full SignedManifest against the upstream signature verifier. Both must
+          # hard-fail (non-zero exit) on rejection -- the `|| echo`/`if ...; then`
+          # patterns previously masked validation failures and left the job green.
+          python3 <<'PY'
+          import json
+          import sys
+          from asap.models.entities import Manifest
+          from asap.crypto.signing import verify_manifest
+          from asap.crypto.models import SignedManifest
+          with open("/tmp/manifest.json") as f:
+              data = json.load(f)
+          Manifest.model_validate(data["manifest"])
+          print("inner manifest: Pydantic OK")
+          sm = SignedManifest.model_validate(data)
+          ok = verify_manifest(sm)
+          print("upstream verify_manifest:", ok)
+          sys.exit(0 if ok else 1)
+          PY
+
+  publish-manifest:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      SHELLCLAW_ASAP_PUBLIC_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libgpiod-dev
+
+      - name: Build shellclaw (gateway)
+        run: make clean && GATEWAY=1 make shellclaw
+        env:
+          CI: true
+
+      - name: Restore publisher signing key
+        env:
+          MANIFEST_PRIV_B64: ${{ secrets.SHELLCLAW_MANIFEST_ED25519_PRIV }}
+          MANIFEST_PUB_B64: ${{ secrets.SHELLCLAW_MANIFEST_ED25519_PUB }}
+        run: |
+          if [ -z "${MANIFEST_PRIV_B64}" ] || [ -z "${MANIFEST_PUB_B64}" ]; then
+            echo "Tag publish requires secrets SHELLCLAW_MANIFEST_ED25519_PRIV and SHELLCLAW_MANIFEST_ED25519_PUB (base64 of ed25519.priv / ed25519.pub). Do not mint a fresh key per tag."
+            exit 1
+          fi
+          export SHELLCLAW_HOME="${RUNNER_TEMP}/shellclaw-home"
+          mkdir -p "${SHELLCLAW_HOME}/keys"
+          echo "${MANIFEST_PRIV_B64}" | base64 -d > "${SHELLCLAW_HOME}/keys/ed25519.priv"
+          echo "${MANIFEST_PUB_B64}" | base64 -d > "${SHELLCLAW_HOME}/keys/ed25519.pub"
+          chmod 0600 "${SHELLCLAW_HOME}/keys/ed25519.priv" "${SHELLCLAW_HOME}/keys/ed25519.pub"
+          echo "SHELLCLAW_HOME=${SHELLCLAW_HOME}" >> "${GITHUB_ENV}"
+
+      - name: Dump live SignedManifest
+        run: |
+          chmod +x scripts/dump_manifest.sh
+          mkdir -p pages-dist
+          ./scripts/dump_manifest.sh -o pages-dist/manifest.json
+          test -s pages-dist/manifest.json
+          : > pages-dist/.nojekyll
+
+      - name: Validate manifest JSON (optional)
+        run: |
+          python3 -c "import json; json.load(open('pages-dist/manifest.json'))"
+          pip3 install --quiet 'asap-protocol==2.5.0'
+          # Validate the inner manifest + upstream signature; hard-fail on rejection
+          # (the prior `|| echo` / `if ...; then` patterns masked failures).
+          python3 <<'PY'
+          import json
+          import sys
+          from asap.models.entities import Manifest
+          from asap.crypto.signing import verify_manifest
+          from asap.crypto.models import SignedManifest
+          with open("pages-dist/manifest.json") as f:
+              data = json.load(f)
+          Manifest.model_validate(data["manifest"])
+          print("inner manifest: Pydantic OK")
+          sm = SignedManifest.model_validate(data)
+          ok = verify_manifest(sm)
+          print("upstream verify_manifest:", ok)
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages-dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

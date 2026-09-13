@@ -78,11 +78,121 @@ static int test_send_to_rejects_oversized(void)
 	return 0;
 }
 
+static int test_next_conn_id_and_unregister(void)
+{
+	int a;
+	int b;
+
+	ws_cleanup();
+	a = ws_next_conn_id();
+	b = ws_next_conn_id();
+	ASSERT(b == a + 1);
+	ASSERT(ws_register_conn(6, (ws_conn_t)(intptr_t)6) == 0);
+	ws_unregister_conn(6);
+	ASSERT(ws_send_to("webchat:6", "hi") == 0);
+	ws_cleanup();
+	return 0;
+}
+
+static int test_send_to_rejects_bad_session(void)
+{
+	ws_cleanup();
+	ASSERT(ws_send_to("bad:1", "x") == -1);
+	ASSERT(ws_send_to("webchat:99", "x") == 0);
+	ws_cleanup();
+	return 0;
+}
+
+static int test_dequeue_outgoing_and_pending(void)
+{
+	char buf[64];
+	size_t len;
+	char session[32];
+	char text[64];
+
+	ws_cleanup();
+	ASSERT(ws_register_conn(3, (ws_conn_t)(intptr_t)3) == 0);
+	ASSERT(ws_send_to("webchat:3", "outmsg") == 0);
+	ASSERT(ws_has_pending_outgoing(3) == 1);
+	ASSERT(ws_dequeue_outgoing(3, buf, sizeof(buf), &len) == 1);
+	ASSERT(len == 6U);
+	ASSERT(strcmp(buf, "outmsg") == 0);
+	ASSERT(ws_has_pending_outgoing(3) == 0);
+	ASSERT(ws_dequeue_outgoing(3, buf, sizeof(buf), &len) == 0);
+	ws_push_incoming(3, "in");
+	ASSERT(ws_pop_incoming(session, sizeof(session), text, sizeof(text), 500) == 1);
+	ASSERT(strcmp(text, "in") == 0);
+	ws_cleanup();
+	return 0;
+}
+
+static int test_broadcast_enqueues_per_conn(void)
+{
+	char buf[64];
+	size_t len;
+
+	ws_cleanup();
+	ASSERT(ws_register_conn(4, (ws_conn_t)(intptr_t)4) == 0);
+	ASSERT(ws_register_conn(5, (ws_conn_t)(intptr_t)5) == 0);
+	ws_broadcast_text("broadcast");
+	ASSERT(ws_dequeue_outgoing(4, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "broadcast") == 0);
+	ASSERT(ws_dequeue_outgoing(5, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "broadcast") == 0);
+	ws_cleanup();
+	return 0;
+}
+
+static int test_push_incoming_rejects_empty(void)
+{
+	char session[32];
+	char text[64];
+
+	ws_cleanup();
+	ASSERT(ws_register_conn(7, (ws_conn_t)(intptr_t)7) == 0);
+	ws_push_incoming(7, "");
+	ws_push_incoming(7, NULL);
+	ASSERT(ws_pop_incoming(session, sizeof(session), text, sizeof(text), 50) == 0);
+	ws_cleanup();
+	return 0;
+}
+
+static int test_pop_incoming_invalid_args(void)
+{
+	char session[32];
+	char text[64];
+
+	ws_cleanup();
+	ASSERT(ws_pop_incoming(NULL, sizeof(session), text, sizeof(text), 0) == -1);
+	ASSERT(ws_pop_incoming(session, sizeof(session), NULL, sizeof(text), 0) == -1);
+	ws_cleanup();
+	return 0;
+}
+
+static int test_shutdown_stops_pop(void)
+{
+	char session[32];
+	char text[64];
+
+	ws_cleanup();
+	ws_shutdown_signal();
+	ASSERT(ws_pop_incoming(session, sizeof(session), text, sizeof(text), 50) == 0);
+	ws_cleanup();
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_register_conn_full_table());
 	RUN(test_push_incoming_msg_max());
 	RUN(test_send_to_rejects_oversized());
+	RUN(test_next_conn_id_and_unregister());
+	RUN(test_send_to_rejects_bad_session());
+	RUN(test_dequeue_outgoing_and_pending());
+	RUN(test_broadcast_enqueues_per_conn());
+	RUN(test_push_incoming_rejects_empty());
+	RUN(test_pop_incoming_invalid_args());
+	RUN(test_shutdown_stops_pop());
 	printf("test_ws: all tests passed\n");
 	return 0;
 }

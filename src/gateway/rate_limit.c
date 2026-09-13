@@ -1,20 +1,17 @@
 /**
  * @file rate_limit.c
- * @brief Per-IP sliding-window rate limiter for the ASAP endpoint.
- *
- * Fixed-size table with linear probing.  Each entry tracks the start of
- * the current 60-second window and the request count within it.
- * When a window expires the counter is reset automatically on the next hit.
+ * @brief Gateway rate limiter: per-IP /asap (fixed table, linear probing).
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/rate_limit.h"
+#include <stddef.h>
 #include <pthread.h>
 #include <string.h>
 #include <time.h>
 
 #define RATE_LIMIT_TABLE_SIZE 64
-#define IP_BUF_SIZE 48
+#define IP_BUF_SIZE 64
 
 typedef struct rate_entry {
 	char ip[IP_BUF_SIZE];
@@ -33,37 +30,57 @@ static unsigned int ip_hash(const char *ip)
 	return h;
 }
 
-static rate_entry_t *find_or_create(const char *ip)
+static void rate_entry_reset(rate_entry_t *e, const char *ip, time_t now)
+{
+	strncpy(e->ip, ip, IP_BUF_SIZE - 1);
+	e->ip[IP_BUF_SIZE - 1] = '\0';
+	e->window_start = now;
+	e->count = 0;
+}
+
+static rate_entry_t *find_expired_slot(time_t now)
+{
+	unsigned int i;
+	for (i = 0; i < RATE_LIMIT_TABLE_SIZE; i++) {
+		rate_entry_t *e = &s_table[i];
+		if (e->ip[0] == '\0')
+			continue;
+		if (now - e->window_start >= ASAP_RATE_WINDOW_SECS)
+			return e;
+	}
+	return NULL;
+}
+
+static rate_entry_t *find_or_create(const char *ip, time_t now)
 {
 	unsigned int idx = ip_hash(ip) % RATE_LIMIT_TABLE_SIZE;
 	unsigned int i;
 	int free_slot = -1;
+
 	for (i = 0; i < RATE_LIMIT_TABLE_SIZE; i++) {
 		unsigned int slot = (idx + i) % RATE_LIMIT_TABLE_SIZE;
 		rate_entry_t *e = &s_table[slot];
 		if (e->ip[0] == '\0') {
-			if (free_slot < 0) free_slot = (int)slot;
+			if (free_slot < 0)
+				free_slot = (int)slot;
 			continue;
 		}
-		if (strncmp(e->ip, ip, IP_BUF_SIZE - 1) == 0)
+		if (strcmp(e->ip, ip) == 0)
 			return e;
 	}
 	if (free_slot >= 0) {
 		rate_entry_t *e = &s_table[free_slot];
-		strncpy(e->ip, ip, IP_BUF_SIZE - 1);
-		e->ip[IP_BUF_SIZE - 1] = '\0';
-		e->window_start = 0;
-		e->count = 0;
+		rate_entry_reset(e, ip, now);
 		return e;
 	}
-	/* Table full: evict the slot at the hash position (LRU would be better
-	 * but adds complexity; this is a security best-effort guard). */
-	rate_entry_t *e = &s_table[idx];
-	strncpy(e->ip, ip, IP_BUF_SIZE - 1);
-	e->ip[IP_BUF_SIZE - 1] = '\0';
-	e->window_start = 0;
-	e->count = 0;
-	return e;
+	{
+		rate_entry_t *expired = find_expired_slot(now);
+		if (expired) {
+			rate_entry_reset(expired, ip, now);
+			return expired;
+		}
+	}
+	return NULL;
 }
 
 int rate_limit_asap(const char *ip, time_t now)
@@ -73,7 +90,11 @@ int rate_limit_asap(const char *ip, time_t now)
 	int limited;
 	safe_ip = (ip && ip[0] != '\0') ? ip : "unknown";
 	pthread_mutex_lock(&s_mu);
-	e = find_or_create(safe_ip);
+	e = find_or_create(safe_ip, now);
+	if (!e) {
+		pthread_mutex_unlock(&s_mu);
+		return 1;
+	}
 	if (now - e->window_start >= ASAP_RATE_WINDOW_SECS) {
 		e->window_start = now;
 		e->count = 0;

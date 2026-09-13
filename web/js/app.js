@@ -5,13 +5,7 @@
   const dash = typeof ShellClawDashboard !== 'undefined' ? ShellClawDashboard : {};
   const escapeHtml = dash.escapeHtml;
   const dashboardMarkup = dash.dashboardMarkup;
-
-  function pickStatusSlice(wsMsg) {
-    if (!wsMsg || typeof wsMsg !== 'object') return null;
-    const o = Object.assign({}, wsMsg);
-    delete o.type;
-    return o;
-  }
+  const mergeStatusWithWs = dash.mergeStatusWithWs || function (prev) { return prev; };
 
   function getToken() { return localStorage.getItem(TOKEN_KEY); }
   function setToken(t) { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); }
@@ -63,23 +57,6 @@
     } catch (_) {
       return null;
     }
-  }
-
-  /**
-   * UI colour key (dashboard):
-   * GREEN  — nominal path (reachable primary provider, Discord connected).
-   * YELLOW — partial degradation (Discord disabled, using fallback tier, standby).
-   * RED    — unhealthy slice (unreachable backends in the failover chain).
-   */
-  function mergeStatusWithWs(prev, wsMsg) {
-    const slice = pickStatusSlice(wsMsg);
-    if (!slice || !prev) return prev;
-    const out = Object.assign({}, prev);
-    if (slice.active_provider !== undefined) out.active_provider = slice.active_provider;
-    if (slice.providers !== undefined) out.providers = slice.providers;
-    if (slice.generated_at !== undefined) out.generated_at = slice.generated_at;
-    if (Object.prototype.hasOwnProperty.call(slice, 'last_error')) out.last_error = slice.last_error;
-    return out;
   }
 
   const routes = {

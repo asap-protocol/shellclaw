@@ -564,6 +564,98 @@ static int test_agent_geo_accessors(void)
 	return 0;
 }
 
+static int test_hardware_defaults(void)
+{
+	char path[128];
+	FILE *f;
+	ASSERT(test_runner_mkstemp_path("shellclaw_test_config", path, sizeof(path)) == 0);
+	f = fopen(path, "w");
+	ASSERT(f);
+	unsetenv("SHELLCLAW_BOARD");
+	unsetenv("SHELLCLAW_I2C_BUS");
+	unsetenv("SHELLCLAW_CAMERA_TYPE");
+	fprintf(f, "[agent]\nmodel = \"test\"\n");
+	fclose(f);
+	config_t *cfg = NULL;
+	int ret = config_load(path, &cfg, NULL, 0);
+	ASSERT(ret == 0);
+	ASSERT(config_hardware_enabled(cfg) == 1);
+	ASSERT(config_hardware_board(cfg) == NULL);
+	ASSERT(config_hardware_has_i2c_bus(cfg) == 0);
+	ASSERT(config_hardware_i2c_bus(cfg) == 0);
+	ASSERT(strcmp(config_hardware_camera_type(cfg), "auto") == 0);
+	ASSERT(strcmp(config_hardware_camera_resolution(cfg), "640x480") == 0);
+	ASSERT(config_hardware_camera_quality(cfg) == 75);
+	ASSERT(config_hardware_has_gpio_test_pin(cfg) == 0);
+	ASSERT(config_hardware_gpio_test_pin(cfg) == 0);
+	config_free(cfg);
+	remove(path);
+	return 0;
+}
+
+static int test_hardware_section(void)
+{
+	char path[128];
+	FILE *f;
+	ASSERT(test_runner_mkstemp_path("shellclaw_test_config", path, sizeof(path)) == 0);
+	f = fopen(path, "w");
+	ASSERT(f);
+	unsetenv("SHELLCLAW_BOARD");
+	unsetenv("SHELLCLAW_I2C_BUS");
+	unsetenv("SHELLCLAW_CAMERA_TYPE");
+	fprintf(f, "[agent]\nmodel = \"test\"\n");
+	fprintf(f, "[hardware]\nenabled = false\nboard = \"jetson\"\n");
+	fprintf(f, "i2c_bus = 7\ncamera_type = \"csi\"\n");
+	fprintf(f, "camera_resolution = \"1280x720\"\ncamera_quality = 90\ngpio_test_pin = 13\n");
+	fclose(f);
+	config_t *cfg = NULL;
+	char errbuf[256];
+	int ret = config_load(path, &cfg, errbuf, sizeof(errbuf));
+	ASSERT(ret == 0);
+	ASSERT(config_hardware_enabled(cfg) == 0);
+	ASSERT(config_hardware_board(cfg) != NULL);
+	ASSERT(strcmp(config_hardware_board(cfg), "jetson") == 0);
+	ASSERT(config_hardware_has_i2c_bus(cfg) == 1);
+	ASSERT(config_hardware_i2c_bus(cfg) == 7);
+	ASSERT(strcmp(config_hardware_camera_type(cfg), "csi") == 0);
+	ASSERT(strcmp(config_hardware_camera_resolution(cfg), "1280x720") == 0);
+	ASSERT(config_hardware_camera_quality(cfg) == 90);
+	ASSERT(config_hardware_has_gpio_test_pin(cfg) == 1);
+	ASSERT(config_hardware_gpio_test_pin(cfg) == 13);
+	config_free(cfg);
+	remove(path);
+	return 0;
+}
+
+static int test_hardware_env_override(void)
+{
+	char path[128];
+	FILE *f;
+	ASSERT(test_runner_mkstemp_path("shellclaw_test_config", path, sizeof(path)) == 0);
+	f = fopen(path, "w");
+	ASSERT(f);
+	fprintf(f, "[agent]\nmodel = \"test\"\n");
+	fprintf(f, "[hardware]\nboard = \"rpi\"\ni2c_bus = 1\ncamera_type = \"usb\"\n");
+	fclose(f);
+	setenv("SHELLCLAW_BOARD", "stub", 1);
+	setenv("SHELLCLAW_I2C_BUS", "7", 1);
+	setenv("SHELLCLAW_CAMERA_TYPE", "auto", 1);
+	config_t *cfg = NULL;
+	char errbuf[256];
+	int ret = config_load(path, &cfg, errbuf, sizeof(errbuf));
+	unsetenv("SHELLCLAW_BOARD");
+	unsetenv("SHELLCLAW_I2C_BUS");
+	unsetenv("SHELLCLAW_CAMERA_TYPE");
+	ASSERT(ret == 0);
+	ASSERT(strcmp(config_hardware_board(cfg), "stub") == 0);
+	ASSERT(config_hardware_has_i2c_bus(cfg) == 1);
+	ASSERT(config_hardware_i2c_bus(cfg) == 7);
+	ASSERT(strcmp(config_hardware_camera_type(cfg), "auto") == 0);
+	config_free(cfg);
+	remove(path);
+	return 0;
+}
+
 static int test_reload_sees_disk_change(void)
 {
 	char path[128];
@@ -646,6 +738,9 @@ int main(void)
 	RUN(test_telegram_section());
 	RUN(test_sandbox_section());
 	RUN(test_agent_geo_accessors());
+	RUN(test_hardware_defaults());
+	RUN(test_hardware_section());
+	RUN(test_hardware_env_override());
 	RUN(test_reload_sees_disk_change());
 	RUN(test_reload_stale_config_independent());
 	printf("test_config: all tests passed\n");

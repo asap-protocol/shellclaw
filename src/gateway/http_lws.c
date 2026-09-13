@@ -5,8 +5,10 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/http_lws.h"
+#include "gateway/asap_http_body.h"
 #include "gateway/routes.h"
 #include "gateway/auth.h"
+#include "gateway/uri_match.h"
 #include "gateway/static.h"
 #include "gateway/ws.h"
 #include "cJSON.h"
@@ -17,8 +19,8 @@
 
 static void http_lws_tx_completed(struct lws *wsi)
 {
-	int rc = lws_http_transaction_completed(wsi);
-	(void)rc;
+	if (lws_http_transaction_completed(wsi) != 0)
+		return;
 }
 
 typedef struct http_conn {
@@ -27,20 +29,13 @@ typedef struct http_conn {
 	size_t response_sent;
 	int headers_sent;
 	int status;
-	char body[BODY_BUF_SIZE];
-	size_t body_len;
 	int has_body;
 	int is_static;
 	const unsigned char *static_data;
 	size_t static_len;
 	const char *static_content_type;
 	size_t static_sent;
-	/* Dynamic body buffer used when the /asap path needs more than BODY_BUF_SIZE. */
-	char *body_dyn;
-	size_t body_dyn_len;
-	size_t body_dyn_cap;
-	int use_dyn_body;
-	int body_too_large;
+	asap_http_body_t body;
 	int body_dispatched;
 } http_conn_t;
 
@@ -69,35 +64,6 @@ static int http_parse_method(struct lws *wsi)
 		if (strcmp(meth_buf, "PATCH") == 0) return HTTP_PUT;
 	}
 	return HTTP_GET;
-}
-
-static void http_append_body(http_conn_t *conn, const void *in, size_t len)
-{
-	if (!conn || !in || len == 0)
-		return;
-	if (conn->use_dyn_body) {
-		size_t remain = conn->body_dyn_cap - conn->body_dyn_len;
-		if (len < remain)
-			remain = len;
-		memcpy(conn->body_dyn + conn->body_dyn_len, in, remain);
-		conn->body_dyn_len += remain;
-		conn->body_dyn[conn->body_dyn_len] = '\0';
-		return;
-	}
-	{
-		size_t remain = BODY_BUF_SIZE - conn->body_len - 1;
-		if (len > remain) {
-			conn->body_too_large = 1;
-			remain = 0;
-		} else if (len < remain) {
-			remain = len;
-		}
-		if (remain > 0) {
-			memcpy(conn->body + conn->body_len, in, remain);
-			conn->body_len += remain;
-			conn->body[conn->body_len] = '\0';
-		}
-	}
 }
 
 static int http_body_content_length(struct lws *wsi, long *cl_out)
@@ -135,41 +101,31 @@ static void http_dispatch_body(http_server_ctx_t *ctx, struct lws *wsi, http_con
 	conn->body_dispatched = 1;
 	uri_len = http_copy_request_uri(wsi, uri, sizeof(uri));
 	method = http_parse_method(wsi);
-	if (conn->body_too_large) {
+	if (conn->body.body_too_large) {
 		json_error(conn->response, RESP_BUF_SIZE, &conn->status, 413,
 		           "Request body too large");
-	} else if (conn->use_dyn_body) {
+	} else if (conn->body.use_dyn_body) {
 		dispatch_route(ctx, wsi, method, uri, uri_len,
-		               conn->body_dyn, conn->body_dyn_len,
+		               conn->body.body_dyn, conn->body.body_dyn_len,
 		               conn->response, RESP_BUF_SIZE, &conn->status);
 	} else {
 		dispatch_route(ctx, wsi, method, uri, uri_len,
-		               conn->body, conn->body_len,
+		               conn->body.body, conn->body.body_len,
 		               conn->response, RESP_BUF_SIZE, &conn->status);
 	}
 	conn->response_len = strlen(conn->response);
 	conn->has_body = 0;
 }
 
-static int path_match(const char *uri, int uri_len, const char *prefix)
-{
-	size_t plen = strlen(prefix);
-	return (uri_len >= (int)plen && strncmp(uri, prefix, plen) == 0);
-}
-
-static int path_eq(const char *uri, int uri_len, const char *path)
-{
-	size_t plen = strlen(path);
-	return (uri_len == (int)plen && strncmp(uri, path, plen) == 0);
-}
-
-static const char *get_bearer_token(struct lws *wsi, char *buf, size_t buf_size)
+const char *http_request_bearer_token(struct lws *wsi, char *buf, size_t buf_size)
 {
 	int n = lws_hdr_copy(wsi, buf, (int)buf_size, WSI_TOKEN_HTTP_AUTHORIZATION);
 	if (n <= 0)
 		n = lws_hdr_custom_copy(wsi, buf, (int)buf_size, "authorization", 13);
-	if (n <= 0) return NULL;
-	if (n < 8 || strncmp(buf, "Bearer ", 7) != 0) return NULL;
+	if (n <= 0)
+		return NULL;
+	if (n < 8 || strncmp(buf, "Bearer ", 7) != 0)
+		return NULL;
 	return buf + 7;
 }
 
@@ -180,7 +136,7 @@ static int ws_copy_upgrade_token(struct lws *wsi, char *token_out, size_t token_
 	const char *token;
 	if (!wsi || !token_out || token_size == 0) return -1;
 	token_out[0] = '\0';
-	token = get_bearer_token(wsi, auth_buf, sizeof(auth_buf));
+	token = http_request_bearer_token(wsi, auth_buf, sizeof(auth_buf));
 	if (!token) {
 		int n = lws_hdr_custom_copy(wsi, auth_buf, sizeof(auth_buf), "authorization", 13);
 		if (n > 7 && strncmp(auth_buf, "Bearer ", 7) == 0)
@@ -213,21 +169,20 @@ static int ws_copy_upgrade_token(struct lws *wsi, char *token_out, size_t token_
 static int is_static_path(const char *uri, int uri_len, int method)
 {
 	if (method != HTTP_GET) return 0;
-	if (path_eq(uri, uri_len, "/health")) return 0;
-	if (path_eq(uri, uri_len, "/pair")) return 0;
-	if (path_match(uri, uri_len, "/.well-known/")) return 0;
-	if (path_match(uri, uri_len, "/api/")) return 0;
+	if (uri_exact_eq(uri, uri_len, "/health")) return 0;
+	if (uri_exact_eq(uri, uri_len, "/pair")) return 0;
+	if (uri_has_prefix(uri, uri_len, "/.well-known/")) return 0;
+	if (uri_has_prefix(uri, uri_len, "/api/")) return 0;
 	return 1;
 }
 
-static int requires_auth(const char *uri, int uri_len, int method)
+static int requires_auth(const char *uri, int uri_len)
 {
-	(void)method;
-	if (path_eq(uri, uri_len, "/health")) return 0;
-	if (path_eq(uri, uri_len, "/pair")) return 0;
-	if (path_match(uri, uri_len, "/.well-known/")) return 0;
-	if (path_eq(uri, uri_len, "/")) return 0;
-	if (path_match(uri, uri_len, "/api/")) return 1;
+	if (uri_exact_eq(uri, uri_len, "/health")) return 0;
+	if (uri_exact_eq(uri, uri_len, "/pair")) return 0;
+	if (uri_has_prefix(uri, uri_len, "/.well-known/")) return 0;
+	if (uri_exact_eq(uri, uri_len, "/")) return 0;
+	if (uri_has_prefix(uri, uri_len, "/api/")) return 1;
 	return 0;
 }
 int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
@@ -246,9 +201,9 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 			return 0;
 		}
 		int method = http_parse_method(wsi);
-		if (requires_auth(uri, uri_len, method)) {
+		if (requires_auth(uri, uri_len)) {
 			char auth_buf[256];
-			const char *token = get_bearer_token(wsi, auth_buf, sizeof(auth_buf));
+			const char *token = http_request_bearer_token(wsi, auth_buf, sizeof(auth_buf));
 			if (!token || !auth_validate_token(ctx->auth, token)) {
 				lws_return_http_status(wsi, 401, "{\"error\":\"Unauthorized\"}");
 				http_lws_tx_completed(wsi);
@@ -273,32 +228,22 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		conn->has_body = (method == HTTP_POST || method == HTTP_PUT);
 		/* For /asap POST: enforce 1 MB body cap via Content-Length and allocate
 		 * a dynamic buffer so large envelopes are not silently truncated. */
-		if (conn->has_body && path_eq(uri, uri_len, "/asap")) {
-			char cl_buf[32] = {0};
-			long cl = 0;
-			if (lws_hdr_copy(wsi, cl_buf, sizeof cl_buf,
-			                  WSI_TOKEN_HTTP_CONTENT_LENGTH) > 0)
-				cl = atol(cl_buf);
-			if (cl > ASAP_BODY_MAX) {
+		if (conn->has_body && uri_exact_eq(uri, uri_len, "/asap")) {
+			int body_rc = asap_http_body_init_from_request(wsi, &conn->body);
+			if (body_rc == -1) {
 				free(conn->response);
 				free(conn);
 				lws_return_http_status(wsi, 413, "{\"error\":\"body too large\"}");
 				http_lws_tx_completed(wsi);
 				return 0;
 			}
-			size_t cap = (cl > 0) ? (size_t)cl : (size_t)ASAP_BODY_MAX;
-			conn->body_dyn = malloc(cap + 1);
-			if (!conn->body_dyn) {
+			if (body_rc == -2) {
 				free(conn->response);
 				free(conn);
 				lws_return_http_status(wsi, 500, "Internal error");
 				http_lws_tx_completed(wsi);
 				return 0;
 			}
-			conn->body_dyn[0] = '\0';
-			conn->body_dyn_len = 0;
-			conn->body_dyn_cap = cap;
-			conn->use_dyn_body = 1;
 		}
 		if (!conn->has_body && is_static_path(uri, uri_len, method)) {
 			const unsigned char *data = NULL;
@@ -329,16 +274,16 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		} else {
 			long cl = 0;
 			if (http_body_content_length(wsi, &cl) == 0 && cl > (long)BODY_BUF_SIZE)
-				conn->body_too_large = 1;
-			conn->body[0] = '\0';
-			conn->body_len = 0;
+				conn->body.body_too_large = 1;
+			conn->body.body[0] = '\0';
+			conn->body.body_len = 0;
 			lws_set_wsi_user(wsi, conn);
 			/* In LWS_CALLBACK_HTTP, `in` is the URI string, never the body
 			 * (the body arrives via LWS_CALLBACK_HTTP_BODY /
 			 * LWS_CALLBACK_HTTP_BODY_COMPLETION). For zero-length POSTs we
 			 * still dispatch from BODY_COMPLETION; if it never arrives the
 			 * connection closes via LWS_CALLBACK_CLOSED_HTTP. */
-			if (conn->body_too_large) {
+			if (conn->body.body_too_large) {
 				http_dispatch_body(ctx, wsi, conn);
 				lws_callback_on_writable(wsi);
 			}
@@ -351,14 +296,14 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		size_t received;
 		if (!conn || !conn->has_body || !in || len == 0)
 			return 0;
-		http_append_body(conn, in, len);
+		asap_http_body_append(&conn->body, in, len);
 		/* On some libwebsockets versions (e.g. 4.3) the
 		 * LWS_CALLBACK_HTTP_BODY_COMPLETION callback is not always
 		 * delivered for short request bodies. Dispatch eagerly as soon
 		 * as we have received Content-Length bytes. */
-		received = conn->use_dyn_body ? conn->body_dyn_len : conn->body_len;
+		received = conn->body.use_dyn_body ? conn->body.body_dyn_len : conn->body.body_len;
 		if (http_body_content_length(wsi, &cl) == 0 && cl > 0 &&
-		    (long)received >= cl) {
+		    (long)received >= cl && !conn->body.body_too_large) {
 			http_dispatch_body(ctx, wsi, conn);
 			lws_callback_on_writable(wsi);
 		}
@@ -440,8 +385,7 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		}
 		if (conn->response_sent >= conn->response_len) {
 			free(conn->response);
-			if (conn->body_dyn)
-				free(conn->body_dyn);
+			asap_http_body_free(&conn->body);
 			free(conn);
 			lws_set_wsi_user(wsi, NULL);
 			http_lws_tx_completed(wsi);
@@ -454,7 +398,7 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		http_conn_t *conn = lws_wsi_user(wsi);
 		if (conn) {
 			if (conn->response) free(conn->response);
-			if (conn->body_dyn) free(conn->body_dyn);
+			asap_http_body_free(&conn->body);
 			free(conn);
 			lws_set_wsi_user(wsi, NULL);
 		}

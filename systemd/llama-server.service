@@ -1,16 +1,21 @@
 # Optional llama.cpp HTTP server consumed by ShellClaw local provider (PRD §4.4.29)
 #
-# Edit ExecStart with your llama-server binary, model GGUF path, and listen port (--port must match
-# [providers.local] in config.toml, default shellclaw listens on localhost:8080).
+# Board-specific defaults: systemd/llama-server.jetson.env or llama-server.rpi.env.
+# Install copies one to /etc/shellclaw/llama-server.env (Task 3.5). Port must match
+# [providers.local] in config.toml (default http://127.0.0.1:8080).
 [Unit]
 Description=llama.cpp HTTP server for ShellClaw fallback
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/llama-server --model /PATH/TO/model.gguf --host 127.0.0.1 --port 8080 -ngl 0
+EnvironmentFile=/etc/shellclaw/llama-server.env
+ExecStart=/usr/local/bin/llama-server --model "${MODEL}" --host 127.0.0.1 --port "${PORT}" -t "${THREADS}" -ngl "${NGL}" -c "${CTX_SIZE}"
 Restart=on-failure
 RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
 
 [Install]
 WantedBy=shellclaw.service

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Embed Web UI assets: minify (optional), gzip, xxd -i -> src/gateway/ui_assets.h
-# Input: web/index.html, web/css/style.css, web/js/dashboardView.js + web/js/app.js (concatenated)
+# Input: web/index.html, web/hardware.html, web/css/style.css,
+#        web/js/dashboardView.js + web/js/app.js (concatenated),
+#        web/js/hardwareView.js (hardware page bundle)
 # Output: src/gateway/ui_assets.h with named arrays and lookup table
 # Verify: total gzipped < 50 KB
 
@@ -44,9 +46,11 @@ process_file() {
 
 mkdir -p "$(dirname "$OUT_HEADER")"
 process_file "$WEB_DIR/index.html" "index.html" "ui_index_html" > "$TMP_DIR/index_html.txt"
+process_file "$WEB_DIR/hardware.html" "hardware.html" "ui_hardware_html" > "$TMP_DIR/hardware_html.txt"
 process_file "$WEB_DIR/css/style.css" "style.css" "ui_style_css" > "$TMP_DIR/style_css.txt"
 cat "$WEB_DIR/js/dashboardView.js" "$WEB_DIR/js/app.js" > "$TMP_DIR/app_bundle.js"
 process_file "$TMP_DIR/app_bundle.js" "app.js" "ui_app_js" > "$TMP_DIR/app_js.txt"
+process_file "$WEB_DIR/js/hardwareView.js" "hardware.js" "ui_hardware_js" > "$TMP_DIR/hardware_js.txt"
 
 # Compute total size and verify < 50 KB
 TOTAL=0
@@ -73,6 +77,10 @@ fi
     echo ""
     cat "$TMP_DIR/app_js.txt"
     echo ""
+    cat "$TMP_DIR/hardware_html.txt"
+    echo ""
+    cat "$TMP_DIR/hardware_js.txt"
+    echo ""
     echo "struct ui_asset_entry {"
     echo "    const char *path;"
     echo "    const unsigned char *ptr;"
@@ -91,8 +99,11 @@ fi
     echo "    { \"/cron\", ui_index_html_gz, sizeof(ui_index_html_gz), \"text/html\" },"
     echo "    { \"/logs\", ui_index_html_gz, sizeof(ui_index_html_gz), \"text/html\" },"
     echo "    { \"/asap\", ui_index_html_gz, sizeof(ui_index_html_gz), \"text/html\" },"
+    echo "    { \"/hardware\", ui_hardware_html_gz, sizeof(ui_hardware_html_gz), \"text/html\" },"
+    echo "    { \"/hardware.html\", ui_hardware_html_gz, sizeof(ui_hardware_html_gz), \"text/html\" },"
     echo "    { \"/css/style.css\", ui_style_css_gz, sizeof(ui_style_css_gz), \"text/css\" },"
     echo "    { \"/js/app.js\", ui_app_js_gz, sizeof(ui_app_js_gz), \"application/javascript\" },"
+    echo "    { \"/js/hardware.js\", ui_hardware_js_gz, sizeof(ui_hardware_js_gz), \"application/javascript\" },"
     echo "    { NULL, NULL, 0, NULL }"
     echo "};"
     echo ""
