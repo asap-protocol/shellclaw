@@ -24,14 +24,13 @@ static void lws_callback_on_writable(struct lws *wsi) { (void)wsi; }
 
 #define MAX_CONNECTIONS 16
 #define MAX_QUEUE 64
-#define MSG_MAX 8192
 
 static size_t ws_text_len_ok(const char *text)
 {
 	size_t len;
 	if (!text) return 0;
 	len = strlen(text);
-	return len > 0 && len <= (size_t)MSG_MAX;
+	return len > 0 && len <= (size_t)WS_TEXT_MAX;
 }
 
 typedef struct ws_msg {

@@ -5,6 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- WebChat WebSocket sends now accept agent replies up to 32 KiB (`WS_TEXT_MAX`, matching `RESPONSE_BUF_SIZE`) instead of silently dropping payloads above 8 KiB. Dest buffers are `WS_TEXT_BUF_SIZE` so a max-length payload keeps its NUL; a too-large frame is logged instead of skipped with `<`.
 - Memory injection is skipped when the system prompt already fills its 64 KiB buffer, instead of writing the full `Relevant memories` prefix past the allocation after clamping recall to 0.
 - Session JSON that would exceed the 128 KiB cap is refused instead of truncated, so the next parse cannot wipe history. An oversized stored blob is left in place (distinct `SESSION_LOAD_TOO_LARGE`) rather than replaced by a later small turn.
 - Multi-round ReAct copies tool results into the in-flight message list so a later round cannot overwrite earlier outputs.
