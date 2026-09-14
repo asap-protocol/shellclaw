@@ -527,6 +527,192 @@ static int test_workspace_only_blocks_embedded_relative_dotdot(void)
 	return 0;
 }
 
+/**
+ * Interpreter hex/octal/unicode slash escapes decode to `/` before a path
+ * body. A later literal `/` (`etc/passwd`) is not a path start, so the
+ * host-FS gate must reconstruct the encoded leading slash. This is not
+ * Python `chr(47)+` concatenation (no slash encoding in the command text).
+ */
+static int test_workspace_only_blocks_encoded_leading_slash(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+
+	cfg.workspace_path = "/tmp";
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('\\x2fetc/passwd')\"", &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"node -e \"require('fs').readFileSync('\\x2fetc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('\\57etc/passwd')\"", &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"node -e \"require('fs').readFileSync('\\u002fetc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('notes.txt')\"", &cfg, reason, sizeof(reason)) == 0);
+	return 0;
+}
+
+/**
+ * `$PWD` / `$HOME` expansion must not trust process getenv when the command
+ * assigns, exports, or unsets those names. Process PWD/HOME are set to the
+ * workspace so a getenv-only check would incorrectly allow `$PWD/etc/passwd`.
+ */
+static int test_workspace_only_blocks_home_pwd_assignment(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_asgn_XXXXXX";
+	char *dir;
+	const char *old_pwd;
+	const char *old_home;
+	char pwd_copy[256];
+	char home_copy[256];
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_home_pwd_assignment: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_home_pwd_assignment: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	old_home = getenv("HOME");
+	home_copy[0] = '\0';
+	if (old_home) {
+		if (strlen(old_home) >= sizeof(home_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_home_pwd_assignment: HOME too long\n");
+			return 1;
+		}
+		memcpy(home_copy, old_home, strlen(old_home) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0 || setenv("HOME", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_home_pwd_assignment: setenv failed\n");
+		return 1;
+	}
+
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("PWD=; cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("HOME=; cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("export PWD=; cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("unset HOME; cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	if (home_copy[0])
+		(void)setenv("HOME", home_copy, 1);
+	else
+		(void)unsetenv("HOME");
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * Kernel open(2) walks a symlink before `..`. Lexical collapse must not
+ * treat `workspace/out/../etc/passwd` as `workspace/etc/passwd` when `out`
+ * is a directory symlink to `/`.
+ */
+static int test_workspace_only_blocks_symlink_dotdot(void)
+{
+#ifdef __linux__
+	char workspace[] = "/tmp/sc_al_sydd_XXXXXX";
+	char link_path[256];
+	char escape_path[512];
+	char cmd[640];
+	char *ws;
+	allowlist_config_t cfg;
+	char reason[256];
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_workspace_only_blocks_symlink_dotdot: mkdtemp failed\n");
+		return 1;
+	}
+	snprintf(link_path, sizeof(link_path), "%s/out", ws);
+	if (symlink("/", link_path) != 0) {
+		rmdir(ws);
+		fprintf(stderr, "test_workspace_only_blocks_symlink_dotdot: symlink failed\n");
+		return 1;
+	}
+	snprintf(escape_path, sizeof(escape_path), "%s/../etc/passwd", link_path);
+	ASSERT(allowlist_path_is_under_workspace(escape_path, ws) == 0);
+
+	cfg.workspace_path = ws;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	snprintf(cmd, sizeof(cmd), "cat %s/../etc/passwd", link_path);
+	ASSERT(allowlist_check_shell_command(cmd, &cfg, reason, sizeof(reason)) == 1);
+
+	unlink(link_path);
+	rmdir(ws);
+	return 0;
+#else
+	fprintf(stderr, "test_workspace_only_blocks_symlink_dotdot: skipped (Linux-specific)\n");
+	return 0;
+#endif
+}
+
+/**
+ * `file:` URLs percent-decode before the workspace check. Encoded `..`
+ * (`%2e%2e`) and `%2f` must not hide an escape. `https://` stays allowed.
+ */
+static int test_workspace_only_blocks_percent_encoded_file_url(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_pct_XXXXXX";
+	char *dir;
+	char cmd[768];
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_percent_encoded_file_url: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	snprintf(cmd, sizeof(cmd),
+	         "curl file://%s/%%2e%%2e/%%2e%%2e/%%2e%%2e/etc/passwd", dir);
+	ASSERT(allowlist_check_shell_command(cmd, &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl file://localhost/%2fetc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl https://example.com/api",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
@@ -561,6 +747,10 @@ int main(void)
 	RUN(test_dotdot_escape_missing_component_before_dotdot());
 	RUN(test_workspace_only_blocks_file_url_variants());
 	RUN(test_workspace_only_blocks_embedded_relative_dotdot());
+	RUN(test_workspace_only_blocks_encoded_leading_slash());
+	RUN(test_workspace_only_blocks_home_pwd_assignment());
+	RUN(test_workspace_only_blocks_symlink_dotdot());
+	RUN(test_workspace_only_blocks_percent_encoded_file_url());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }
