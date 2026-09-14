@@ -267,9 +267,6 @@ static int command_mutates_home_or_pwd(const char *text)
  */
 static size_t encoded_leading_slash_len(const char *p)
 {
-    int val;
-    size_t n;
-
     if (!p || p[0] != '\\' || p[1] == '\0')
         return 0;
     if ((p[1] == 'x' || p[1] == 'X') && p[2] == '2' &&
@@ -283,8 +280,9 @@ static size_t encoded_leading_slash_len(const char *p)
         (p[9] == 'f' || p[9] == 'F'))
         return 10;
     if (p[1] >= '0' && p[1] <= '7') {
-        val = 0;
-        n = 0;
+        int val = 0;
+        size_t n = 0;
+
         while (n < 3 && p[1 + n] >= '0' && p[1 + n] <= '7') {
             val = val * 8 + (p[1 + n] - '0');
             n++;
