@@ -23,6 +23,15 @@ extern "C" {
  */
 int sandbox_landlock_restrict_to_workspace(const char *workspace);
 
+/**
+ * Build and discard the workspace ruleset without restrict_self.
+ * Same skip/error contract as restrict. Used so tests can cover the
+ * builder without locking the process (gcov cannot write after restrict).
+ *
+ * Example: sandbox_landlock_prepare("/tmp/ws");
+ */
+int sandbox_landlock_prepare(const char *workspace);
+
 #ifdef __cplusplus
 }
 #endif

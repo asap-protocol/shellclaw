@@ -27,6 +27,12 @@ int sandbox_landlock_restrict_to_workspace(const char *workspace)
     (void)workspace;
     return 0;
 }
+
+int sandbox_landlock_prepare(const char *workspace)
+{
+    (void)workspace;
+    return 0;
+}
 #else
 
 #ifndef LANDLOCK_ACCESS_FS_IOCTL_DEV
@@ -142,7 +148,9 @@ static __u64 mask_workspace_access(__u64 handled)
     return access;
 }
 
-int sandbox_landlock_restrict_to_workspace(const char *workspace)
+#define LANDLOCK_FD_SKIP (-2)
+
+static int landlock_make_ruleset(const char *workspace)
 {
     static const char *const RO_PATHS[] = {
         "/bin", "/usr", "/usr/local", "/lib", "/lib64", "/lib32",
@@ -163,10 +171,9 @@ int sandbox_landlock_restrict_to_workspace(const char *workspace)
     struct landlock_ruleset_attr attr;
     int ruleset_fd;
     size_t i;
-    long rc;
 
     if (!workspace || !workspace[0])
-        return 0;
+        return LANDLOCK_FD_SKIP;
     if (landlock_handled_fs(&handled) != 0)
         return -1;
     workspace_access = mask_workspace_access(handled);
@@ -203,8 +210,32 @@ int sandbox_landlock_restrict_to_workspace(const char *workspace)
         (void)landlock_add_path(ruleset_fd, RO_PATHS[i], ro_dir, ro_file);
     for (i = 0; RW_DEV[i]; i++)
         (void)landlock_add_path(ruleset_fd, RW_DEV[i], ro_dir, rw_file);
-    rc = syscall(__NR_landlock_restrict_self, ruleset_fd, 0);
-    close(ruleset_fd);
+    return ruleset_fd;
+}
+
+int sandbox_landlock_prepare(const char *workspace)
+{
+    int fd;
+    fd = landlock_make_ruleset(workspace);
+    if (fd == LANDLOCK_FD_SKIP)
+        return 0;
+    if (fd < 0)
+        return -1;
+    close(fd);
+    return 0;
+}
+
+int sandbox_landlock_restrict_to_workspace(const char *workspace)
+{
+    int fd;
+    long rc;
+    fd = landlock_make_ruleset(workspace);
+    if (fd == LANDLOCK_FD_SKIP)
+        return 0;
+    if (fd < 0)
+        return -1;
+    rc = syscall(__NR_landlock_restrict_self, fd, 0);
+    close(fd);
     return (rc == 0) ? 0 : -1;
 }
 

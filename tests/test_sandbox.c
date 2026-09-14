@@ -4,9 +4,9 @@
  *
  * Linux-specific namespace, Landlock, and cgroup tests are guarded by
  * #ifdef __linux__. GitHub-hosted runners often cannot apply user namespaces
- * (sandbox_exec fail-closes; success-path tests skip). Landlock is also
- * exercised in-process (chdir + restrict_self + open), so gcov records
- * those hits. Do not weaken sandbox.c for CI.
+ * (sandbox_exec fail-closes; success-path tests skip). The Landlock
+ * builder is exercised in-process via prepare(); restrict_self runs in a
+ * child so gcov can still write. Do not weaken sandbox.c for CI.
  *
  * 5.7 Benchmark: run sandbox_exec("true") 200 times and report median.
  * The benchmark is informational only — it does not gate the test suite.
@@ -348,9 +348,21 @@ static int test_proc_is_namespaced(void)
 
 static int test_landlock_probe_without_restrict(void)
 {
+	char workspace[] = "/tmp/sc_ll_prep_XXXXXX";
+	char *ws;
 	ASSERT(sandbox_landlock_restrict_to_workspace(NULL) == 0);
 	ASSERT(sandbox_landlock_restrict_to_workspace("") == 0);
 	ASSERT(sandbox_landlock_restrict_to_workspace("/no/such/sc_ll_ws") == -1);
+	ASSERT(sandbox_landlock_prepare(NULL) == 0);
+	ASSERT(sandbox_landlock_prepare("") == 0);
+	ASSERT(sandbox_landlock_prepare("/no/such/sc_ll_ws") == -1);
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_landlock_probe_without_restrict: mkdtemp failed\n");
+		return 1;
+	}
+	ASSERT(sandbox_landlock_prepare(ws) == 0);
+	rmdir(ws);
 	return 0;
 }
 
@@ -358,43 +370,59 @@ static int test_landlock_restrict_denies_etc_passwd(void)
 {
 	char workspace[] = "/tmp/sc_ll_XXXXXX";
 	char *ws;
-	FILE *f;
-	int pfd;
-	int rc;
+	pid_t pid;
+	int st;
+	int status;
 	ws = mkdtemp(workspace);
 	if (!ws) {
 		fprintf(stderr, "test_landlock_restrict_denies_etc_passwd: mkdtemp failed\n");
 		return 1;
 	}
-	if (chdir(ws) != 0) {
-		fprintf(stderr, "test_landlock_restrict_denies_etc_passwd: chdir failed errno=%d\n",
-			errno);
+	pid = fork();
+	if (pid < 0) {
 		rmdir(ws);
 		return 1;
 	}
-	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
-		fprintf(stderr, "test_sandbox: skip test_landlock_restrict_denies_etc_passwd (nnp errno=%d)\n",
-			errno);
-		return 0;
+	if (pid == 0) {
+		FILE *f;
+		int pfd;
+		if (chdir(ws) != 0)
+			_exit(5);
+		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+			_exit(3);
+		if (sandbox_landlock_restrict_to_workspace(ws) != 0)
+			_exit(2);
+		f = fopen("ok", "w");
+		if (!f)
+			_exit(4);
+		fclose(f);
+		unlink("ok");
+		pfd = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
+		if (pfd >= 0) {
+			close(pfd);
+			_exit(1);
+		}
+		_exit(0);
 	}
-	rc = sandbox_landlock_restrict_to_workspace(ws);
-	if (rc != 0) {
-		fprintf(stderr, "test_sandbox: skip test_landlock_restrict_denies_etc_passwd (restrict rc=%d errno=%d)\n",
-			rc, errno);
-		return 0;
-	}
-	f = fopen("ok", "w");
-	if (!f) {
-		fprintf(stderr, "FAIL: tests/test_sandbox.c: landlock denied workspace write errno=%d\n",
-			errno);
+	if (waitpid(pid, &st, 0) < 0) {
+		rmdir(ws);
 		return 1;
 	}
-	fclose(f);
-	unlink("ok");
-	pfd = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
-	if (pfd >= 0) {
-		close(pfd);
-		fprintf(stderr, "FAIL: tests/test_sandbox.c: /etc/passwd still openable after Landlock\n");
+	rmdir(ws);
+	if (!WIFEXITED(st)) {
+		fprintf(stderr, "FAIL: tests/test_sandbox.c: landlock child did not exit (st=%d)\n",
+			st);
+		return 1;
+	}
+	status = WEXITSTATUS(st);
+	if (status == 2 || status == 3) {
+		fprintf(stderr, "test_sandbox: skip test_landlock_restrict_denies_etc_passwd (WEXITSTATUS=%d)\n",
+			status);
+		return 0;
+	}
+	if (status != 0) {
+		fprintf(stderr, "FAIL: tests/test_sandbox.c: test_landlock_restrict_denies_etc_passwd WEXITSTATUS=%d (0=denied 1=passwd_open 4=ws_write 5=chdir)\n",
+			status);
 		return 1;
 	}
 	return 0;
