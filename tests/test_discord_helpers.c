@@ -90,12 +90,53 @@ static int test_route_message_create_fixture(void)
 	ASSERT(dm && g0 && g1);
 	ASSERT(discord_helpers_route_message_create(dm, allowed, 1, "bot-9", sess, sizeof(sess)) == 1);
 	ASSERT(strcmp(sess, "discord:c:chan-1") == 0);
+	ASSERT(discord_helpers_route_message_create(dm, allowed, 1, NULL, sess, sizeof(sess)) == 1);
+	ASSERT(discord_helpers_route_message_create(dm, allowed, 1, "", sess, sizeof(sess)) == 1);
 	ASSERT(discord_helpers_route_message_create(g0, allowed, 1, "bot-9", sess, sizeof(sess)) == 0);
 	ASSERT(discord_helpers_route_message_create(g1, allowed, 1, "bot-9", sess, sizeof(sess)) == 1);
 	ASSERT(strcmp(sess, "discord:c:chan-2") == 0);
 	cJSON_Delete(dm);
 	cJSON_Delete(g0);
 	cJSON_Delete(g1);
+	return 0;
+}
+
+/**
+ * Negative cases so allowlist/mention gating cannot silently widen:
+ * null payload is invalid; bot authors, empty author ids, and guild
+ * traffic without bot identity must be ignored (not accepted).
+ */
+static int test_route_message_create_rejects_edge_cases(void)
+{
+	const char *allowed[] = { "user-42" };
+	const char *bot_author = "{\"author\":{\"id\":\"user-42\",\"bot\":true},\"channel_id\":\"chan-1\"}";
+	const char *empty_author_id = "{\"author\":{\"id\":\"\",\"bot\":false},\"channel_id\":\"chan-1\"}";
+	const char *guild_empty_bot = "{\"author\":{\"id\":\"user-42\",\"bot\":false},"
+	                              "\"guild_id\":\"g1\",\"channel_id\":\"chan-2\","
+	                              "\"mentions\":[{\"id\":\"bot-9\"}]}";
+	cJSON *bot;
+	cJSON *empty_id;
+	cJSON *guild;
+	char sess[128];
+
+	bot = cJSON_Parse(bot_author);
+	empty_id = cJSON_Parse(empty_author_id);
+	guild = cJSON_Parse(guild_empty_bot);
+	ASSERT(bot && empty_id && guild);
+	memset(sess, 'x', sizeof(sess));
+	sess[sizeof(sess) - 1] = '\0';
+	ASSERT(discord_helpers_route_message_create(NULL, allowed, 1, "bot-9", sess, sizeof(sess)) == -1);
+	ASSERT(discord_helpers_route_message_create(bot, allowed, 1, "bot-9", sess, sizeof(sess)) == 0);
+	ASSERT(sess[0] == '\0');
+	ASSERT(discord_helpers_route_message_create(empty_id, allowed, 1, "bot-9", sess, sizeof(sess)) == 0);
+	ASSERT(sess[0] == '\0');
+	ASSERT(discord_helpers_route_message_create(guild, allowed, 1, "", sess, sizeof(sess)) == 0);
+	ASSERT(sess[0] == '\0');
+	ASSERT(discord_helpers_route_message_create(guild, allowed, 1, NULL, sess, sizeof(sess)) == 0);
+	ASSERT(sess[0] == '\0');
+	cJSON_Delete(bot);
+	cJSON_Delete(empty_id);
+	cJSON_Delete(guild);
 	return 0;
 }
 
@@ -108,6 +149,7 @@ int main(void)
 	RUN(test_backoff_math());
 	RUN(test_lifecycle_str());
 	RUN(test_route_message_create_fixture());
+	RUN(test_route_message_create_rejects_edge_cases());
 	printf("test_discord_helpers: all tests passed\n");
 	return 0;
 }
