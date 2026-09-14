@@ -215,6 +215,52 @@ static int test_workspace_only_blocks_file_url(void)
 	return 0;
 }
 
+/**
+ * Shell expands `$HOME` / `${HOME}` / `$PWD` before open(2). Tokens never start
+ * with `/` `~` `.`, so the old has_path_chars gate skipped them.
+ */
+static int test_workspace_only_blocks_home_env_expansion(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_home_XXXXXX";
+	char *dir;
+	const char *home = getenv("HOME");
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_home_env_expansion: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat $HOME/.shellclaw/auth_tokens.json",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	ASSERT(strstr(reason, "escapes workspace") != NULL ||
+	       strstr(reason, "unresolved") != NULL);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat ${HOME}/.shellclaw/auth_tokens.json",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat $PWD/../outside.txt",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat $'\\x2fetc\\x2fpasswd'",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat \"$HOME/.shellclaw/auth_tokens.json\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat notes.txt", &cfg, reason, sizeof(reason)) == 0);
+	if (home && strcmp(home, dir) == 0) {
+		reason[0] = '\0';
+		ASSERT(allowlist_check_shell_command("ls $HOME", &cfg, reason, sizeof(reason)) == 0);
+	}
+	rmdir(dir);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Symlink escape test (5.4)                                            */
 /* ------------------------------------------------------------------ */
@@ -324,6 +370,7 @@ int main(void)
 	RUN(test_workspace_only_blocks_embedded_path_in_python());
 	RUN(test_workspace_only_allows_relative_and_url_slashes());
 	RUN(test_workspace_only_blocks_file_url());
+	RUN(test_workspace_only_blocks_home_env_expansion());
 	RUN(test_symlink_escape());
 	RUN(test_dotdot_escape_nonexistent_destination());
 	printf("test_allowlist: all tests passed\n");
