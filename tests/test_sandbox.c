@@ -78,6 +78,8 @@ static int proc_cmdline_has(const char *needle)
 		size_t i;
 		if (e->d_name[0] < '1' || e->d_name[0] > '9')
 			continue;
+		if (strlen(e->d_name) > 16)
+			continue;
 		snprintf(path, sizeof path, "/proc/%s/cmdline", e->d_name);
 		f = fopen(path, "r");
 		if (!f)
