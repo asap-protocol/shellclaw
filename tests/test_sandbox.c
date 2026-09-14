@@ -7,6 +7,11 @@
  * On macOS and other platforms, the tests fall back to verifying basic
  * fork+exec behaviour: output capture, timeout, and null-safety.
  *
+ * GitHub-hosted runners often cannot apply user namespaces or Landlock.
+ * Production stays fail-closed (sandbox_exec returns -1). Success-path tests
+ * skip in that case; host-FS and netns tests treat the deny as the expected
+ * isolation failure. Do not weaken sandbox.c to make CI green.
+ *
  * 5.7 Benchmark: run sandbox_exec("true") 200 times and report median.
  * The benchmark is informational only — it does not gate the test suite.
  */
@@ -33,14 +38,67 @@
 
 #define RUN(t) do { int r_ = (t); if (r_) return r_; } while (0)
 
+/**
+ * True when sandbox_exec fail-closed because namespaces or Landlock could
+ * not apply. Distinct from argument errors (NULL cmd, zero cap).
+ */
+static int isolation_was_denied(int rc, const char *out)
+{
+	if (rc != -1)
+		return 0;
+	if (out == NULL)
+		return 0;
+	if (strstr(out, "sandbox: namespace isolation failed") != NULL)
+		return 1;
+	if (strstr(out, "sandbox: Landlock filesystem bound failed") != NULL)
+		return 1;
+	return 0;
+}
+
+static int skip_if_isolation_denied(int rc, const char *out, const char *name)
+{
+	if (!isolation_was_denied(rc, out))
+		return 0;
+	fprintf(stderr, "test_sandbox: skip %s (%s)\n", name, out);
+	return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Basic functionality                                                  */
 /* ------------------------------------------------------------------ */
+
+static int test_isolation_denied_helper(void)
+{
+	ASSERT(isolation_was_denied(0, "sandbox: namespace isolation failed") == 0);
+	ASSERT(isolation_was_denied(-1, "hello") == 0);
+	ASSERT(isolation_was_denied(-1, NULL) == 0);
+	ASSERT(isolation_was_denied(-1, "sandbox: namespace isolation failed") == 1);
+	ASSERT(isolation_was_denied(-1, "sandbox: Landlock filesystem bound failed") == 1);
+	return 0;
+}
+
+/**
+ * Either isolation applies (rc == 0) or fail-closed reports the isolation
+ * error. Other -1 reasons on "true" are a product bug.
+ */
+static int test_fail_closed_reports_isolation_error(void)
+{
+	char out[4096];
+	int rc;
+
+	rc = sandbox_exec("true", out, sizeof(out), 5000, NULL);
+	if (rc == 0)
+		return 0;
+	ASSERT(isolation_was_denied(rc, out));
+	return 0;
+}
 
 static int test_output_capture(void)
 {
 	char out[4096];
 	int rc = sandbox_exec("echo hello_sandbox", out, sizeof(out), 5000, NULL);
+	if (skip_if_isolation_denied(rc, out, "test_output_capture"))
+		return 0;
 	ASSERT(rc == 0);
 	ASSERT(strstr(out, "hello_sandbox") != NULL);
 	return 0;
@@ -50,6 +108,8 @@ static int test_stderr_captured(void)
 {
 	char out[4096];
 	int rc = sandbox_exec("echo err >&2", out, sizeof(out), 5000, NULL);
+	if (skip_if_isolation_denied(rc, out, "test_stderr_captured"))
+		return 0;
 	ASSERT(rc == 0);
 	ASSERT(strstr(out, "err") != NULL);
 	return 0;
@@ -74,6 +134,8 @@ static int test_exit_nonzero_runs(void)
 	char out[4096];
 	/* Command exits non-zero; sandbox_exec should still return 0 (ran ok). */
 	int rc = sandbox_exec("exit 1", out, sizeof(out), 5000, NULL);
+	if (skip_if_isolation_denied(rc, out, "test_exit_nonzero_runs"))
+		return 0;
 	ASSERT(rc == 0);
 	return 0;
 }
@@ -82,9 +144,13 @@ static int test_workspace_chdir(void)
 {
 	char out[4096];
 	sandbox_config_t cfg;
+	int rc;
+
 	memset(&cfg, 0, sizeof cfg);
 	cfg.workspace_path = "/tmp";
-	int rc = sandbox_exec("pwd", out, sizeof(out), 5000, &cfg);
+	rc = sandbox_exec("pwd", out, sizeof(out), 5000, &cfg);
+	if (skip_if_isolation_denied(rc, out, "test_workspace_chdir"))
+		return 0;
 	ASSERT(rc == 0);
 	ASSERT(strstr(out, "/tmp") != NULL);
 	return 0;
@@ -99,6 +165,8 @@ static int test_timeout_kills_process(void)
 	char out[4096];
 	/* sleep 60 should be killed well before natural completion. */
 	int rc = sandbox_exec("sleep 60", out, sizeof(out), 300, NULL);
+	if (skip_if_isolation_denied(rc, out, "test_timeout_kills_process"))
+		return 0;
 	ASSERT(rc == 0);
 	ASSERT(strstr(out, "timed out") != NULL || strlen(out) == 0);
 	return 0;
@@ -113,9 +181,10 @@ static int test_shadow_not_accessible(void)
 {
 	char out[4096];
 	int rc;
-	/* Even if /etc/shadow is not present in CI, the exec should succeed.
-	 * The important check: no actual secret content leaks. */
+	/* Fail-closed isolation is a deny. If the command ran, no secret leak. */
 	rc = sandbox_exec("cat /etc/shadow 2>&1 || echo BLOCKED", out, sizeof(out), 5000, NULL);
+	if (isolation_was_denied(rc, out))
+		return 0;
 	ASSERT(rc == 0);
 	/* Either permission denied or the echo BLOCKED message appears. */
 	ASSERT(strlen(out) > 0);
@@ -125,6 +194,7 @@ static int test_shadow_not_accessible(void)
 /**
  * With a workspace configured, Landlock must deny host reads even via a
  * relative symlink (allowlist may miss bare names; sandbox is the FS gate).
+ * Hosts that cannot apply isolation fail closed: also a deny, no leak.
  */
 static int test_workspace_landlock_blocks_symlink_escape(void)
 {
@@ -149,20 +219,23 @@ static int test_workspace_landlock_blocks_symlink_escape(void)
 	memset(&cfg, 0, sizeof cfg);
 	cfg.workspace_path = ws;
 	rc = sandbox_exec("cat leak 2>&1; echo EXIT:$?", out, sizeof(out), 5000, &cfg);
-	ASSERT(rc == 0);
+	unlink(leak_path);
+	rmdir(ws);
 	ASSERT(strstr(out, "root:x:") == NULL);
+	if (isolation_was_denied(rc, out))
+		return 0;
+	ASSERT(rc == 0);
 	ASSERT(strstr(out, "Permission denied") != NULL ||
 	       strstr(out, "No such file") != NULL ||
 	       strstr(out, "EXIT:1") != NULL ||
 	       strstr(out, "EXIT:2") != NULL);
-	unlink(leak_path);
-	rmdir(ws);
 	return 0;
 }
 
 /**
  * Kernel FS bound must stop interpreter path concat (`chr(47)+`) that the
  * string scanner cannot see. Residual on allowlist only.
+ * Fail-closed isolation is also a deny (no host passwd leak).
  */
 static int test_workspace_landlock_blocks_abs_etc(void)
 {
@@ -184,11 +257,13 @@ static int test_workspace_landlock_blocks_abs_etc(void)
 		"python3 -c 'open(\"out\",\"w\").write(open(chr(47)+\"etc\"+chr(47)+\"passwd\").read())' 2>&1; "
 		"echo EXIT:$?",
 		out, sizeof(out), 8000, &cfg);
-	ASSERT(rc == 0);
-	ASSERT(strstr(out, "root:x:") == NULL);
 	snprintf(outp, sizeof(outp), "%s/out", ws);
 	unlink(outp);
 	rmdir(ws);
+	ASSERT(strstr(out, "root:x:") == NULL);
+	if (isolation_was_denied(rc, out))
+		return 0;
+	ASSERT(rc == 0);
 	return 0;
 }
 
@@ -211,8 +286,15 @@ static int test_workspace_landlock_allows_workspace_write(void)
 	memset(&cfg, 0, sizeof cfg);
 	cfg.workspace_path = ws;
 	rc = sandbox_exec("echo landlock_ok > wrote.txt", out, sizeof(out), 5000, &cfg);
-	ASSERT(rc == 0);
 	snprintf(wrote, sizeof(wrote), "%s/wrote.txt", ws);
+	if (isolation_was_denied(rc, out)) {
+		unlink(wrote);
+		rmdir(ws);
+		fprintf(stderr, "test_sandbox: skip test_workspace_landlock_allows_workspace_write (%s)\n",
+			out);
+		return 0;
+	}
+	ASSERT(rc == 0);
 	f = fopen(wrote, "r");
 	ASSERT(f != NULL);
 	ASSERT(fgets(buf, sizeof(buf), f) != NULL);
@@ -278,8 +360,10 @@ static int test_network_namespace_blocks_host_loopback(void)
 	         port);
 	rc = sandbox_exec(cmd, out, sizeof out, 5000, NULL);
 	close(srv);
-	ASSERT(rc == 0);
 	ASSERT(strstr(out, "CONNECTED") == NULL);
+	if (isolation_was_denied(rc, out))
+		return 0;
+	ASSERT(rc == 0);
 	ASSERT(strstr(out, "ISOLATED") != NULL);
 	return 0;
 }
@@ -295,8 +379,14 @@ static int benchmark_sandbox_exec(void)
 	long times_us[BENCH_N];
 	char out[256];
 	int i;
+	int rc;
 	long sum = 0;
 	long median_us;
+
+	rc = sandbox_exec("true", out, sizeof(out), 5000, NULL);
+	if (skip_if_isolation_denied(rc, out, "benchmark_sandbox_exec"))
+		return 0;
+
 	for (i = 0; i < BENCH_N; i++) {
 		struct timespec t0, t1;
 		long diff_us;
@@ -340,6 +430,8 @@ static int benchmark_sandbox_exec(void)
 
 int main(void)
 {
+	RUN(test_isolation_denied_helper());
+	RUN(test_fail_closed_reports_isolation_error());
 	RUN(test_output_capture());
 	RUN(test_stderr_captured());
 	RUN(test_null_cmd_returns_error());
