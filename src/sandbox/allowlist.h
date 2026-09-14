@@ -37,9 +37,11 @@
  *     `../` after `://` is still containment-checked so URL-disguised walks cannot skip the gate.
  *
  * Both checks are intentionally conservative and may produce false positives.
- * They are a best-effort defence-in-depth layer. sandbox_exec() isolates
- * mount/network/PID namespaces but does not chroot/pivot_root; workspace_only
- * path scanning is therefore the primary host-filesystem gate for the shell tool.
+ * They are a defence-in-depth layer. The kernel host-FS bound for the shell
+ * tool is Landlock in sandbox_exec() when a workspace path is set; namespaces
+ * fail closed if they cannot apply. workspace_only path scanning does not
+ * replace that bound (and is not a language interpreter: `chr(47)+` stays
+ * residual on this scanner).
  */
 #ifndef SHELLCLAW_ALLOWLIST_H
 #define SHELLCLAW_ALLOWLIST_H

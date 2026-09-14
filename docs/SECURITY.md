@@ -39,9 +39,10 @@ The primary goals are: prevent sandboxed shell commands from escaping to host de
 
 | Surface | Mechanism | Notes |
 |---------|-----------|-------|
-| Shell (sandbox on) | `fork()` + `unshare(CLONE_NEWNS \| CLONE_NEWNET \| CLONE_NEWPID)` + `prctl(PR_SET_NO_NEW_PRIVS)` | See [Linux sandbox (Jetson)](#linux-sandbox-jetson) |
+| Shell (sandbox on) | `fork()` + user ns when needed + `unshare(CLONE_NEWNS \| CLONE_NEWNET \| CLONE_NEWPID)` + Landlock workspace bound + `prctl(PR_SET_NO_NEW_PRIVS)` | Fail-closed if namespaces or Landlock cannot apply. See [Linux sandbox (Jetson)](#linux-sandbox-jetson) |
 | Shell (sandbox off) | Plain `fork()` + substring fallback blocklist | **Not** a security boundary; stderr warning |
-| Allowlist | Substring blocklist + workspace containment (existing ancestor, quoted/embedded `/` `~`, full-command `$HOME`/`$PWD` / fail-closed `$`) | Primary host-FS gate; namespaces are not a chroot |
+| Allowlist | Substring blocklist + workspace containment (existing ancestor, quoted/embedded `/` `~`, bare relative names, full-command `$HOME`/`$PWD` / fail-closed `$`) | Defense-in-depth string scan; Landlock is the kernel host-FS bound |
+| Landlock | Ruleset on configured `workspace_path` (RW workspace + RO `/bin` `/usr` `/lib` …) | Primary host-FS gate; blocks symlink and `chr(47)+` host reads |
 | cgroups v2 | `memory.max`, `cpu.max` on child PID | Best-effort; non-fatal if cgroup write fails |
 | Hardware GPIO/I2C | libgpiod / `i2c-dev` in agent process | Not exposed inside shell namespace |
 
@@ -69,11 +70,11 @@ Therefore ShellClaw never bind-mounts Tegra GPU devices into the sandbox. In par
 
 ### `pivot_root` — not used (v1.0)
 
-The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened pattern. **v1.0 does not implement `pivot_root`.** After `unshare(CLONE_NEWNS)`, the child inherits a **copy** of the host mount tree (default propagation). Jetson `/dev` nodes remain visible inside the new mount namespace unless blocked elsewhere.
+The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened pattern. **v1.0 does not implement `pivot_root`.** After `unshare(CLONE_NEWNS)`, the child inherits a **copy** of the host mount tree (default propagation). Jetson `/dev` nodes remain in that mount namespace; Landlock (when a workspace path is set) is the kernel FS bound and does not grant `/dev/nvhost`, `/dev/nvgpu`, or `/dev/nvmap`.
 
 **Mitigation in v1.0:** the shell allowlist rejects commands whose text references `/dev/nvhost`, `/dev/nvgpu`, or `/dev/nvmap` (substring blocklist). Regression tests live in `tests/test_allowlist.c` (`test_block_jetson_gpu_devices`).
 
-**Residual risk:** a crafted command that opens GPU nodes without those literal substrings (e.g. shell globs) may still reach devices until a future release adds mount-slave propagation, a minimal `/dev` tmpfs, Landlock, or seccomp. `workspace_only` walks a missing destination’s existing ancestor, collapses `..` lexically (including a missing directory before `..`, without cancelling `..` across a symlink), scans quoted/embedded `/` `~` and relative `../` (including `../` after `://`), extracts and percent-decodes `file:` URLs (including quote-split schemes, `\x66`/`\u0066`/`\146` hidden schemes, identity `f\ile:`, and POSIX `\`+newline continuation), reconstructs encoded `/` and `.` (`\x2f` / `\x{2f}` / `\x2e` / `\u{2f}` / `\o{57}`), fail-closes `\N{` and in-command `HOME`/`PWD` assignment (including quoted `eval` / `sh -c`, comma-separated argv, POSIX `read`, `printf -v`, `declare -n` targeting HOME|PWD, `exec -c`, `env -i` / `-iu` / `-u` / `--unset`, and `os.environ.pop`/`clear`/`update` / `os.unsetenv` / `os.putenv` / subscript assign; identity-escape fold before the keyword gate so `PW\D=` / `\unset` / `\env -i` cannot skip getenv), and expands or fail-closes `$` on the full command (including glued `$IFS`, mid-token `$HOME`, and encoded `\x24` / `\044` / `\u0024`). Still out of this gate: relative tokens after `cd` with no `.` `/` `~` `$` (Landlock cluster), Python `open(chr(47)+'etc/passwd')` (no path character or slash encoding in the command string), and conservative regex false positives such as `awk '/foo/'`.
+**Residual risk:** a crafted command that opens GPU nodes without those literal substrings (e.g. shell globs) is still denied by Landlock when a workspace path is set (`/dev/nv*` is not in the RO grant list). Without Landlock (non-Linux, or sandbox off) the substring blocklist remains best-effort. `workspace_only` walks a missing destination’s existing ancestor, collapses `..` lexically (including a missing directory before `..`, without cancelling `..` across a symlink), scans quoted/embedded `/` `~`, bare relative names (`cat leak`), and relative `../` (including `../` after `://`), extracts and percent-decodes `file:` URLs (including quote-split schemes, `\x66`/`\u0066`/`\146` hidden schemes, identity `f\ile:`, and POSIX `\`+newline continuation), reconstructs encoded `/` and `.` (`\x2f` / `\x{2f}` / `\x2e` / `\u{2f}` / `\o{57}`), fail-closes `\N{` and in-command `HOME`/`PWD` assignment (including quoted `eval` / `sh -c`, comma-separated argv, POSIX `read`, `printf -v`, `declare -n` targeting HOME|PWD, `exec -c`, `env -i` / `-iu` / `-u` / `--unset`, and `os.environ.pop`/`clear`/`update` / `os.unsetenv` / `os.putenv` / subscript assign; identity-escape fold before the keyword gate so `PW\D=` / `\unset` / `\env -i` cannot skip getenv), and expands or fail-closes `$` on the full command (including glued `$IFS`, mid-token `$HOME`, and encoded `\x24` / `\044` / `\u0024`). The string scanner is not a language interpreter: `open(chr(47)+'etc/passwd')` has no path character in the command text and stays residual **on the scanner**; Landlock is the kernel bound for that class. Conservative regex false positives such as `awk '/foo/'` remain.
 
 ### Board-agnostic blocklist entries (Jetson literals)
 
@@ -268,7 +269,7 @@ This section summarizes Jetson Orin Nano Super / JetPack 6.2.x concerns that do 
 | Surface | Jetson-specific behavior | Primary mitigation | Source |
 |---------|-------------------------|-------------------|--------|
 | Shell sandbox | Tegra GPU character devices remain in inherited mount namespace | Literal blocklist on `/dev/nvhost*`, `/dev/nvgpu`, `/dev/nvmap` | `src/sandbox/allowlist.c` |
-| Shell sandbox | No `pivot_root` / minimal `/dev` in v1.0 | Documented residual risk; allowlist defense in depth | `src/sandbox/sandbox.c` |
+| Shell sandbox | No `pivot_root` / minimal `/dev` in v1.0 | Landlock workspace bound (fail-closed); allowlist defense in depth | `src/sandbox/sandbox.c` |
 | CSI camera | Argus daemon (`root`) + `/tmp/argus_socket` | Shell blocklist; camera only via agent `execvp` path | `src/hardware/hardware_camera.c`, `allowlist.c` |
 | Gateway | GPU telemetry via `tegrastats` parsing | Bearer auth on `/api/hardware/gpu`; read-only GET | `src/gateway/routes_hardware.c` |
 | GPIO / I2C | `tegra234-gpio` chips via libgpiod | Hardware tools run in agent process, not shell namespace | `src/hardware/` backends |

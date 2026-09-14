@@ -62,7 +62,7 @@ Shell commands run in a **Linux sandbox** (namespaces + cgroups v2). Hardware to
 | `channels/` | Inbound/outbound I/O | CLI, Telegram, Discord, WebChat, heartbeat |
 | `gateway/` | Embedded HTTP/WebSocket server, pairing auth, rate limits, static Web UI | `http_lws`, `routes.c`, `routes_hardware.c` |
 | `asap/` | Protocol client/server, envelope, ULID, registry cache, signed manifest | `manifest_build_signed_json()`, `POST /asap` |
-| `sandbox/` | Process isolation for shell tool | `sandbox_run()` — `unshare(CLONE_NEWNS\|NEWNET\|NEWPID)`, no `pivot_root` |
+| `sandbox/` | Process isolation for shell tool | `sandbox_exec()` — user ns + `unshare(CLONE_NEWNS\|NEWNET\|NEWPID)`, Landlock workspace bound, no `pivot_root` |
 | `hardware/` | Board abstraction: GPIO (libgpiod), I2C (`/dev/i2c-N`), camera (fixed-argv CLI spawn) | `hardware_init()`, `board_detect()` |
 | `crypto/` | Ed25519 signing + JCS canonicalization for manifests | `manifest_keys_ensure_loaded()` (lazy on manifest GET), `jcs.c` |
 

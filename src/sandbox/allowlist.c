@@ -88,6 +88,49 @@ static int has_path_chars(const char *tok)
     return 0;
 }
 
+/** Return 1 if @p tok looks like a shell option flag (-x / --long), not a path. */
+static int is_option_token(const char *tok)
+{
+    if (!tok || tok[0] != '-')
+        return 0;
+    if (tok[1] == '\0')
+        return 0;
+    if (tok[1] >= '0' && tok[1] <= '9')
+        return 0;
+    return 1;
+}
+
+/**
+ * Resolve a bare relative filename against the workspace and reject symlink
+ * (or hard-link) escapes. Names that do not exist yet are left to Landlock.
+ * @return 1 if blocked, 0 if allowed / not applicable.
+ */
+static int block_if_relative_token_escapes(const char *tok, const char *workspace_root,
+                                           char *reason_buf, size_t reason_cap)
+{
+    char joined[PATH_MAX];
+    int n;
+
+    if (!tok || !tok[0] || !workspace_root || !workspace_root[0])
+        return 0;
+    if (has_path_chars(tok) || is_option_token(tok))
+        return 0;
+    n = snprintf(joined, sizeof(joined), "%s/%s", workspace_root, tok);
+    if (n < 0 || (size_t)n >= sizeof(joined)) {
+        set_reason(reason_buf, reason_cap, "command blocked: path too long: ", tok);
+        return 1;
+    }
+    if (access(joined, F_OK) != 0)
+        return 0;
+    if (!allowlist_path_is_under_workspace(joined, workspace_root)) {
+        set_reason(reason_buf, reason_cap,
+                   "command blocked: path escapes workspace: ", joined);
+        fprintf(stderr, "allowlist: blocked path outside workspace: %s\n", joined);
+        return 1;
+    }
+    return 0;
+}
+
 static char *strip_surrounding_quotes(char *tok)
 {
     size_t n;
@@ -1510,6 +1553,10 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
                 free(cmd_copy);
                 return 1;
             }
+        } else if (block_if_relative_token_escapes(tok, workspace_root, reason_buf,
+                                                   reason_cap)) {
+            free(cmd_copy);
+            return 1;
         }
         tok = strtok_r(NULL, " \t\n;|&><", &saveptr);
     }
