@@ -7,6 +7,7 @@
 
 #include "sandbox/allowlist.h"
 #include <ctype.h>
+#include <libgen.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,11 +77,45 @@ static void set_reason(char *buf, size_t cap, const char *prefix, const char *de
     buf[cap - 1] = '\0';
 }
 
-/** Return 1 if @p s begins with prefix after any leading whitespace. */
+/** Return 1 if @p tok begins with a path-like character. */
 static int has_path_chars(const char *tok)
 {
     if (!tok) return 0;
     return tok[0] == '/' || tok[0] == '~' || tok[0] == '.';
+}
+
+static int resolved_is_under_workspace(const char *resolved, const char *actual_ws, size_t wlen)
+{
+    if (!resolved || !actual_ws || wlen == 0) return 0;
+    if (strncmp(resolved, actual_ws, wlen) != 0) return 0;
+    return resolved[wlen] == '\0' || resolved[wlen] == '/';
+}
+
+/*
+ * realpath(3) cannot canonicalize a path that does not exist. Walking to the
+ * first existing ancestor (same approach as tools/file.c) still collapses `..`
+ * through existing directories, so workspace/../../tmp/newfile is denied.
+ * A lexical prefix check would allow that destination.
+ */
+static int existing_ancestor_is_under_workspace(const char *path, const char *actual_ws, size_t wlen)
+{
+    char path_copy[PATH_MAX];
+    char resolved[PATH_MAX];
+    int hops;
+
+    if (!path || path[0] == '\0' || strlen(path) >= PATH_MAX) return 0;
+    snprintf(path_copy, sizeof(path_copy), "%s", path);
+    for (hops = 0; hops < PATH_MAX; hops++) {
+        char *dir = dirname(path_copy);
+
+        if (!dir || dir[0] == '\0') return 0;
+        if (realpath(dir, resolved) != NULL)
+            return resolved_is_under_workspace(resolved, actual_ws, wlen);
+        if (strcmp(dir, ".") == 0 || strcmp(dir, "/") == 0) return 0;
+        if (dir != path_copy)
+            snprintf(path_copy, sizeof(path_copy), "%s", dir);
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -100,23 +135,9 @@ int allowlist_path_is_under_workspace(const char *path, const char *workspace_ro
     else
         actual_ws = workspace_root;
     wlen = strlen(actual_ws);
-    if (realpath(path, resolved_path)) {
-        /* Exact match or resolved path starts with resolved workspace + '/' */
-        if (strncmp(resolved_path, actual_ws, wlen) == 0) {
-            if (resolved_path[wlen] == '\0' || resolved_path[wlen] == '/') return 1;
-        }
-        return 0;
-    }
-    /* Path does not exist on disk: check the lexical prefix against resolved workspace. */
-    if (strncmp(path, actual_ws, wlen) == 0) {
-        if (path[wlen] == '\0' || path[wlen] == '/') return 1;
-    }
-    /* Also try against the original (unresolved) workspace root. */
-    wlen = strlen(workspace_root);
-    if (strncmp(path, workspace_root, wlen) == 0) {
-        if (path[wlen] == '\0' || path[wlen] == '/') return 1;
-    }
-    return 0;
+    if (realpath(path, resolved_path))
+        return resolved_is_under_workspace(resolved_path, actual_ws, wlen);
+    return existing_ancestor_is_under_workspace(path, actual_ws, wlen);
 }
 
 /* ------------------------------------------------------------------ */
