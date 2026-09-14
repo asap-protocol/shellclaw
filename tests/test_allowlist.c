@@ -202,6 +202,48 @@ static int test_symlink_escape(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Non-existent path with .. must not escape via lexical prefix         */
+/* ------------------------------------------------------------------ */
+
+static int test_dotdot_escape_nonexistent_destination(void)
+{
+	char workspace[] = "/tmp/sc_al_ws_XXXXXX";
+	char *ws;
+	char new_file[256];
+	char escape_path[256];
+	char cmd[640];
+	allowlist_config_t cfg;
+	char reason[256];
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_dotdot_escape_nonexistent_destination: mkdtemp failed\n");
+		return 1;
+	}
+
+	/* realpath() fails for a new file; the workspace ancestor must still allow it. */
+	snprintf(new_file, sizeof(new_file), "%s/brand_new.txt", ws);
+	ASSERT(allowlist_path_is_under_workspace(new_file, ws) == 1);
+
+	/*
+	 * Destination does not exist, so realpath() fails. A lexical prefix check
+	 * treats workspace/../../tmp/... as inside the workspace.
+	 */
+	snprintf(escape_path, sizeof(escape_path),
+	         "%s/../../tmp/sc_al_stolen_%d", ws, (int)getpid());
+	ASSERT(allowlist_path_is_under_workspace(escape_path, ws) == 0);
+
+	cfg.workspace_path = ws;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	snprintf(cmd, sizeof(cmd), "cp %s/memory.db %s", ws, escape_path);
+	ASSERT(allowlist_check_shell_command(cmd, &cfg, reason, sizeof(reason)) == 1);
+
+	rmdir(ws);
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -225,6 +267,7 @@ int main(void)
 	RUN(test_workspace_only_blocks_outside_path());
 	RUN(test_workspace_only_allows_inside_path());
 	RUN(test_symlink_escape());
+	RUN(test_dotdot_escape_nonexistent_destination());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }
