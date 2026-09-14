@@ -1163,6 +1163,175 @@ static int test_workspace_only_blocks_encoded_file_scheme(void)
 	return 0;
 }
 
+/**
+ * Octal scheme bytes (`\\146` / `\\072`) and shell identity `f\\ile:` must
+ * not hide a `file:` URL. Real `https://` fetches stay allowed.
+ */
+static int test_workspace_only_blocks_octal_and_identity_file_scheme(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_octf_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_octal_and_identity_file_scheme: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"urllib.request.urlopen('\\146ile:/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"curl f\\ile://localhost/etc/passwd",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"curl file\\072/etc/passwd",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl https://example.com/api",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * POSIX `\\` + newline (optional CR) line continuation must not split
+ * `file:` or `PWD=` so dash `/bin/sh -c` cannot skip the gates.
+ */
+static int test_workspace_only_blocks_backslash_newline_continuation(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_bscn_XXXXXX";
+	char *dir;
+	const char *old_pwd;
+	char pwd_copy[256];
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_backslash_newline_continuation: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_backslash_newline_continuation: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_backslash_newline_continuation: setenv failed\n");
+		return 1;
+	}
+
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl f\\\nile:/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl f\\\r\nile:/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("PW\\\nD=; cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * `printf -v PWD` and `os.environ["HOME"]=` / `.update({"HOME":...})` must
+ * fail closed. `$PWD/etc/passwd` and `~/etc/passwd` after them must deny.
+ */
+static int test_workspace_only_blocks_printf_v_and_environ_index(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_pfv_XXXXXX";
+	char *dir;
+	const char *old_pwd;
+	const char *old_home;
+	char pwd_copy[256];
+	char home_copy[256];
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_printf_v_and_environ_index: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_printf_v_and_environ_index: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	old_home = getenv("HOME");
+	home_copy[0] = '\0';
+	if (old_home) {
+		if (strlen(old_home) >= sizeof(home_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_printf_v_and_environ_index: HOME too long\n");
+			return 1;
+		}
+		memcpy(home_copy, old_home, strlen(old_home) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0 || setenv("HOME", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_printf_v_and_environ_index: setenv failed\n");
+		return 1;
+	}
+
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("printf -v PWD x; cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"os.environ['HOME']=''; open('$HOME/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"os.environ['HOME']=''; open('~/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"os.environ.update({'HOME': ''}); open('$HOME/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	if (home_copy[0])
+		(void)setenv("HOME", home_copy, 1);
+	else
+		(void)unsetenv("HOME");
+	rmdir(dir);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
@@ -1210,6 +1379,9 @@ int main(void)
 	RUN(test_workspace_only_blocks_read_unset_and_clustered_env());
 	RUN(test_workspace_only_blocks_perl_braced_octal());
 	RUN(test_workspace_only_blocks_encoded_file_scheme());
+	RUN(test_workspace_only_blocks_octal_and_identity_file_scheme());
+	RUN(test_workspace_only_blocks_backslash_newline_continuation());
+	RUN(test_workspace_only_blocks_printf_v_and_environ_index());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }
