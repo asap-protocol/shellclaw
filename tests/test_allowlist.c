@@ -855,6 +855,149 @@ static int test_workspace_only_blocks_encoded_dot_and_named_slash(void)
 	return 0;
 }
 
+/**
+ * `is_inside_url` must not hide `../` after `://`. Real https fetches without
+ * a `..` walk stay allowed.
+ */
+static int test_workspace_only_blocks_url_disguised_dotdot(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_url_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_url_disguised_dotdot: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"curl https://example.com/../../../../etc/passwd",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"cat https://example.com/../../../../etc/passwd",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl https://example.com/api",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * Perl braced hex `\x{2f}` / `\x{2e}` must reconstruct like `\u{2f}`.
+ * Not `chr(47)+` concatenation.
+ */
+static int test_workspace_only_blocks_perl_braced_hex(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_perl_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_perl_braced_hex: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"perl -e 'open F, \"\\x{2f}etc/passwd\"'",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"perl -e 'open F, \"\\x{2e}\\x{2e}/secret\"'",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"perl -e 'open F, \"notes.txt\"'",
+		&cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * HOME/PWD mutation after comma (argv lists) and env replacement without
+ * `HOME=` (`env -i`, `env -u HOME`, `os.environ.pop`) must fail closed.
+ */
+static int test_workspace_only_blocks_env_replace_and_comma_assign(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_envr_XXXXXX";
+	char *dir;
+	const char *old_pwd;
+	const char *old_home;
+	char pwd_copy[256];
+	char home_copy[256];
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_env_replace_and_comma_assign: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_env_replace_and_comma_assign: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	old_home = getenv("HOME");
+	home_copy[0] = '\0';
+	if (old_home) {
+		if (strlen(old_home) >= sizeof(home_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_env_replace_and_comma_assign: HOME too long\n");
+			return 1;
+		}
+		memcpy(home_copy, old_home, strlen(old_home) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0 || setenv("HOME", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_env_replace_and_comma_assign: setenv failed\n");
+		return 1;
+	}
+
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("env -i cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("env -u HOME cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"os.environ.pop('HOME'); open('$HOME/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"f(a,HOME=''); open('$HOME/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	if (home_copy[0])
+		(void)setenv("HOME", home_copy, 1);
+	else
+		(void)unsetenv("HOME");
+	rmdir(dir);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
@@ -896,6 +1039,9 @@ int main(void)
 	RUN(test_workspace_only_blocks_quoted_home_pwd_assignment());
 	RUN(test_workspace_only_blocks_quote_split_file_url());
 	RUN(test_workspace_only_blocks_encoded_dot_and_named_slash());
+	RUN(test_workspace_only_blocks_url_disguised_dotdot());
+	RUN(test_workspace_only_blocks_perl_braced_hex());
+	RUN(test_workspace_only_blocks_env_replace_and_comma_assign());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }
