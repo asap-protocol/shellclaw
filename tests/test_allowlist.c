@@ -1332,6 +1332,123 @@ static int test_workspace_only_blocks_printf_v_and_environ_index(void)
 	return 0;
 }
 
+/**
+ * Identity-escaped HOME/PWD keywords (`PW\\D=`, `\\unset`, `\\env -i`),
+ * bash `declare -n` namerefs, and `exec -c` must fail closed before getenv.
+ */
+static int test_workspace_only_blocks_identity_and_nameref_env(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_idnr_XXXXXX";
+	char *dir;
+	const char *old_pwd;
+	const char *old_home;
+	char pwd_copy[256];
+	char home_copy[256];
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_identity_and_nameref_env: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_identity_and_nameref_env: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	old_home = getenv("HOME");
+	home_copy[0] = '\0';
+	if (old_home) {
+		if (strlen(old_home) >= sizeof(home_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_identity_and_nameref_env: HOME too long\n");
+			return 1;
+		}
+		memcpy(home_copy, old_home, strlen(old_home) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0 || setenv("HOME", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_identity_and_nameref_env: setenv failed\n");
+		return 1;
+	}
+
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("export PW\\D=; cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("\\unset HOME; cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"\\env -i sh -c 'cat $HOME/etc/passwd'",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"bash -c 'declare -n x=PWD; x=; cat $PWD/etc/passwd'",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"bash -c 'exec -c sh -c \"cat $HOME/etc/passwd\"'",
+		&cfg, reason, sizeof(reason)) == 1);
+
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	if (home_copy[0])
+		(void)setenv("HOME", home_copy, 1);
+	else
+		(void)unsetenv("HOME");
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * Encoded `$` (`\\x24` / `\\044` / `\\u0024`) must be decoded before the
+ * `$` expansion scan. Not `chr(47)+`.
+ */
+static int test_workspace_only_blocks_encoded_dollar(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_xdol_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_encoded_dollar: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"import os; os.system('cat \\x24HOME/.bashrc')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"import os; os.system('cat \\044HOME/.bashrc')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"import os; os.system('cat \\u0024HOME/.bashrc')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl https://example.com/api",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
@@ -1382,6 +1499,8 @@ int main(void)
 	RUN(test_workspace_only_blocks_octal_and_identity_file_scheme());
 	RUN(test_workspace_only_blocks_backslash_newline_continuation());
 	RUN(test_workspace_only_blocks_printf_v_and_environ_index());
+	RUN(test_workspace_only_blocks_identity_and_nameref_env());
+	RUN(test_workspace_only_blocks_encoded_dollar());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }
