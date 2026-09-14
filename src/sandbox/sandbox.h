@@ -7,8 +7,10 @@
  * so the command is PID 1. Isolation failure is fail-closed via a control
  * pipe (not sh exit 122/123). When a workspace path is set, a Landlock
  * ruleset is the kernel filesystem bound. Optional cgroups v2 resource
- * limits and a hard timeout with SIGKILL. On other platforms (macOS, BSDs)
- * it falls back to a plain fork+exec and logs a warning.
+ * limits and a hard timeout with SIGKILL (the command child sets
+ * PR_SET_PDEATHSIG so the PID-1 process cannot outlive the isolator).
+ * On other platforms (macOS, BSDs) it falls back to a plain fork+exec
+ * and logs a warning.
  */
 #ifndef SHELLCLAW_SANDBOX_H
 #define SHELLCLAW_SANDBOX_H
@@ -52,8 +54,9 @@ typedef struct sandbox_config {
  * When @p cfg->workspace_path is set, applies a Landlock ruleset that denies
  * host filesystem reads/writes outside the workspace (blocking symlink and
  * interpreter path escapes such as `chr(47)+`); Landlock setup failure also
- * returns -1. Applies cgroups v2 limits when available. Kills the child with
- * SIGKILL if @p timeout_ms elapses before exit.
+ * returns -1. Applies cgroups v2 limits when available. On timeout the
+ * parent SIGKILLs the isolator; the command is PID 1 and dies via
+ * PR_SET_PDEATHSIG and process-group kill.
  *
  * On non-Linux platforms the function executes the command via fork()+exec()
  * without namespace isolation and emits a warning to stderr.

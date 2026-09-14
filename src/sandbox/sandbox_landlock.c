@@ -29,6 +29,10 @@ int sandbox_landlock_restrict_to_workspace(const char *workspace)
 }
 #else
 
+#ifndef LANDLOCK_ACCESS_FS_IOCTL_DEV
+#define LANDLOCK_ACCESS_FS_IOCTL_DEV (1ULL << 15)
+#endif
+
 static __u64 landlock_abi1_fs_rights(void)
 {
     return LANDLOCK_ACCESS_FS_EXECUTE |
@@ -66,6 +70,8 @@ static int landlock_handled_fs(__u64 *handled_out)
     if (abi >= 3)
         handled |= LANDLOCK_ACCESS_FS_TRUNCATE;
 #endif
+    if (abi >= 5)
+        handled |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
     *handled_out = handled;
     return 0;
 }
@@ -172,6 +178,10 @@ int sandbox_landlock_restrict_to_workspace(const char *workspace)
     rw_file = (LANDLOCK_ACCESS_FS_EXECUTE |
                LANDLOCK_ACCESS_FS_READ_FILE |
                LANDLOCK_ACCESS_FS_WRITE_FILE) & handled;
+#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
+    rw_file |= (LANDLOCK_ACCESS_FS_TRUNCATE & handled);
+#endif
+    rw_file |= (LANDLOCK_ACCESS_FS_IOCTL_DEV & handled);
     memset(&attr, 0, sizeof(attr));
     attr.handled_access_fs = handled;
     ruleset_fd = (int)syscall(__NR_landlock_create_ruleset, &attr,

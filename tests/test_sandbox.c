@@ -16,6 +16,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/sandbox.h"
+#include "sandbox/sandbox_landlock.h"
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,8 +25,11 @@
 #include <unistd.h>
 #ifdef __linux__
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <netinet/in.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #endif
 
 #define ASSERT(c) do { \
@@ -56,6 +61,43 @@ static int skip_if_isolation_denied(int rc, const char *out, const char *name)
 	fprintf(stderr, "test_sandbox: skip %s (%s)\n", name, out);
 	return 1;
 }
+
+#ifdef __linux__
+static int proc_cmdline_has(const char *needle)
+{
+	DIR *d;
+	struct dirent *e;
+	d = opendir("/proc");
+	if (!d)
+		return 0;
+	while ((e = readdir(d)) != NULL) {
+		char path[64];
+		char buf[256];
+		FILE *f;
+		size_t n;
+		size_t i;
+		if (e->d_name[0] < '1' || e->d_name[0] > '9')
+			continue;
+		snprintf(path, sizeof path, "/proc/%s/cmdline", e->d_name);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+		n = fread(buf, 1, sizeof buf - 1, f);
+		fclose(f);
+		for (i = 0; i < n; i++) {
+			if (buf[i] == '\0')
+				buf[i] = ' ';
+		}
+		buf[n] = '\0';
+		if (strstr(buf, needle) != NULL) {
+			closedir(d);
+			return 1;
+		}
+	}
+	closedir(d);
+	return 0;
+}
+#endif
 
 static int test_isolation_denied_helper(void)
 {
@@ -218,13 +260,136 @@ static int test_workspace_chdir(void)
 static int test_timeout_kills_process(void)
 {
 	char out[4096];
-	int rc = sandbox_exec("sleep 60", out, sizeof(out), 300, NULL);
+	int rc = sandbox_exec("sleep 86401", out, sizeof(out), 300, NULL);
 	if (skip_if_isolation_denied(rc, out, "test_timeout_kills_process"))
 		return 0;
 	ASSERT(rc == 0);
 	ASSERT(strstr(out, "timed out") != NULL || strlen(out) == 0);
+#ifdef __linux__
+	{
+		int tries;
+		for (tries = 0; tries < 20; tries++) {
+			if (!proc_cmdline_has("sleep 86401"))
+				break;
+			{
+				struct timespec ts;
+				ts.tv_sec = 0;
+				ts.tv_nsec = 50 * 1000 * 1000;
+				nanosleep(&ts, NULL);
+			}
+		}
+		ASSERT(proc_cmdline_has("sleep 86401") == 0);
+	}
+#endif
 	return 0;
 }
+
+#ifdef __linux__
+static int test_inherited_fd_is_closed(void)
+{
+	char dir[] = "/tmp/sc_sb_fd_XXXXXX";
+	char path[256];
+	char cmd[128];
+	char out[4096];
+	char *ws;
+	int fd;
+	int rc;
+	ws = mkdtemp(dir);
+	if (!ws) {
+		fprintf(stderr, "test_inherited_fd_is_closed: mkdtemp failed\n");
+		return 1;
+	}
+	snprintf(path, sizeof path, "%s/secret", ws);
+	fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+	if (fd < 0) {
+		rmdir(ws);
+		return 1;
+	}
+	if (write(fd, "SECRET_FD_LEAK\n", 15) != 15) {
+		close(fd);
+		unlink(path);
+		rmdir(ws);
+		return 1;
+	}
+	close(fd);
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		unlink(path);
+		rmdir(ws);
+		return 1;
+	}
+	snprintf(cmd, sizeof cmd, "cat /dev/fd/%d 2>&1; echo EXIT:$?", fd);
+	rc = sandbox_exec(cmd, out, sizeof out, 5000, NULL);
+	close(fd);
+	unlink(path);
+	rmdir(ws);
+	if (skip_if_isolation_denied(rc, out, "test_inherited_fd_is_closed"))
+		return 0;
+	ASSERT(rc == 0);
+	ASSERT(strstr(out, "SECRET_FD_LEAK") == NULL);
+	return 0;
+}
+
+static int test_proc_is_namespaced(void)
+{
+	char out[4096];
+	int rc;
+	rc = sandbox_exec("tr '\\0' ' ' < /proc/1/cmdline; echo", out, sizeof out, 5000, NULL);
+	if (skip_if_isolation_denied(rc, out, "test_proc_is_namespaced"))
+		return 0;
+	ASSERT(rc == 0);
+	ASSERT(strstr(out, "systemd") == NULL);
+	ASSERT(strstr(out, "sh") != NULL);
+	return 0;
+}
+
+static int test_landlock_restrict_denies_etc_passwd(void)
+{
+	char workspace[] = "/tmp/sc_ll_XXXXXX";
+	char *ws;
+	pid_t pid;
+	int st;
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_landlock_restrict_denies_etc_passwd: mkdtemp failed\n");
+		return 1;
+	}
+	pid = fork();
+	if (pid < 0) {
+		rmdir(ws);
+		return 1;
+	}
+	if (pid == 0) {
+		char p[256];
+		FILE *f;
+		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+			_exit(3);
+		if (sandbox_landlock_restrict_to_workspace(ws) != 0)
+			_exit(2);
+		snprintf(p, sizeof p, "%s/ok", ws);
+		f = fopen(p, "w");
+		if (!f)
+			_exit(4);
+		fclose(f);
+		unlink(p);
+		_exit(access("/etc/passwd", R_OK) == 0 ? 1 : 0);
+	}
+	if (waitpid(pid, &st, 0) < 0) {
+		rmdir(ws);
+		return 1;
+	}
+	rmdir(ws);
+	if (!WIFEXITED(st))
+		return 1;
+	if (WEXITSTATUS(st) == 2 || WEXITSTATUS(st) == 3) {
+		fprintf(stderr, "test_sandbox: skip test_landlock_restrict_denies_etc_passwd (status %d)\n",
+			WEXITSTATUS(st));
+		return 0;
+	}
+	ASSERT(WEXITSTATUS(st) == 0);
+	return 0;
+}
+#endif
 
 #ifdef __linux__
 static int test_shadow_not_accessible(void)
@@ -237,6 +402,7 @@ static int test_shadow_not_accessible(void)
 		return 0;
 	ASSERT(rc == 0);
 	ASSERT(strlen(out) > 0);
+	ASSERT(strstr(out, "root:") == NULL);
 	return 0;
 }
 
@@ -481,6 +647,9 @@ int main(void)
 	RUN(test_workspace_chdir());
 	RUN(test_timeout_kills_process());
 #ifdef __linux__
+	RUN(test_inherited_fd_is_closed());
+	RUN(test_proc_is_namespaced());
+	RUN(test_landlock_restrict_denies_etc_passwd());
 	RUN(test_shadow_not_accessible());
 	RUN(test_workspace_landlock_blocks_symlink_escape());
 	RUN(test_workspace_landlock_blocks_abs_etc());
