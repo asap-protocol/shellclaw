@@ -310,7 +310,8 @@ int sandbox_exec(const char *cmd, char *out, size_t out_cap,
         close(errpipe[0]);
         iso = setup_child_process(pipefd[1], workspace);
         if (iso != 0) {
-            (void)write(errpipe[1], &iso, 1);
+            ssize_t n = write(errpipe[1], &iso, 1);
+            (void)n;
             _exit(1);
         }
         close(errpipe[1]);
