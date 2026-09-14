@@ -27,9 +27,11 @@
  *     even inside quotes (`eval 'PWD=;'`) or after a comma; `env -i`, `env -iu`,
  *     `env -u` / `--unset` HOME|PWD, POSIX `read HOME|PWD`, and `os.environ.pop`/`del`/
  *     `clear` / `os.unsetenv` / `os.putenv` of those names fail closed. Quote-split `file:` schemes
- *     (`f'ile://...`, `'f'+'ile://...'`) and hex/unicode-hidden schemes (`\\x66ile:`, `\\u0066ile:`)
- *     are joined before the URL check. `../` after
- *     `://` is still containment-checked so URL-disguised walks cannot skip the gate.
+ *     (`f'ile://...`, `'f'+'ile://...'`) and hex/unicode/octal-hidden schemes
+ *     (`\\x66ile:`, `\\u0066ile:`, `\\146ile:`, `f\\ile:`) are joined before the URL check.
+ *     POSIX `\\` + newline line continuation is collapsed before HOME/PWD and `file:` scans.
+ *     `printf -v HOME|PWD` and `os.environ["HOME"]=` / `.update({"HOME":...})` fail closed.
+ *     `../` after `://` is still containment-checked so URL-disguised walks cannot skip the gate.
  *
  * Both checks are intentionally conservative and may produce false positives.
  * They are a best-effort defence-in-depth layer. sandbox_exec() isolates
