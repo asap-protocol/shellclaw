@@ -42,7 +42,7 @@ The primary goals are: prevent sandboxed shell commands from escaping to host de
 | Shell (sandbox on) | `fork()` + user ns when needed + `unshare(CLONE_NEWNS \| CLONE_NEWNET \| CLONE_NEWPID)` + fork for PID 1 + Landlock workspace bound + `prctl(PR_SET_NO_NEW_PRIVS)` | Fail-closed if namespaces or Landlock cannot apply. Isolation uses a control pipe, not `sh` exit 122/123. See [Linux sandbox (Jetson)](#linux-sandbox-jetson) |
 | Shell (sandbox off) | Plain `fork()` + substring fallback blocklist | **Not** a security boundary; stderr warning |
 | Allowlist | Substring blocklist + workspace containment (ancestor walk, quoted/embedded `/` `~`, `$HOME`/`$PWD`, `file:` URLs, relative names) | Defense-in-depth string scan; Landlock is the kernel host-FS bound |
-| Landlock | Ruleset on configured `workspace_path` (RW workspace + RO `/bin` `/usr` `/lib` …; RW `/dev/null`) | Primary host-FS gate; blocks symlink and `chr(47)+` host reads |
+| Landlock | Ruleset on configured `workspace_path` (RW workspace + traverse-only `/` + RO `/bin` `/usr` `/lib` …; RW `/dev/null`). Child `fchdir`s the workspace before `restrict_self`. | Primary host-FS gate; `/` is `READ_DIR` only so `/etc/passwd` stays closed. Blocks symlink and `chr(47)+` host reads |
 | cgroups v2 | `memory.max`, `cpu.max` on child PID | Best-effort; non-fatal if cgroup write fails |
 | Hardware GPIO/I2C | libgpiod / `i2c-dev` in agent process | Not exposed inside shell namespace |
 
