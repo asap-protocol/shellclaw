@@ -3,8 +3,9 @@
  * @brief Shell tool: execute commands, with optional sandbox isolation.
  *
  * When config_sandbox_enabled() is true, commands are checked via
- * allowlist_check_shell_command() and executed inside sandbox_exec() (namespace
- * isolation + cgroups v2 where available).
+ * allowlist_check_shell_command() and executed inside sandbox_exec()
+ * (namespaces + Landlock workspace bound + cgroups v2 where available).
+ * Isolation failure is fail-closed.
  *
  * When the sandbox is disabled (default), a best-effort substring blocklist
  * is applied and the command runs via fork()/execl() with the same pipe-and-
