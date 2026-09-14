@@ -25,6 +25,18 @@ jobs:
       - name: Static analysis (cppcheck)
         run: make static
 
+      # Ubuntu 24.04 AppArmor blocks unshare(CLONE_NEWUSER) in unsigned
+      # binaries. sandbox_exec fail-closes without namespaces; tests need the
+      # user ns so Landlock/netns assertions can run. Not a product bypass.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined_userns=0
+          fi
+
       - name: Build and test (libgpiod present)
         run: make clean && make test
         env:
