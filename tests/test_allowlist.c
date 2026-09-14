@@ -5,6 +5,8 @@
  * Tests cover: built-in blocklist patterns, workspace-only path containment,
  * realpath-based symlink escape detection, and edge cases (NULL, empty string).
  */
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/allowlist.h"
@@ -201,6 +203,384 @@ static int test_symlink_escape(void)
 #endif
 }
 
+static int test_workspace_only_blocks_quoted_path(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+
+	cfg.workspace_path = "/tmp";
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat '/etc/passwd'", &cfg, reason, sizeof(reason)) == 1);
+	ASSERT(allowlist_check_shell_command("cat \"/etc/passwd\"", &cfg, reason, sizeof(reason)) == 1);
+	return 0;
+}
+
+static int test_workspace_only_blocks_embedded_path_in_python(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+
+	cfg.workspace_path = "/tmp";
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('/etc/passwd').read()\"", &cfg, reason, sizeof(reason)) == 1);
+	ASSERT(strstr(reason, "passwd") != NULL || strstr(reason, "workspace") != NULL);
+	return 0;
+}
+
+static int test_workspace_only_allows_relative_and_url_slashes(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+
+	cfg.workspace_path = "/tmp";
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("echo 3/4", &cfg, reason, sizeof(reason)) == 0);
+	ASSERT(allowlist_check_shell_command("ls src/foo", &cfg, reason, sizeof(reason)) == 0);
+	ASSERT(allowlist_check_shell_command(
+		"curl https://example.com/api", &cfg, reason, sizeof(reason)) == 0);
+	return 0;
+}
+
+static int test_workspace_only_blocks_file_url(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+
+	cfg.workspace_path = "/tmp";
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat file:///etc/passwd", &cfg, reason, sizeof(reason)) == 1);
+	return 0;
+}
+
+static int test_workspace_only_blocks_home_env_expansion(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_home_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_home_env_expansion: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat $HOME/.shellclaw/auth_tokens.json",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	ASSERT(strstr(reason, "escapes workspace") != NULL ||
+	       strstr(reason, "unresolved") != NULL);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat ${HOME}/.shellclaw/auth_tokens.json",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat $PWD/../outside.txt",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat $'\\x2fetc\\x2fpasswd'",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat \"$HOME/.shellclaw/auth_tokens.json\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat notes.txt", &cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
+static int test_workspace_only_blocks_glued_shell_expansions(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_glue_XXXXXX";
+	char *dir;
+	char *old_pwd;
+	char pwd_copy[256];
+	char outside[512];
+	int rc;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_glued_shell_expansions: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat$IFS/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat${IFS}/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat$'\\x20/etc/passwd'",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('$HOME/.shellclaw/auth_tokens.json')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat\"$HOME/.bashrc\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_glued_shell_expansions: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_glued_shell_expansions: setenv PWD failed\n");
+		return 1;
+	}
+	snprintf(outside, sizeof(outside), "%s/../sc_al_pwd_stolen_%d.txt", dir, (int)getpid());
+	reason[0] = '\0';
+	rc = allowlist_check_shell_command("cat $PWD/../sc_al_pwd_stolen.txt",
+	                                   &cfg, reason, sizeof(reason));
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	ASSERT(rc == 1);
+	ASSERT(allowlist_path_is_under_workspace(outside, dir) == 0);
+	rmdir(dir);
+	return 0;
+}
+
+static int test_dotdot_escape_nonexistent_destination(void)
+{
+	char workspace[] = "/tmp/sc_al_ws_XXXXXX";
+	char *ws;
+	char new_file[256];
+	char escape_path[256];
+	char cmd[640];
+	allowlist_config_t cfg;
+	char reason[256];
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_dotdot_escape_nonexistent_destination: mkdtemp failed\n");
+		return 1;
+	}
+	snprintf(new_file, sizeof(new_file), "%s/brand_new.txt", ws);
+	ASSERT(allowlist_path_is_under_workspace(new_file, ws) == 1);
+	snprintf(escape_path, sizeof(escape_path),
+	         "%s/../../tmp/sc_al_stolen_%d", ws, (int)getpid());
+	ASSERT(allowlist_path_is_under_workspace(escape_path, ws) == 0);
+	cfg.workspace_path = ws;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	snprintf(cmd, sizeof(cmd), "cp %s/memory.db %s", ws, escape_path);
+	ASSERT(allowlist_check_shell_command(cmd, &cfg, reason, sizeof(reason)) == 1);
+	rmdir(ws);
+	return 0;
+}
+
+static int test_dotdot_escape_missing_component_before_dotdot(void)
+{
+	char workspace[] = "/tmp/sc_al_ws_XXXXXX";
+	char *ws;
+	char escape_path[256];
+	char cmd[640];
+	allowlist_config_t cfg;
+	char reason[256];
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_dotdot_escape_missing_component_before_dotdot: mkdtemp failed\n");
+		return 1;
+	}
+	snprintf(escape_path, sizeof(escape_path),
+	         "%s/nope/../../../tmp/sc_al_stolen2_%d", ws, (int)getpid());
+	ASSERT(allowlist_path_is_under_workspace(escape_path, ws) == 0);
+	cfg.workspace_path = ws;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	snprintf(cmd, sizeof(cmd), "cp %s/memory.db %s", ws, escape_path);
+	ASSERT(allowlist_check_shell_command(cmd, &cfg, reason, sizeof(reason)) == 1);
+	rmdir(ws);
+	return 0;
+}
+
+static int test_workspace_only_blocks_file_url_variants(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+
+	cfg.workspace_path = "/tmp";
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl file:/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl file://localhost/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl file://etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl https://example.com/api",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	return 0;
+}
+
+static int test_workspace_only_blocks_embedded_relative_dotdot(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_rel_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_embedded_relative_dotdot: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("python3 -c \"open('../secret')\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("python3 -c \"open('foo/../../etc/passwd')\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("python3 -c \"open('notes.txt')\"",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
+static int test_workspace_only_blocks_home_pwd_assignment(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_asgn_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_home_pwd_assignment: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("PWD=; cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("HOME=; cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("export PWD=; cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("unset HOME; cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	rmdir(dir);
+	return 0;
+}
+
+static int test_workspace_only_blocks_symlink_dotdot(void)
+{
+#ifdef __linux__
+	char workspace[] = "/tmp/sc_al_sydd_XXXXXX";
+	char link_path[256];
+	char escape_path[512];
+	char cmd[640];
+	char *ws;
+	allowlist_config_t cfg;
+	char reason[256];
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_workspace_only_blocks_symlink_dotdot: mkdtemp failed\n");
+		return 1;
+	}
+	snprintf(link_path, sizeof(link_path), "%s/out", ws);
+	if (symlink("/", link_path) != 0) {
+		rmdir(ws);
+		fprintf(stderr, "test_workspace_only_blocks_symlink_dotdot: symlink failed\n");
+		return 1;
+	}
+	snprintf(escape_path, sizeof(escape_path), "%s/../etc/passwd", link_path);
+	ASSERT(allowlist_path_is_under_workspace(escape_path, ws) == 0);
+	cfg.workspace_path = ws;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	snprintf(cmd, sizeof(cmd), "cat %s/../etc/passwd", link_path);
+	ASSERT(allowlist_check_shell_command(cmd, &cfg, reason, sizeof(reason)) == 1);
+	unlink(link_path);
+	rmdir(ws);
+	return 0;
+#else
+	fprintf(stderr, "test_workspace_only_blocks_symlink_dotdot: skipped (Linux-specific)\n");
+	return 0;
+#endif
+}
+
+static int test_workspace_only_blocks_percent_encoded_file_url(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+
+	cfg.workspace_path = "/tmp";
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl file:///etc/%2e%2e/%2e%2e/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl https://example.com/api",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	return 0;
+}
+
+static int test_relative_symlink_indirection(void)
+{
+#ifdef __linux__
+	char workspace[] = "/tmp/sc_al_reltok_XXXXXX";
+	char leak_path[256];
+	char *ws;
+	allowlist_config_t cfg;
+	char reason[256];
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_relative_symlink_indirection: mkdtemp failed\n");
+		return 1;
+	}
+	snprintf(leak_path, sizeof(leak_path), "%s/leak", ws);
+	if (symlink("/etc/passwd", leak_path) != 0) {
+		rmdir(ws);
+		fprintf(stderr, "test_relative_symlink_indirection: symlink failed\n");
+		return 1;
+	}
+	cfg.workspace_path = ws;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat leak", &cfg, reason, sizeof(reason)) == 1);
+	ASSERT(strstr(reason, "escapes") != NULL || strstr(reason, "workspace") != NULL);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("echo hello", &cfg, reason, sizeof(reason)) == 0);
+	unlink(leak_path);
+	rmdir(ws);
+	return 0;
+#else
+	fprintf(stderr, "test_relative_symlink_indirection: skipped (Linux-specific)\n");
+	return 0;
+#endif
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
@@ -224,7 +604,21 @@ int main(void)
 	RUN(test_path_prefix_no_slash());
 	RUN(test_workspace_only_blocks_outside_path());
 	RUN(test_workspace_only_allows_inside_path());
+	RUN(test_workspace_only_blocks_quoted_path());
+	RUN(test_workspace_only_blocks_embedded_path_in_python());
+	RUN(test_workspace_only_allows_relative_and_url_slashes());
+	RUN(test_workspace_only_blocks_file_url());
+	RUN(test_workspace_only_blocks_home_env_expansion());
+	RUN(test_workspace_only_blocks_glued_shell_expansions());
 	RUN(test_symlink_escape());
+	RUN(test_dotdot_escape_nonexistent_destination());
+	RUN(test_dotdot_escape_missing_component_before_dotdot());
+	RUN(test_workspace_only_blocks_file_url_variants());
+	RUN(test_workspace_only_blocks_embedded_relative_dotdot());
+	RUN(test_workspace_only_blocks_home_pwd_assignment());
+	RUN(test_workspace_only_blocks_symlink_dotdot());
+	RUN(test_workspace_only_blocks_percent_encoded_file_url());
+	RUN(test_relative_symlink_indirection());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }

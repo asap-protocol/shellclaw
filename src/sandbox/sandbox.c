@@ -1,14 +1,15 @@
 /**
  * @file sandbox.c
- * @brief Process sandbox: Linux namespace isolation, cgroups v2, timeout/kill.
+ * @brief Process sandbox: Linux namespaces, Landlock FS bound, cgroups v2.
  *
- * Linux path: fork() + unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID) in the
- * child, giving the shell and its children mount, network, and PID namespace
- * isolation respectively.  Does not mount(2), bind-mount, or pivot_root(2); Jetson
- * GPU nodes (/dev/nvhost-*, /dev/nvgpu, /dev/nvmap) are never injected into the
- * namespace — see docs/SECURITY.md.  cgroups v2 memory.max and cpu.max limits are applied
- * via the host cgroup hierarchy when available; the function degrades gracefully
- * if the kernel does not expose writable cgroup controllers.
+ * Linux path: fork the isolator, then unshare mount/network/PID (user ns
+ * first when unprivileged). Isolation failure is reported on a control pipe,
+ * not via sh-compatible exit codes. After CLONE_NEWPID, fork so the command
+ * is PID 1 (unshare does not move the caller). That child fchdir's the
+ * workspace (Landlock cannot walk `/tmp` after restrict_self), remounts
+ * procfs, applies Landlock, sets PR_SET_PDEATHSIG, and closes fds >= 3
+ * so a timeout SIGKILL of the isolator cannot leave the command under
+ * host init. cgroups v2 limits degrade if unavailable.
  *
  * Non-Linux path: plain fork() + execl(); a warning is emitted to stderr.
  */
@@ -16,6 +17,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/sandbox.h"
+#include "sandbox/sandbox_landlock.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -31,18 +33,18 @@
 
 #ifdef __linux__
 #include <sched.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
 #endif
 
 #define DEFAULT_TIMEOUT_MS     10000
-#define DEFAULT_MEMORY_MAX     (64UL * 1024UL * 1024UL)  /* 64 MiB */
+#define DEFAULT_MEMORY_MAX     (64UL * 1024UL * 1024UL)
 #define DEFAULT_CGROUP_BASE    "/sys/fs/cgroup"
 #define CGROUP_NAME_PREFIX     "shellclaw_sb_"
 #define PIPE_POLL_SLICE_MS     500
-
-/* ------------------------------------------------------------------ */
-/* cgroups v2 helpers (Linux only)                                      */
-/* ------------------------------------------------------------------ */
+#define SANDBOX_ISO_NS         1
+#define SANDBOX_ISO_LL         2
 
 #ifdef __linux__
 
@@ -66,10 +68,6 @@ static int cgroup_controllers_available(const char *base)
     return access(path, F_OK) == 0;
 }
 
-/**
- * Create a cgroup at <base>/<name>, write resource limits, assign @p pid.
- * Returns 0 on success; the caller must call cgroup_remove() when done.
- */
 static int cgroup_create(const char *base, const char *name, pid_t pid,
                          size_t memory_max, const char *cpu_max_str)
 {
@@ -93,10 +91,6 @@ static void cgroup_remove(const char *base, const char *name)
 }
 
 #endif /* __linux__ */
-
-/* ------------------------------------------------------------------ */
-/* Pipe drain with timeout                                              */
-/* ------------------------------------------------------------------ */
 
 static size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms)
 {
@@ -136,29 +130,157 @@ static size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms)
     return total;
 }
 
-/* ------------------------------------------------------------------ */
-/* Child setup before exec                                              */
-/* ------------------------------------------------------------------ */
+#ifdef __linux__
 
-static void setup_child_process(int pipe_wr, const char *workspace)
+static int write_proc_str(const char *path, const char *s)
+{
+    int fd;
+    ssize_t n;
+    size_t len;
+
+    fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    len = strlen(s);
+    n = write(fd, s, len);
+    close(fd);
+    return (n == (ssize_t)len) ? 0 : -1;
+}
+
+static int enter_user_namespace(void)
+{
+    char map[64];
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+
+    if (unshare(CLONE_NEWUSER) != 0) return -1;
+    if (write_proc_str("/proc/self/setgroups", "deny\n") != 0) return -1;
+    snprintf(map, sizeof map, "0 %u 1\n", (unsigned)uid);
+    if (write_proc_str("/proc/self/uid_map", map) != 0) return -1;
+    snprintf(map, sizeof map, "0 %u 1\n", (unsigned)gid);
+    if (write_proc_str("/proc/self/gid_map", map) != 0) return -1;
+    return 0;
+}
+
+static int unshare_isolation_namespaces(void)
+{
+    if (unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID) != 0)
+        return -1;
+    (void)mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+    return 0;
+}
+
+static int isolate_namespaces(void)
+{
+    if (unshare_isolation_namespaces() == 0)
+        return 0;
+    if (enter_user_namespace() != 0)
+        return -1;
+    return unshare_isolation_namespaces();
+}
+
+static int remount_procfs(void)
+{
+    (void)umount2("/proc", MNT_DETACH);
+    if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL) != 0)
+        return -1;
+    return 0;
+}
+
+static int enter_workspace_cwd(const char *workspace)
+{
+    int ws_fd;
+    ws_fd = open(workspace, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (ws_fd < 0)
+        return -1;
+    if (fchdir(ws_fd) != 0) {
+        close(ws_fd);
+        return -1;
+    }
+    close(ws_fd);
+    return 0;
+}
+
+static unsigned char setup_command_process(const char *workspace)
+{
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0)
+        return SANDBOX_ISO_NS;
+    if (workspace && workspace[0] && enter_workspace_cwd(workspace) != 0)
+        _exit(124);
+    if (remount_procfs() != 0)
+        return SANDBOX_ISO_NS;
+    if (workspace && workspace[0] &&
+        sandbox_landlock_restrict_to_workspace(workspace) != 0)
+        return SANDBOX_ISO_LL;
+    return 0;
+}
+
+#endif /* __linux__ */
+
+static void close_inherited_fds(void)
+{
+#if defined(__linux__) && defined(__NR_close_range)
+    if (syscall(__NR_close_range, 3, ~0U, 0) == 0)
+        return;
+#endif
+    {
+        int fd;
+        for (fd = 3; fd < 1024; fd++)
+            (void)close(fd);
+    }
+}
+
+static ssize_t read_isolation_byte(int fd, unsigned char *iso, int timeout_ms)
+{
+    struct pollfd pfd;
+    int r;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    r = poll(&pfd, 1, timeout_ms);
+    if (r <= 0)
+        return -1;
+    {
+        ssize_t n = read(fd, iso, 1);
+        return n;
+    }
+}
+
+static unsigned char setup_child_process(int pipe_wr, const char *workspace)
 {
     close(STDIN_FILENO);
     if (dup2(pipe_wr, STDOUT_FILENO) < 0) _exit(125);
     if (dup2(pipe_wr, STDERR_FILENO) < 0) _exit(125);
     close(pipe_wr);
 #ifdef __linux__
-    setsid();
-    /* Namespace isolation: mount + network + PID (children of this process). */
-    unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID);
-    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-#endif
+    (void)workspace;
+    (void)setsid();
+    if (isolate_namespaces() != 0)
+        return SANDBOX_ISO_NS;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+        return SANDBOX_ISO_NS;
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0)
+        return SANDBOX_ISO_NS;
+#else
     if (workspace && workspace[0])
         if (chdir(workspace) != 0) _exit(124);
+#endif
+    return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Post-drain wait: kill child if still alive                           */
-/* ------------------------------------------------------------------ */
+#ifdef __linux__
+static void wait_and_exit_with_child(pid_t cmd_pid)
+{
+    int st = 0;
+
+    if (waitpid(cmd_pid, &st, 0) < 0)
+        _exit(125);
+    if (WIFEXITED(st))
+        _exit(WEXITSTATUS(st));
+    if (WIFSIGNALED(st))
+        _exit(128 + WTERMSIG(st));
+    _exit(1);
+}
+#endif
 
 static int reap_child(pid_t pid, int *status_out)
 {
@@ -168,29 +290,43 @@ static int reap_child(pid_t pid, int *status_out)
         struct timespec ts;
         int retries;
         kill(pid, SIGKILL);
+        (void)kill(-pid, SIGKILL);
         for (retries = 0; retries < 40; retries++) {
             wr = waitpid(pid, &st, WNOHANG);
             if (wr != 0) break;
             ts.tv_sec = 0;
-            ts.tv_nsec = 50 * 1000 * 1000; /* 50 ms */
+            ts.tv_nsec = 50 * 1000 * 1000;
             nanosleep(&ts, NULL);
         }
         if (wr == 0) waitpid(pid, &st, 0);
         if (status_out) *status_out = st;
-        return 1; /* did time out */
+        return 1;
     }
     if (status_out) *status_out = st;
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Public API                                                           */
-/* ------------------------------------------------------------------ */
+static int report_isolation_failure(char *out, size_t out_cap, unsigned char iso)
+{
+    if (iso == SANDBOX_ISO_LL)
+        snprintf(out, out_cap, "sandbox: Landlock filesystem bound failed");
+    else
+        snprintf(out, out_cap, "sandbox: namespace isolation failed");
+    return -1;
+}
+
+static int close_pipes_pair(int a, int b)
+{
+    close(a);
+    close(b);
+    return -1;
+}
 
 int sandbox_exec(const char *cmd, char *out, size_t out_cap,
                  int timeout_ms, const sandbox_config_t *cfg)
 {
     int pipefd[2];
+    int errpipe[2];
     pid_t pid;
     size_t total;
     int timed_out = 0;
@@ -217,27 +353,55 @@ int sandbox_exec(const char *cmd, char *out, size_t out_cap,
     }
 #endif
     if (pipe(pipefd) != 0) return -1;
-    if (fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) != 0) {
+    if (pipe(errpipe) != 0) {
         close(pipefd[0]);
         close(pipefd[1]);
         return -1;
     }
-    /* Write end must NOT have CLOEXEC so child inherits it. */
+    if (fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(errpipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(errpipe[1], F_SETFD, FD_CLOEXEC) != 0) {
+        close(errpipe[0]);
+        close(errpipe[1]);
+        return close_pipes_pair(pipefd[0], pipefd[1]);
+    }
     pid = fork();
     if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return -1;
+        close(errpipe[0]);
+        close(errpipe[1]);
+        return close_pipes_pair(pipefd[0], pipefd[1]);
     }
     if (pid == 0) {
-        /* Child */
+        unsigned char iso;
         close(pipefd[0]);
-        setup_child_process(pipefd[1], workspace);
+        close(errpipe[0]);
+        iso = setup_child_process(pipefd[1], workspace);
+        if (iso != 0) {
+            if (write(errpipe[1], &iso, 1) < 0) { /* parent fail-closes on EOF */ }
+            _exit(1);
+        }
+#ifdef __linux__
+        {
+            pid_t cmd_pid = fork();
+            if (cmd_pid < 0) _exit(125);
+            if (cmd_pid > 0) {
+                close(errpipe[1]);
+                wait_and_exit_with_child(cmd_pid);
+            }
+            iso = setup_command_process(workspace);
+            if (iso != 0) {
+                if (write(errpipe[1], &iso, 1) < 0) { /* parent fail-closes on EOF */ }
+                _exit(1);
+            }
+        }
+#endif
+        close(errpipe[1]);
+        close_inherited_fds();
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
-    /* Parent */
     close(pipefd[1]);
+    close(errpipe[1]);
 #ifdef __linux__
     if (cgroup_controllers_available(cgroup_base)) {
         snprintf(cgroup_name, sizeof(cgroup_name), "%s%d", CGROUP_NAME_PREFIX, (int)pid);
@@ -247,6 +411,22 @@ int sandbox_exec(const char *cmd, char *out, size_t out_cap,
             fprintf(stderr, "sandbox: cgroup setup failed for pid %d (non-fatal)\n", (int)pid);
     }
 #endif
+    {
+        unsigned char iso = 0;
+        ssize_t n = read_isolation_byte(errpipe[0], &iso, timeout_ms);
+        close(errpipe[0]);
+        if (n != 0) {
+            (void)reap_child(pid, NULL);
+#ifdef __linux__
+            if (used_cgroup)
+                cgroup_remove(cgroup_base, cgroup_name);
+#endif
+            close(pipefd[0]);
+            if (n != 1)
+                iso = SANDBOX_ISO_NS;
+            return report_isolation_failure(out, out_cap, iso);
+        }
+    }
     total = drain_pipe(pipefd[0], out, out_cap, timeout_ms);
     close(pipefd[0]);
     timed_out = reap_child(pid, NULL);

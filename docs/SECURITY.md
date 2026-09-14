@@ -23,7 +23,7 @@ The primary goals are: prevent sandboxed shell commands from escaping to host de
 
 | ID | Finding | Severity | Mitigation | Residual risk | Tests / verification |
 |----|---------|----------|------------|---------------|----------------------|
-| 7.1 | Jetson GPU `/dev` nodes visible in shell mount namespace (no `pivot_root`, no bind-mount isolation) | Medium | Substring blocklist for `/dev/nvhost`, `/dev/nvgpu`, `/dev/nvmap` in `allowlist.c`; `sandbox_exec()` uses `unshare` only | Indirect paths or globs may bypass literal blocklist | `tests/test_allowlist.c` (`test_block_jetson_gpu_devices`) |
+| 7.1 | Jetson GPU `/dev` nodes visible in shell mount namespace (no `pivot_root`, no bind-mount isolation) | Medium | Landlock workspace bound does not grant `/dev/nv*`; substring blocklist for `/dev/nvhost`, `/dev/nvgpu`, `/dev/nvmap` in `allowlist.c` | Without Landlock (non-Linux / sandbox off), globs may bypass the literal blocklist | `tests/test_allowlist.c` (`test_block_jetson_gpu_devices`), `tests/test_sandbox.c` |
 | 7.1 | `pivot_root` hardening not implemented | Low (documented) | Allowlist + namespace network/PID isolation | Full mount-slave `/dev` tmpfs deferred post-v1.0 | Source audit of `sandbox.c` |
 | 7.2 | Camera capture could invoke shell with user-controlled pipeline strings | High (if present) | **Not present:** `hardware_camera_capture()` uses `execvp` + fixed `argv[]`; strict input validation | N/A when validation holds | `tests/test_hardware_camera.c` (injection + `test_no_shell_invocation`) |
 | 7.3 | Sandboxed shell could reach Argus IPC socket | Medium | Blocklist `/tmp/argus_socket` and `argus_socket`; camera spawn runs outside shell sandbox by design | Compromised agent process can still spawn GStreamer | `tests/test_allowlist.c` (`test_block_argus_socket`) |
@@ -39,9 +39,10 @@ The primary goals are: prevent sandboxed shell commands from escaping to host de
 
 | Surface | Mechanism | Notes |
 |---------|-----------|-------|
-| Shell (sandbox on) | `fork()` + `unshare(CLONE_NEWNS \| CLONE_NEWNET \| CLONE_NEWPID)` + `prctl(PR_SET_NO_NEW_PRIVS)` | See [Linux sandbox (Jetson)](#linux-sandbox-jetson) |
+| Shell (sandbox on) | `fork()` + user ns when needed + `unshare(CLONE_NEWNS \| CLONE_NEWNET \| CLONE_NEWPID)` + fork for PID 1 + Landlock workspace bound + `prctl(PR_SET_NO_NEW_PRIVS)` | Fail-closed if namespaces or Landlock cannot apply. Isolation uses a control pipe, not `sh` exit 122/123. See [Linux sandbox (Jetson)](#linux-sandbox-jetson) |
 | Shell (sandbox off) | Plain `fork()` + substring fallback blocklist | **Not** a security boundary; stderr warning |
-| Allowlist | Substring blocklist + optional workspace `realpath` containment | Defense in depth before `sandbox_exec` |
+| Allowlist | Substring blocklist + workspace containment (ancestor walk, quoted/embedded `/` `~`, `$HOME`/`$PWD`, `file:` URLs, relative names) | Defense-in-depth string scan; Landlock is the kernel host-FS bound |
+| Landlock | Ruleset on configured `workspace_path` (RW workspace + traverse-only `/` + RO `/bin` `/usr` `/lib` …; RW `/dev/null`). Child `fchdir`s the workspace before `restrict_self`. | Primary host-FS gate; `/` is `READ_DIR` only so `/etc/passwd` stays closed. Blocks symlink and `chr(47)+` host reads |
 | cgroups v2 | `memory.max`, `cpu.max` on child PID | Best-effort; non-fatal if cgroup write fails |
 | Hardware GPIO/I2C | libgpiod / `i2c-dev` in agent process | Not exposed inside shell namespace |
 
@@ -55,13 +56,13 @@ Implementation: [`src/sandbox/sandbox.c`](../src/sandbox/sandbox.c), [`src/sandb
 
 ### GPU device nodes — not bind-mounted
 
-`sandbox_exec()` does **not** call `mount()`, `bind()`, or `pivot_root()`. The child namespace is created only with:
+`sandbox_exec()` does **not** call `bind()` or `pivot_root()`. After `unshare(CLONE_NEWNS)` the child makes the copied mount tree `MS_REC|MS_PRIVATE` and, once the command is PID 1, remounts `proc` on `/proc`. It does not bind-mount Tegra GPU devices.
 
 ```c
 unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID);
 ```
 
-Therefore ShellClaw never bind-mounts Tegra GPU devices into the sandbox. In particular, these paths are **not** explicitly mounted into the shell namespace:
+In particular, these paths are **not** explicitly mounted into the shell namespace:
 
 - `/dev/nvhost-*`
 - `/dev/nvgpu`
@@ -69,11 +70,11 @@ Therefore ShellClaw never bind-mounts Tegra GPU devices into the sandbox. In par
 
 ### `pivot_root` — not used (v1.0)
 
-The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened pattern. **v1.0 does not implement `pivot_root`.** After `unshare(CLONE_NEWNS)`, the child inherits a **copy** of the host mount tree (default propagation). Jetson `/dev` nodes remain visible inside the new mount namespace unless blocked elsewhere.
+The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened pattern. **v1.0 does not implement `pivot_root`.** After `unshare(CLONE_NEWNS)`, the child inherits a **copy** of the host mount tree (made `MS_PRIVATE`). Jetson `/dev` nodes remain in that mount namespace; Landlock (when a workspace path is set) is the kernel FS bound and does not grant `/dev/nvhost`, `/dev/nvgpu`, or `/dev/nvmap`.
 
-**Mitigation in v1.0:** the shell allowlist rejects commands whose text references `/dev/nvhost`, `/dev/nvgpu`, or `/dev/nvmap` (substring blocklist). Regression tests live in `tests/test_allowlist.c` (`test_block_jetson_gpu_devices`).
+**Mitigation in v1.0:** Landlock plus the shell allowlist, which rejects commands whose text references `/dev/nvhost`, `/dev/nvgpu`, or `/dev/nvmap` (substring blocklist). Regression tests live in `tests/test_allowlist.c` (`test_block_jetson_gpu_devices`) and `tests/test_sandbox.c`.
 
-**Residual risk:** a crafted command that opens GPU nodes without those literal substrings (e.g. shell globs or indirect paths) may still reach devices until a future release adds mount-slave propagation, a minimal `/dev` tmpfs, or seccomp. Track as post-v1.0 hardening.
+**Residual risk:** a crafted command that opens GPU nodes without those literal substrings (e.g. shell globs) is still denied by Landlock when a workspace path is set (`/dev/nv*` is not in the grant list). Without Landlock (non-Linux, or sandbox off) the substring blocklist remains best-effort. `workspace_only` walks a missing destination’s existing ancestor, collapses `..` lexically (without cancelling `..` across a symlink), scans quoted/embedded `/` `~` and relative `../`, extracts and percent-decodes `file:` URLs, fail-closes in-command `HOME`/`PWD` assignment, and expands or fail-closes `$` on the full command (including glued `$IFS` and mid-token `$HOME`). The string scanner is not a language interpreter: `open(chr(47)+'etc/passwd')` has no path character in the command text and stays residual **on the scanner**; Landlock is the kernel bound for that class. Encoded-slash / identity-escape cat-and-mouse is frozen. Conservative regex false positives such as `awk '/foo/'` remain.
 
 ### Board-agnostic blocklist entries (Jetson literals)
 
@@ -82,7 +83,7 @@ The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened 
 ### Network and PID isolation
 
 - `CLONE_NEWNET` — sandboxed shell has no routable network (no interface setup in child).
-- `CLONE_NEWPID` — PID namespace; child is PID 1 in its namespace for the `sh -c` session.
+- `CLONE_NEWPID` — PID namespace; the isolator forks so the command process is PID 1 (unshare does not move the caller).
 
 ### JetPack 6 / kernel 5.15 note
 
@@ -120,7 +121,7 @@ On Jetson CSI cameras, frame capture uses GStreamer `nvarguscamerasrc`, which is
 | `/tmp/argus_socket` | Unix domain socket used by Argus clients (JetPack 6.x default path) |
 | `gst-launch-1.0` + `nvarguscamerasrc` | Child process spawned by ShellClaw **outside** the shell sandbox |
 
-ShellClaw does **not** bind-mount `/tmp/argus_socket` into the sandboxed shell namespace (`sandbox_exec` uses only `unshare`, per § [Linux sandbox (Jetson)](#linux-sandbox-jetson)).
+ShellClaw does **not** bind-mount `/tmp/argus_socket` into the sandboxed shell namespace (`sandbox_exec` uses `unshare` without `pivot_root`, per § [Linux sandbox (Jetson)](#linux-sandbox-jetson)). Landlock does not grant that socket path.
 
 ### Who may talk to Argus
 
@@ -267,8 +268,8 @@ This section summarizes Jetson Orin Nano Super / JetPack 6.2.x concerns that do 
 
 | Surface | Jetson-specific behavior | Primary mitigation | Source |
 |---------|-------------------------|-------------------|--------|
-| Shell sandbox | Tegra GPU character devices remain in inherited mount namespace | Literal blocklist on `/dev/nvhost*`, `/dev/nvgpu`, `/dev/nvmap` | `src/sandbox/allowlist.c` |
-| Shell sandbox | No `pivot_root` / minimal `/dev` in v1.0 | Documented residual risk; allowlist defense in depth | `src/sandbox/sandbox.c` |
+| Shell sandbox | Tegra GPU character devices remain in inherited mount namespace | Landlock does not grant `/dev/nv*`; literal blocklist on `/dev/nvhost*`, `/dev/nvgpu`, `/dev/nvmap` | `src/sandbox/allowlist.c`, `sandbox_landlock.c` |
+| Shell sandbox | No `pivot_root` / minimal `/dev` in v1.0 | Landlock workspace bound (fail-closed); allowlist defense in depth | `src/sandbox/sandbox.c` |
 | CSI camera | Argus daemon (`root`) + `/tmp/argus_socket` | Shell blocklist; camera only via agent `execvp` path | `src/hardware/hardware_camera.c`, `allowlist.c` |
 | Gateway | GPU telemetry via `tegrastats` parsing | Bearer auth on `/api/hardware/gpu`; read-only GET | `src/gateway/routes_hardware.c` |
 | GPIO / I2C | `tegra234-gpio` chips via libgpiod | Hardware tools run in agent process, not shell namespace | `src/hardware/` backends |
@@ -284,8 +285,8 @@ This section summarizes Jetson Orin Nano Super / JetPack 6.2.x concerns that do 
 
 | Area | Directory / file | Security-relevant behavior |
 |------|------------------|----------------------------|
-| Sandbox isolation | [`src/sandbox/sandbox.c`](../src/sandbox/sandbox.c) | `unshare` namespaces, cgroups v2 limits, no mount/bind |
-| Command policy | [`src/sandbox/allowlist.c`](../src/sandbox/allowlist.c) | Blocklist (incl. Jetson GPU + Argus), workspace path containment |
+| Sandbox isolation | [`src/sandbox/sandbox.c`](../src/sandbox/sandbox.c), [`src/sandbox/sandbox_landlock.c`](../src/sandbox/sandbox_landlock.c) | user ns + `unshare` + PID-1 fork, Landlock workspace bound, cgroups v2, fail-closed isolation |
+| Command policy | [`src/sandbox/allowlist.c`](../src/sandbox/allowlist.c) | Blocklist (incl. Jetson GPU + Argus), workspace path containment (DiD) |
 | Gateway auth | [`src/gateway/http_lws.c`](../src/gateway/http_lws.c) | `requires_auth()` Bearer gate for `/api/*` |
 | Hardware HTTP API | [`src/gateway/routes_hardware.c`](../src/gateway/routes_hardware.c) | Read-only GET handlers, camera POST deferred stub |
 | Rate limits | [`src/gateway/rate_limit.c`](../src/gateway/rate_limit.c) | Per-IP `/asap` RPM (64-slot table); reuses expired windows; **fail-closed** (429) when table is full and no slot expired |
@@ -293,7 +294,7 @@ This section summarizes Jetson Orin Nano Super / JetPack 6.2.x concerns that do 
 | Signing keys | [`src/asap/manifest_keys.c`](../src/asap/manifest_keys.c) | `0600` create, loose-perm rejection, load/rotate guards |
 | Signed manifest gate | [`src/gateway/routes.c`](../src/gateway/routes.c) | `manifest_keys_ensure_loaded()` before `manifest_build_signed_json()` |
 
-Automated regression coverage: `tests/test_allowlist.c`, `tests/test_hardware_camera.c`, `tests/test_gateway_http.c`, `tests/test_rate_limit.c`, `tests/test_manifest_build`, `tests/test_manifest_keys`.
+Automated regression coverage: `tests/test_allowlist.c`, `tests/test_sandbox.c`, `tests/test_hardware_camera.c`, `tests/test_gateway_http.c`, `tests/test_rate_limit.c`, `tests/test_manifest_build`, `tests/test_manifest_keys`.
 
 ### Board-agnostic blocklist entries (Jetson literals)
 
