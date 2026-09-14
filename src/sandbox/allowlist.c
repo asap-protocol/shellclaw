@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* ------------------------------------------------------------------ */
 /* Built-in blocklist patterns                                          */
@@ -178,6 +180,165 @@ static int is_ident_cont(unsigned char c)
     return is_ident_start(c) || (c >= '0' && c <= '9');
 }
 
+static int is_cmd_word_start(const char *text, const char *p)
+{
+    unsigned char prev;
+
+    if (!text || !p || p < text)
+        return 0;
+    if (p == text)
+        return 1;
+    prev = (unsigned char)p[-1];
+    return prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' ||
+           prev == ';' || prev == '|' || prev == '&' || prev == '(' ||
+           prev == '{' || prev == ')';
+}
+
+static int name_is_home_or_pwd(const char *p, size_t *nlen)
+{
+    if (strncmp(p, "HOME", 4) == 0 && !is_ident_cont((unsigned char)p[4])) {
+        if (nlen)
+            *nlen = 4;
+        return 1;
+    }
+    if (strncmp(p, "PWD", 3) == 0 && !is_ident_cont((unsigned char)p[3])) {
+        if (nlen)
+            *nlen = 3;
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * Process getenv(HOME/PWD) is wrong after `PWD=; cat $PWD/etc/passwd`.
+ * Fail closed when the command text assigns, exports, or unsets those names.
+ */
+static int command_mutates_home_or_pwd(const char *text)
+{
+    const char *p;
+
+    if (!text)
+        return 0;
+    for (p = text; *p; p++) {
+        size_t nlen = 0;
+
+        if (!is_cmd_word_start(text, p))
+            continue;
+        if (name_is_home_or_pwd(p, &nlen) && p[nlen] == '=')
+            return 1;
+        if (strncmp(p, "unset", 5) == 0 && !is_ident_cont((unsigned char)p[5])) {
+            const char *q = p + 5;
+
+            while (*q == ' ' || *q == '\t')
+                q++;
+            while (*q && *q != ';' && *q != '|' && *q != '&' && *q != '\n') {
+                if (name_is_home_or_pwd(q, &nlen))
+                    return 1;
+                while (*q && *q != ' ' && *q != '\t' && *q != ';' &&
+                       *q != '|' && *q != '&' && *q != '\n')
+                    q++;
+                while (*q == ' ' || *q == '\t')
+                    q++;
+            }
+        }
+        if (strncmp(p, "export", 6) == 0 && !is_ident_cont((unsigned char)p[6])) {
+            const char *q = p + 6;
+
+            while (*q == ' ' || *q == '\t')
+                q++;
+            while (*q && *q != ';' && *q != '|' && *q != '&' && *q != '\n') {
+                if (name_is_home_or_pwd(q, &nlen))
+                    return 1;
+                while (*q && *q != ' ' && *q != '\t' && *q != ';' &&
+                       *q != '|' && *q != '&' && *q != '\n')
+                    q++;
+                while (*q == ' ' || *q == '\t')
+                    q++;
+            }
+        }
+    }
+    return 0;
+}
+
+/**
+ * Bytes of a leading-slash escape that decodes to `/` (`\x2f`, `\u002f`,
+ * `\U0000002f`, octal `\57` / `\057`). Not a Python interpreter: `chr(47)`
+ * with no slash encoding in the text is still out of scope.
+ */
+static size_t encoded_leading_slash_len(const char *p)
+{
+    int val;
+    size_t n;
+
+    if (!p || p[0] != '\\' || p[1] == '\0')
+        return 0;
+    if ((p[1] == 'x' || p[1] == 'X') && p[2] == '2' &&
+        (p[3] == 'f' || p[3] == 'F'))
+        return 4;
+    if (p[1] == 'u' && p[2] == '0' && p[3] == '0' && p[4] == '2' &&
+        (p[5] == 'f' || p[5] == 'F'))
+        return 6;
+    if (p[1] == 'U' && p[2] == '0' && p[3] == '0' && p[4] == '0' &&
+        p[5] == '0' && p[6] == '0' && p[7] == '0' && p[8] == '2' &&
+        (p[9] == 'f' || p[9] == 'F'))
+        return 10;
+    if (p[1] >= '0' && p[1] <= '7') {
+        val = 0;
+        n = 0;
+        while (n < 3 && p[1 + n] >= '0' && p[1 + n] <= '7') {
+            val = val * 8 + (p[1 + n] - '0');
+            n++;
+            if (val == 47)
+                return 1 + n;
+        }
+    }
+    return 0;
+}
+
+static int hex_nibble(unsigned char c)
+{
+    if (c >= '0' && c <= '9')
+        return (int)(c - '0');
+    if (c >= 'a' && c <= 'f')
+        return (int)(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F')
+        return (int)(c - 'A' + 10);
+    return -1;
+}
+
+/** Percent-decode @p s in place. Invalid `%` and `%00` fail closed. */
+static int percent_decode_inplace(char *s)
+{
+    char *r;
+    char *w;
+
+    if (!s)
+        return -1;
+    r = s;
+    w = s;
+    while (*r) {
+        if (r[0] == '%') {
+            int hi;
+            int lo;
+            unsigned char v;
+
+            hi = hex_nibble((unsigned char)r[1]);
+            lo = hex_nibble((unsigned char)r[2]);
+            if (hi < 0 || lo < 0)
+                return -1;
+            v = (unsigned char)((hi << 4) | lo);
+            if (v == 0)
+                return -1;
+            *w++ = (char)v;
+            r += 3;
+            continue;
+        }
+        *w++ = *r++;
+    }
+    *w = '\0';
+    return 0;
+}
+
 /** `${HOME}/` and `${PWD}/` are one expansion; `${IFS}/` is a new FS root. */
 static int slash_follows_home_or_pwd_brace(const char *text, const char *slash)
 {
@@ -315,6 +476,46 @@ static int block_if_embedded_paths_escape(const char *text, const char *workspac
     return 0;
 }
 
+/**
+ * Reconstruct `/` + the following path body after `\x2f` / `\57` / `\u002f`
+ * so a later literal slash in `etc/passwd` cannot hide the encoded root.
+ */
+static int block_if_encoded_slash_escapes(const char *text, const char *workspace_root,
+                                          char *reason_buf, size_t reason_cap)
+{
+    const char *p;
+
+    if (!text || !workspace_root) return 0;
+    for (p = text; *p; ) {
+        size_t esc;
+        size_t n;
+        const char *body;
+        char reconstructed[PATH_MAX];
+
+        esc = encoded_leading_slash_len(p);
+        if (!esc) {
+            p++;
+            continue;
+        }
+        body = p + esc;
+        reconstructed[0] = '/';
+        n = 1;
+        while (*body && is_path_body_char((unsigned char)*body) &&
+               n + 1 < sizeof(reconstructed))
+            reconstructed[n++] = *body++;
+        reconstructed[n] = '\0';
+        if (!allowlist_path_is_under_workspace(reconstructed, workspace_root)) {
+            set_reason(reason_buf, reason_cap,
+                       "command blocked: path escapes workspace: ", reconstructed);
+            fprintf(stderr, "allowlist: blocked path outside workspace: %s\n",
+                    reconstructed);
+            return 1;
+        }
+        p = body;
+    }
+    return 0;
+}
+
 static size_t path_suffix_len(const char *p)
 {
     size_t n = 0;
@@ -448,7 +649,7 @@ static int prefix_ci_eq(const char *p, const char *prefix)
 /**
  * `is_fs_absolute_path_start` skips `/` after `:`, so `file:/etc/passwd` and
  * `file://localhost/etc/passwd` never start a path fragment. Extract the local
- * path from `file:` URLs and run the workspace check.
+ * path from `file:` URLs, percent-decode, and run the workspace check.
  */
 static int block_if_file_url_escapes(const char *text, const char *workspace_root,
                                      char *reason_buf, size_t reason_cap)
@@ -489,6 +690,12 @@ static int block_if_file_url_escapes(const char *text, const char *workspace_roo
         while (*s && is_path_body_char((unsigned char)*s) && n + 1 < sizeof(path))
             path[n++] = *s++;
         path[n] = '\0';
+        if (percent_decode_inplace(path) != 0) {
+            set_reason(reason_buf, reason_cap,
+                       "command blocked: path escapes workspace: ", path);
+            fprintf(stderr, "allowlist: blocked invalid percent-encoded file URL\n");
+            return 1;
+        }
         if (!allowlist_path_is_under_workspace(path, workspace_root)) {
             set_reason(reason_buf, reason_cap,
                        "command blocked: path escapes workspace: ", path);
@@ -541,6 +748,8 @@ static int existing_ancestor_is_under_workspace(const char *path, const char *ac
 /**
  * Collapse `.` / `..` without requiring directories to exist, so
  * `/ws/nope/../../../tmp/x` becomes `/tmp/x` instead of walking back to `/ws`.
+ * Do not cancel `..` across a symlink: the kernel walks the link first, so
+ * `workspace/out/../etc/passwd` with `out` -> `/` is `/etc/passwd`.
  */
 static int lexical_collapse_path(const char *path, char *out, size_t out_cap)
 {
@@ -573,8 +782,42 @@ static int lexical_collapse_path(const char *path, char *out, size_t out_cap)
         if (seg[0] == '\0' || strcmp(seg, ".") == 0)
             continue;
         if (strcmp(seg, "..") == 0) {
-            if (nparts > 0)
+            if (nparts > 0) {
+                char probe[PATH_MAX];
+                struct stat st;
+                size_t probe_len;
+                int pi;
+
+                memset(&st, 0, sizeof(st));
+
+                if (absolute) {
+                    probe[0] = '/';
+                    probe_len = 1;
+                } else {
+                    probe_len = 0;
+                }
+                for (pi = 0; pi < nparts; pi++) {
+                    const char *ps = parts[pi];
+                    size_t sl;
+
+                    if (!ps)
+                        return -1;
+                    sl = strlen(ps);
+                    if (pi > 0) {
+                        if (probe_len + 1 >= sizeof(probe))
+                            return -1;
+                        probe[probe_len++] = '/';
+                    }
+                    if (probe_len + sl + 1 > sizeof(probe))
+                        return -1;
+                    memcpy(probe + probe_len, ps, sl);
+                    probe_len += sl;
+                }
+                probe[probe_len] = '\0';
+                if (lstat(probe, &st) == 0 && S_ISLNK(st.st_mode))
+                    return -1;
                 nparts--;
+            }
             continue;
         }
         if (nparts >= (int)(sizeof(parts) / sizeof(parts[0])))
@@ -628,21 +871,22 @@ int allowlist_path_is_under_workspace(const char *path, const char *workspace_ro
     char resolved_ws[PATH_MAX];
     char collapsed[PATH_MAX];
     const char *actual_ws;
-    const char *check_path;
     size_t wlen;
     if (!path || !workspace_root || !workspace_root[0]) return 0;
-    if (lexical_collapse_path(path, collapsed, sizeof(collapsed)) != 0)
-        return 0;
-    check_path = collapsed;
     /* Resolve the workspace root (handles symlinks like macOS /tmp -> /private/tmp). */
     if (realpath(workspace_root, resolved_ws))
         actual_ws = resolved_ws;
     else
         actual_ws = workspace_root;
     wlen = strlen(actual_ws);
-    if (realpath(check_path, resolved_path))
+    /* Kernel walk first so symlink/.. matches open(2), not lexical pop. */
+    if (realpath(path, resolved_path))
         return resolved_is_under_workspace(resolved_path, actual_ws, wlen);
-    return existing_ancestor_is_under_workspace(check_path, actual_ws, wlen);
+    if (lexical_collapse_path(path, collapsed, sizeof(collapsed)) != 0)
+        return 0;
+    if (realpath(collapsed, resolved_path))
+        return resolved_is_under_workspace(resolved_path, actual_ws, wlen);
+    return existing_ancestor_is_under_workspace(collapsed, actual_ws, wlen);
 }
 
 /* ------------------------------------------------------------------ */
@@ -690,9 +934,17 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
         ws_resolved[n] = '\0';
     }
     workspace_root = ws_resolved;
+    if (command_mutates_home_or_pwd(cmd)) {
+        set_reason(reason_buf, reason_cap,
+                   "command blocked: HOME/PWD assignment in command", "");
+        fprintf(stderr, "allowlist: blocked HOME/PWD assignment in command\n");
+        return 1;
+    }
     if (block_if_dollar_expansions_escape(cmd, workspace_root, reason_buf, reason_cap))
         return 1;
     if (block_if_file_url_escapes(cmd, workspace_root, reason_buf, reason_cap))
+        return 1;
+    if (block_if_encoded_slash_escapes(cmd, workspace_root, reason_buf, reason_cap))
         return 1;
     if (block_if_embedded_paths_escape(cmd, workspace_root, reason_buf, reason_cap))
         return 1;
