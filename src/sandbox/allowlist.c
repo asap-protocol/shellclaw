@@ -545,7 +545,7 @@ static int existing_ancestor_is_under_workspace(const char *path, const char *ac
 static int lexical_collapse_path(const char *path, char *out, size_t out_cap)
 {
     char tmp[PATH_MAX];
-    const char *parts[PATH_MAX / 2];
+    const char *parts[PATH_MAX / 2] = { NULL };
     int nparts = 0;
     int absolute;
     size_t len;
@@ -590,7 +590,12 @@ static int lexical_collapse_path(const char *path, char *out, size_t out_cap)
         out_len = 0;
     }
     for (i = 0; i < nparts; i++) {
-        size_t sl = strlen(parts[i]);
+        const char *seg = parts[i];
+        size_t sl;
+
+        if (!seg)
+            return -1;
+        sl = strlen(seg);
 
         if (i > 0) {
             if (out_len + 1 >= out_cap)
@@ -599,7 +604,7 @@ static int lexical_collapse_path(const char *path, char *out, size_t out_cap)
         }
         if (out_len + sl + 1 > out_cap)
             return -1;
-        memcpy(out + out_len, parts[i], sl);
+        memcpy(out + out_len, seg, sl);
         out_len += sl;
     }
     if (!absolute && nparts == 0) {
