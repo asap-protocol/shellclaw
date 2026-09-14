@@ -1449,6 +1449,47 @@ static int test_workspace_only_blocks_encoded_dollar(void)
 	return 0;
 }
 
+/**
+ * Bare relative names (`cat leak`) have no `/` `~` `.` `$`, so the scanner
+ * must still join them to the workspace and reject symlink escapes.
+ * Landlock is the kernel bound; this is defense-in-depth. Not chr(47)+.
+ */
+static int test_relative_symlink_indirection(void)
+{
+#ifdef __linux__
+	char workspace[] = "/tmp/sc_al_reltok_XXXXXX";
+	char leak_path[256];
+	char *ws;
+	allowlist_config_t cfg;
+	char reason[256];
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_relative_symlink_indirection: mkdtemp failed\n");
+		return 1;
+	}
+	snprintf(leak_path, sizeof(leak_path), "%s/leak", ws);
+	if (symlink("/etc/passwd", leak_path) != 0) {
+		rmdir(ws);
+		fprintf(stderr, "test_relative_symlink_indirection: symlink failed\n");
+		return 1;
+	}
+	cfg.workspace_path = ws;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat leak", &cfg, reason, sizeof(reason)) == 1);
+	ASSERT(strstr(reason, "escapes") != NULL || strstr(reason, "workspace") != NULL);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("echo hello", &cfg, reason, sizeof(reason)) == 0);
+	unlink(leak_path);
+	rmdir(ws);
+	return 0;
+#else
+	fprintf(stderr, "test_relative_symlink_indirection: skipped (Linux-specific)\n");
+	return 0;
+#endif
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
@@ -1501,6 +1542,7 @@ int main(void)
 	RUN(test_workspace_only_blocks_printf_v_and_environ_index());
 	RUN(test_workspace_only_blocks_identity_and_nameref_env());
 	RUN(test_workspace_only_blocks_encoded_dollar());
+	RUN(test_relative_symlink_indirection());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }
