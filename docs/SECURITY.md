@@ -56,13 +56,13 @@ Implementation: [`src/sandbox/sandbox.c`](../src/sandbox/sandbox.c), [`src/sandb
 
 ### GPU device nodes — not bind-mounted
 
-`sandbox_exec()` does **not** call `mount()`, `bind()`, or `pivot_root()`. The child namespace is created only with:
+`sandbox_exec()` does **not** call `bind()` or `pivot_root()`. After `unshare(CLONE_NEWNS)` the child makes the copied mount tree `MS_REC|MS_PRIVATE` and, once the command is PID 1, remounts `proc` on `/proc`. It does not bind-mount Tegra GPU devices.
 
 ```c
 unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID);
 ```
 
-Therefore ShellClaw never bind-mounts Tegra GPU devices into the sandbox. In particular, these paths are **not** explicitly mounted into the shell namespace:
+In particular, these paths are **not** explicitly mounted into the shell namespace:
 
 - `/dev/nvhost-*`
 - `/dev/nvgpu`
