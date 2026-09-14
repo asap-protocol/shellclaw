@@ -192,6 +192,13 @@ int sandbox_landlock_restrict_to_workspace(const char *workspace)
         close(ruleset_fd);
         return -1;
     }
+    /* Traverse-only `/` so execl("/bin/sh") can walk to RO trees. READ_DIR
+     * does not grant READ_FILE, so /etc/passwd stays closed. */
+    if (landlock_add_workspace(ruleset_fd, "/",
+                               LANDLOCK_ACCESS_FS_READ_DIR & handled) != 0) {
+        close(ruleset_fd);
+        return -1;
+    }
     for (i = 0; RO_PATHS[i]; i++)
         (void)landlock_add_path(ruleset_fd, RO_PATHS[i], ro_dir, ro_file);
     for (i = 0; RW_DEV[i]; i++)

@@ -5,10 +5,11 @@
  * Linux path: fork the isolator, then unshare mount/network/PID (user ns
  * first when unprivileged). Isolation failure is reported on a control pipe,
  * not via sh-compatible exit codes. After CLONE_NEWPID, fork so the command
- * is PID 1 (unshare does not move the caller). That child remounts procfs,
- * applies Landlock, sets PR_SET_PDEATHSIG, and closes fds >= 3 so a timeout
- * SIGKILL of the isolator cannot leave the command under host init. cgroups
- * v2 limits degrade if unavailable.
+ * is PID 1 (unshare does not move the caller). That child fchdir's the
+ * workspace (Landlock cannot walk `/tmp` after restrict_self), remounts
+ * procfs, applies Landlock, sets PR_SET_PDEATHSIG, and closes fds >= 3
+ * so a timeout SIGKILL of the isolator cannot leave the command under
+ * host init. cgroups v2 limits degrade if unavailable.
  *
  * Non-Linux path: plain fork() + execl(); a warning is emitted to stderr.
  */
@@ -185,17 +186,31 @@ static int remount_procfs(void)
     return 0;
 }
 
+static int enter_workspace_cwd(const char *workspace)
+{
+    int ws_fd;
+    ws_fd = open(workspace, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (ws_fd < 0)
+        return -1;
+    if (fchdir(ws_fd) != 0) {
+        close(ws_fd);
+        return -1;
+    }
+    close(ws_fd);
+    return 0;
+}
+
 static unsigned char setup_command_process(const char *workspace)
 {
     if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0)
         return SANDBOX_ISO_NS;
+    if (workspace && workspace[0] && enter_workspace_cwd(workspace) != 0)
+        _exit(124);
     if (remount_procfs() != 0)
         return SANDBOX_ISO_NS;
-    if (workspace && workspace[0]) {
-        if (sandbox_landlock_restrict_to_workspace(workspace) != 0)
-            return SANDBOX_ISO_LL;
-        if (chdir(workspace) != 0) _exit(124);
-    }
+    if (workspace && workspace[0] &&
+        sandbox_landlock_restrict_to_workspace(workspace) != 0)
+        return SANDBOX_ISO_LL;
     return 0;
 }
 
