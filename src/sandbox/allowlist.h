@@ -11,7 +11,10 @@
  *     path-like tokens in the command are resolved with realpath(3) and rejected
  *     when they escape the declared workspace root. Quoted and embedded absolute
  *     paths (`cat '/etc/passwd'`, `python3 -c "open('/etc/passwd')"`) are scanned
- *     on the full command because whitespace tokenization misses them.
+ *     on the full command because whitespace tokenization misses them. Tokens that
+ *     become absolute only after shell expansion (`$HOME/...`, `"$HOME/..."`,
+ *     `${PWD}/...`, ANSI-C `$'\x2f...'`) are unquoted, expanded, or fail-closed
+ *     before the workspace check.
  *
  * Both checks are intentionally conservative and may produce false positives.
  * They are a best-effort defence-in-depth layer. sandbox_exec() isolates
