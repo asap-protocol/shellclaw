@@ -71,7 +71,7 @@ static int proc_cmdline_has(const char *needle)
 	if (!d)
 		return 0;
 	while ((e = readdir(d)) != NULL) {
-		char path[64];
+		char path[288];
 		char buf[256];
 		FILE *f;
 		size_t n;
