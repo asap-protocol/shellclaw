@@ -713,6 +713,148 @@ static int test_workspace_only_blocks_percent_encoded_file_url(void)
 	return 0;
 }
 
+/**
+ * Quote immediately before `PWD=` / nested `eval` / `sh -c` must still
+ * fail closed. Process PWD/HOME are the workspace so getenv-only expansion
+ * would allow `$PWD/etc/passwd`.
+ */
+static int test_workspace_only_blocks_quoted_home_pwd_assignment(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_qasgn_XXXXXX";
+	char *dir;
+	const char *old_pwd;
+	const char *old_home;
+	char pwd_copy[256];
+	char home_copy[256];
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_quoted_home_pwd_assignment: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_quoted_home_pwd_assignment: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	old_home = getenv("HOME");
+	home_copy[0] = '\0';
+	if (old_home) {
+		if (strlen(old_home) >= sizeof(home_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_quoted_home_pwd_assignment: HOME too long\n");
+			return 1;
+		}
+		memcpy(home_copy, old_home, strlen(old_home) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0 || setenv("HOME", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_quoted_home_pwd_assignment: setenv failed\n");
+		return 1;
+	}
+
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("eval 'PWD=; cat $PWD/etc/passwd'",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("sh -c 'PWD=; cat $PWD/etc/passwd'",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("eval 'HOME=; cat $HOME/etc/passwd'",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("sh -c \"unset HOME; cat $HOME/etc/passwd\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	if (home_copy[0])
+		(void)setenv("HOME", home_copy, 1);
+	else
+		(void)unsetenv("HOME");
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * Quotes (and trivial quote-concat) must not split the `file:` scheme.
+ * `https://` stays allowed.
+ */
+static int test_workspace_only_blocks_quote_split_file_url(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+
+	cfg.workspace_path = "/tmp";
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl f'ile://localhost/etc/passwd'",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl f\"ile:/etc/passwd\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"urllib.request.urlopen('f'+'ile://localhost/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl https://example.com/api",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	return 0;
+}
+
+/**
+ * Encoded `.` (`\x2e` / `\56` / `\u002e`) forms `../`, and extra slash
+ * encodings (`\u{2f}`, `\N{SOLIDUS}`) decode to `/`. `\N{` fail-closes
+ * without parsing Unicode names. Not `chr(47)+` concatenation.
+ */
+static int test_workspace_only_blocks_encoded_dot_and_named_slash(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_edot_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_encoded_dot_and_named_slash: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('\\x2e\\x2e/secret')\"", &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('\\56\\56/secret')\"", &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"node -e \"require('fs').readFileSync('\\u{2f}etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('\\N{SOLIDUS}etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('notes.txt')\"", &cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
@@ -751,6 +893,9 @@ int main(void)
 	RUN(test_workspace_only_blocks_home_pwd_assignment());
 	RUN(test_workspace_only_blocks_symlink_dotdot());
 	RUN(test_workspace_only_blocks_percent_encoded_file_url());
+	RUN(test_workspace_only_blocks_quoted_home_pwd_assignment());
+	RUN(test_workspace_only_blocks_quote_split_file_url());
+	RUN(test_workspace_only_blocks_encoded_dot_and_named_slash());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }
