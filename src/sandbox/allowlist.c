@@ -203,6 +203,15 @@ static char *dup_unquoted(const char *src)
     for (p = src; *p; p++) {
         unsigned char c = (unsigned char)*p;
 
+        /* POSIX unquoted/double-quoted `\` + newline is deleted. */
+        if (c == '\\' && p[1] == '\r' && p[2] == '\n') {
+            p += 2;
+            continue;
+        }
+        if (c == '\\' && (p[1] == '\n' || p[1] == '\r')) {
+            p++;
+            continue;
+        }
         if (c == '\'' || c == '"')
             continue;
         if (c == '+' && last && is_ident_cont((unsigned char)last)) {
@@ -231,7 +240,7 @@ static int is_cmd_word_start(const char *text, const char *p)
     prev = (unsigned char)p[-1];
     return prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' ||
            prev == ';' || prev == '|' || prev == '&' || prev == '(' ||
-           prev == '{' || prev == ')' || prev == ',';
+           prev == '{' || prev == ')' || prev == ',' || prev == '[';
 }
 
 static int name_is_home_or_pwd(const char *p, size_t *nlen)
@@ -264,8 +273,14 @@ static int command_mutates_home_or_pwd(const char *text)
 
         if (!is_cmd_word_start(text, p))
             continue;
-        if (name_is_home_or_pwd(p, &nlen) && p[nlen] == '=')
-            return 1;
+        if (name_is_home_or_pwd(p, &nlen)) {
+            const char *eq = p + nlen;
+
+            if (*eq == ']')
+                eq++;
+            if (*eq == '=' || *eq == ':')
+                return 1;
+        }
         if (strncmp(p, "unset", 5) == 0 && !is_ident_cont((unsigned char)p[5])) {
             const char *q = p + 5;
 
@@ -294,6 +309,21 @@ static int command_mutates_home_or_pwd(const char *text)
                     q++;
                 while (*q == ' ' || *q == '\t')
                     q++;
+            }
+        }
+        if (strncmp(p, "printf", 6) == 0 && !is_ident_cont((unsigned char)p[6])) {
+            const char *q = p + 6;
+
+            while (*q && *q != ';' && *q != '|' && *q != '&' && *q != '\n') {
+                if (q[0] == '-' && q[1] == 'v') {
+                    const char *n = q + 2;
+
+                    while (*n == ' ' || *n == '\t')
+                        n++;
+                    if (name_is_home_or_pwd(n, &nlen))
+                        return 1;
+                }
+                q++;
             }
         }
         if (strncmp(p, "read", 4) == 0 && !is_ident_cont((unsigned char)p[4])) {
@@ -390,6 +420,15 @@ static int command_mutates_home_or_pwd(const char *text)
             if (strncmp(q, ".clear", 6) == 0 &&
                 !is_ident_cont((unsigned char)q[6]))
                 return 1;
+            if (strncmp(q, ".update", 7) == 0 &&
+                !is_ident_cont((unsigned char)q[7])) {
+                q += 7;
+                while (*q && *q != ';' && *q != '\n') {
+                    if (name_is_home_or_pwd(q, &nlen))
+                        return 1;
+                    q++;
+                }
+            }
             if (strncmp(q, ".pop", 4) == 0 ||
                 strncmp(q, ".__delitem__", 12) == 0) {
                 q += (q[1] == 'p') ? 4 : 12;
@@ -911,8 +950,9 @@ static int prefix_ci_eq(const char *p, const char *prefix)
 }
 
 /**
- * Bytes of `\\xNN` / `\\x{NN}` / `\\u00NN` / `\\u{NN}` / `\\U000000NN` that
- * decode to a non-NUL byte. Used to recover a hidden `file:` scheme (`\\x66ile:`).
+ * Bytes of `\\xNN` / `\\x{NN}` / `\\u00NN` / `\\u{NN}` / `\\U000000NN` /
+ * octal `\\146` / `\\072` / `\\o{146}` that decode to a non-NUL byte.
+ * Used to recover a hidden `file:` scheme (`\\x66ile:`, `\\146ile:`).
  */
 static size_t encoded_hex_unicode_byte_len(const char *p, unsigned char *decoded)
 {
@@ -989,6 +1029,31 @@ static size_t encoded_hex_unicode_byte_len(const char *p, unsigned char *decoded
             return 10;
         }
     }
+    if ((p[1] == 'o' || p[1] == 'O') && p[2] == '{') {
+        val = 0;
+        n = 0;
+        while (n < 6 && p[3 + n] >= '0' && p[3 + n] <= '7') {
+            val = val * 8 + (p[3 + n] - '0');
+            n++;
+        }
+        if (n > 0 && p[3 + n] == '}' && val >= 1 && val <= 255) {
+            *decoded = (unsigned char)val;
+            return 4 + n;
+        }
+        return 0;
+    }
+    if (p[1] >= '0' && p[1] <= '7') {
+        val = 0;
+        n = 0;
+        while (n < 3 && p[1 + n] >= '0' && p[1 + n] <= '7') {
+            val = val * 8 + (p[1 + n] - '0');
+            n++;
+        }
+        if (n > 0 && val >= 1 && val <= 255) {
+            *decoded = (unsigned char)val;
+            return 1 + n;
+        }
+    }
     return 0;
 }
 
@@ -1013,6 +1078,10 @@ static char *dup_decode_hex_unicode(const char *src)
         if (esc) {
             dst[di++] = (char)ch;
             p += esc;
+        } else if (p[0] == '\\' && p[1] != '\0' && p[1] != '\n' && p[1] != '\r') {
+            /* Shell identity escape: `f\ile:` -> `file:`. */
+            dst[di++] = p[1];
+            p += 2;
         } else {
             dst[di++] = *p++;
         }
