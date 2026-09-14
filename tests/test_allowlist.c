@@ -302,6 +302,35 @@ static int test_workspace_only_blocks_glued_shell_expansions(void)
 	ASSERT(allowlist_check_shell_command("cat\"$HOME/.bashrc\"",
 	                                    &cfg, reason, sizeof(reason)) == 1);
 
+	{
+		const char *old_home = getenv("HOME");
+		char home_copy[256];
+
+		home_copy[0] = '\0';
+		if (old_home) {
+			if (strlen(old_home) >= sizeof(home_copy)) {
+				rmdir(dir);
+				fprintf(stderr, "test_workspace_only_blocks_glued_shell_expansions: HOME too long\n");
+				return 1;
+			}
+			memcpy(home_copy, old_home, strlen(old_home) + 1);
+		}
+		if (setenv("HOME", dir, 1) != 0) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_glued_shell_expansions: setenv HOME failed\n");
+			return 1;
+		}
+		reason[0] = '\0';
+		rc = allowlist_check_shell_command("ls ${HOME}", &cfg, reason, sizeof(reason));
+		if (rc == 0)
+			rc = allowlist_check_shell_command("ls $HOME", &cfg, reason, sizeof(reason));
+		if (home_copy[0])
+			(void)setenv("HOME", home_copy, 1);
+		else
+			(void)unsetenv("HOME");
+		ASSERT(rc == 0);
+	}
+
 	old_pwd = getenv("PWD");
 	pwd_copy[0] = '\0';
 	if (old_pwd) {

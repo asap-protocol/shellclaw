@@ -168,6 +168,28 @@ static int is_path_body_char(unsigned char c)
            c == '-' || c == '+' || c == '%' || c == '@';
 }
 
+static int is_ident_start(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+static int is_ident_cont(unsigned char c)
+{
+    return is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+/** `${HOME}/` and `${PWD}/` are one expansion; `${IFS}/` is a new FS root. */
+static int slash_follows_home_or_pwd_brace(const char *text, const char *slash)
+{
+    if (!text || !slash || slash <= text)
+        return 0;
+    if (slash >= text + 7 && strncmp(slash - 7, "${HOME}", 7) == 0)
+        return 1;
+    if (slash >= text + 6 && strncmp(slash - 6, "${PWD}", 6) == 0)
+        return 1;
+    return 0;
+}
+
 static int is_fs_absolute_path_start(const char *text, const char *p)
 {
     unsigned char prev;
@@ -183,9 +205,8 @@ static int is_fs_absolute_path_start(const char *text, const char *p)
         return 0;
     if (is_path_body_char(prev) && prev != '/')
         return 0;
-    /* `${HOME}/x` is one expansion; the slash after `}` is not a new FS root. */
     if (prev == '}')
-        return 0;
+        return !slash_follows_home_or_pwd_brace(text, p);
     return 1;
 }
 
@@ -203,8 +224,8 @@ static int expand_tilde_fragment(const char *fragment, char *dest, size_t dest_c
         return 0;
     }
     home = getenv("HOME");
-    if (!home)
-        home = "";
+    if (!home || home[0] == '\0')
+        return -1;
     n = snprintf(dest, dest_cap, "%s%s", home, fragment + 1);
     if (n < 0 || (size_t)n >= dest_cap)
         return -1;
@@ -247,6 +268,121 @@ static int block_if_embedded_paths_escape(const char *text, const char *workspac
     return 0;
 }
 
+static size_t path_suffix_len(const char *p)
+{
+    size_t n = 0;
+
+    if (!p || p[0] != '/')
+        return 0;
+    while (p[n] && is_path_body_char((unsigned char)p[n]))
+        n++;
+    return n;
+}
+
+static int block_expanded_env_path(const char *value, const char *suffix, size_t suffix_len,
+                                   const char *workspace_root, const char *raw,
+                                   char *reason_buf, size_t reason_cap)
+{
+    char expanded[PATH_MAX];
+    int n;
+
+    if (!value) {
+        set_reason(reason_buf, reason_cap,
+                   "command blocked: unresolved shell path expansion: ", raw);
+        fprintf(stderr, "allowlist: blocked unresolved shell path: %s\n", raw);
+        return 1;
+    }
+    n = snprintf(expanded, sizeof(expanded), "%s%.*s", value, (int)suffix_len, suffix);
+    if (n < 0 || (size_t)n >= sizeof(expanded)) {
+        set_reason(reason_buf, reason_cap,
+                   "command blocked: unresolved shell path expansion: ", raw);
+        fprintf(stderr, "allowlist: blocked unresolved shell path: %s\n", raw);
+        return 1;
+    }
+    if (!allowlist_path_is_under_workspace(expanded, workspace_root)) {
+        set_reason(reason_buf, reason_cap,
+                   "command blocked: path escapes workspace: ", expanded);
+        fprintf(stderr, "allowlist: blocked path outside workspace: %s\n", expanded);
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * Scan `$` on the full command. Shell glues expansions onto the previous word
+ * (`cat$IFS/etc/passwd`, `cat"$HOME/.bashrc"`), so strtok + tok[0]=='$' misses them.
+ * Expand `$HOME` / `${HOME}` / `$PWD` / `${PWD}` (plus a following `/...` suffix);
+ * fail closed on ANSI-C, command substitution, `$IFS`, and other `$...` forms.
+ */
+static int block_if_dollar_expansions_escape(const char *text, const char *workspace_root,
+                                             char *reason_buf, size_t reason_cap)
+{
+    const char *p;
+    const char *home;
+    const char *cwd;
+
+    if (!text || !workspace_root) return 0;
+    home = getenv("HOME");
+    cwd = getenv("PWD");
+    for (p = text; *p; ) {
+        size_t suffix_n;
+
+        if (*p != '$') {
+            p++;
+            continue;
+        }
+        if (p[1] == '\'' || p[1] == '"' || p[1] == '(') {
+            set_reason(reason_buf, reason_cap,
+                       "command blocked: unresolved shell path expansion: ", p);
+            fprintf(stderr, "allowlist: blocked unresolved shell path: %s\n", p);
+            return 1;
+        }
+        if (p[1] == '{') {
+            if (strncmp(p, "${HOME}", 7) == 0) {
+                suffix_n = path_suffix_len(p + 7);
+                if (block_expanded_env_path(home, p + 7, suffix_n, workspace_root, p,
+                                            reason_buf, reason_cap))
+                    return 1;
+                p += 7 + suffix_n;
+                continue;
+            }
+            if (strncmp(p, "${PWD}", 6) == 0) {
+                suffix_n = path_suffix_len(p + 6);
+                if (block_expanded_env_path(cwd, p + 6, suffix_n, workspace_root, p,
+                                            reason_buf, reason_cap))
+                    return 1;
+                p += 6 + suffix_n;
+                continue;
+            }
+            set_reason(reason_buf, reason_cap,
+                       "command blocked: unresolved shell path expansion: ", p);
+            fprintf(stderr, "allowlist: blocked unresolved shell path: %s\n", p);
+            return 1;
+        }
+        if (strncmp(p, "$HOME", 5) == 0 && !is_ident_cont((unsigned char)p[5])) {
+            suffix_n = path_suffix_len(p + 5);
+            if (block_expanded_env_path(home, p + 5, suffix_n, workspace_root, p,
+                                        reason_buf, reason_cap))
+                return 1;
+            p += 5 + suffix_n;
+            continue;
+        }
+        if (strncmp(p, "$PWD", 4) == 0 && !is_ident_cont((unsigned char)p[4])) {
+            suffix_n = path_suffix_len(p + 4);
+            if (block_expanded_env_path(cwd, p + 4, suffix_n, workspace_root, p,
+                                        reason_buf, reason_cap))
+                return 1;
+            p += 4 + suffix_n;
+            continue;
+        }
+        set_reason(reason_buf, reason_cap,
+                   "command blocked: unresolved shell path expansion: ", p);
+        fprintf(stderr, "allowlist: blocked unresolved shell path: %s\n", p);
+        return 1;
+    }
+    return 0;
+}
+
 static int resolved_is_under_workspace(const char *resolved, const char *actual_ws, size_t wlen)
 {
     if (!resolved || !actual_ws || wlen == 0) return 0;
@@ -263,20 +399,25 @@ static int resolved_is_under_workspace(const char *resolved, const char *actual_
 static int existing_ancestor_is_under_workspace(const char *path, const char *actual_ws, size_t wlen)
 {
     char path_copy[PATH_MAX];
+    char parent[PATH_MAX];
     char resolved[PATH_MAX];
     int hops;
 
     if (!path || path[0] == '\0' || strlen(path) >= PATH_MAX) return 0;
     snprintf(path_copy, sizeof(path_copy), "%s", path);
     for (hops = 0; hops < PATH_MAX; hops++) {
-        char *dir = dirname(path_copy);
+        char *dir;
+        size_t n;
 
+        dir = dirname(path_copy);
         if (!dir || dir[0] == '\0') return 0;
-        if (realpath(dir, resolved) != NULL)
+        n = strlen(dir);
+        if (n >= sizeof(parent)) return 0;
+        memcpy(parent, dir, n + 1);
+        if (realpath(parent, resolved) != NULL)
             return resolved_is_under_workspace(resolved, actual_ws, wlen);
-        if (strcmp(dir, ".") == 0 || strcmp(dir, "/") == 0) return 0;
-        if (dir != path_copy)
-            snprintf(path_copy, sizeof(path_copy), "%s", dir);
+        if (strcmp(parent, ".") == 0 || strcmp(parent, "/") == 0) return 0;
+        memcpy(path_copy, parent, n + 1);
     }
     return 0;
 }
@@ -313,7 +454,6 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
     const char *const *p;
     char ws_resolved[PATH_MAX];
     const char *workspace_root = NULL;
-    int workspace_only = 0;
     char *cmd_copy = NULL;
     char *tok;
     char *saveptr;
@@ -340,8 +480,6 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
     /* Phase 2: workspace path containment */
     if (!cfg || !cfg->workspace_only || !cfg->workspace_path || !cfg->workspace_path[0])
         return 0;
-    workspace_only = cfg->workspace_only;
-    (void)workspace_only;
     /* Resolve workspace root once */
     if (!realpath(cfg->workspace_path, ws_resolved)) {
         /* Workspace path does not exist; use as-is. */
@@ -351,6 +489,8 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
         ws_resolved[n] = '\0';
     }
     workspace_root = ws_resolved;
+    if (block_if_dollar_expansions_escape(cmd, workspace_root, reason_buf, reason_cap))
+        return 1;
     if (block_if_embedded_paths_escape(cmd, workspace_root, reason_buf, reason_cap))
         return 1;
     cmd_copy = strdup(cmd);
