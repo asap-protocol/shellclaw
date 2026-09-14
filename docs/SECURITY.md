@@ -41,7 +41,7 @@ The primary goals are: prevent sandboxed shell commands from escaping to host de
 |---------|-----------|-------|
 | Shell (sandbox on) | `fork()` + `unshare(CLONE_NEWNS \| CLONE_NEWNET \| CLONE_NEWPID)` + `prctl(PR_SET_NO_NEW_PRIVS)` | See [Linux sandbox (Jetson)](#linux-sandbox-jetson) |
 | Shell (sandbox off) | Plain `fork()` + substring fallback blocklist | **Not** a security boundary; stderr warning |
-| Allowlist | Substring blocklist + optional workspace `realpath` containment | Defense in depth before `sandbox_exec` |
+| Allowlist | Substring blocklist + workspace containment (existing ancestor, quoted/embedded `/` `~`, full-command `$HOME`/`$PWD` / fail-closed `$`) | Primary host-FS gate; namespaces are not a chroot |
 | cgroups v2 | `memory.max`, `cpu.max` on child PID | Best-effort; non-fatal if cgroup write fails |
 | Hardware GPIO/I2C | libgpiod / `i2c-dev` in agent process | Not exposed inside shell namespace |
 
@@ -73,7 +73,7 @@ The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened 
 
 **Mitigation in v1.0:** the shell allowlist rejects commands whose text references `/dev/nvhost`, `/dev/nvgpu`, or `/dev/nvmap` (substring blocklist). Regression tests live in `tests/test_allowlist.c` (`test_block_jetson_gpu_devices`).
 
-**Residual risk:** a crafted command that opens GPU nodes without those literal substrings (e.g. shell globs or indirect paths) may still reach devices until a future release adds mount-slave propagation, a minimal `/dev` tmpfs, or seccomp. Track as post-v1.0 hardening.
+**Residual risk:** a crafted command that opens GPU nodes without those literal substrings (e.g. shell globs or indirect paths) may still reach devices until a future release adds mount-slave propagation, a minimal `/dev` tmpfs, Landlock, or seccomp. Track as post-v1.0 hardening. `workspace_only` now walks a missing destination’s existing ancestor, scans quoted/embedded `/` and `~`, and expands or fail-closes `$` on the full command (including glued `$IFS` and mid-token `$HOME`). Still out of this gate: relative tokens after `cd` (no `/` `~` `.` `$`), Python `open(chr(47)+'etc/passwd')` (no path character in the command string), and conservative regex false positives such as `awk '/foo/'`.
 
 ### Board-agnostic blocklist entries (Jetson literals)
 
