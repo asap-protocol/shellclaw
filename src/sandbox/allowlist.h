@@ -9,11 +9,14 @@
  *     "mkfs", "dd of=/dev/", fork bombs, etc.).
  *  2. An optional workspace-containment check: if enabled via allowlist_config_t,
  *     path-like tokens in the command are resolved with realpath(3) and rejected
- *     when they escape the declared workspace root.
+ *     when they escape the declared workspace root. Quoted and embedded absolute
+ *     paths (`cat '/etc/passwd'`, `python3 -c "open('/etc/passwd')"`) are scanned
+ *     on the full command because whitespace tokenization misses them.
  *
  * Both checks are intentionally conservative and may produce false positives.
- * They are a best-effort defence-in-depth layer; real isolation is provided by
- * sandbox_exec() via kernel namespaces.
+ * They are a best-effort defence-in-depth layer. sandbox_exec() isolates
+ * mount/network/PID namespaces but does not chroot/pivot_root; workspace_only
+ * path scanning is therefore the primary host-filesystem gate for the shell tool.
  */
 #ifndef SHELLCLAW_ALLOWLIST_H
 #define SHELLCLAW_ALLOWLIST_H
