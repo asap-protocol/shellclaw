@@ -180,6 +180,46 @@ static int is_ident_cont(unsigned char c)
     return is_ident_start(c) || (c >= '0' && c <= '9');
 }
 
+/**
+ * Drop `'` / `"` and trivial quote-concat `+` so `eval 'PWD=;'` and
+ * `f'+'ile://...` look like the shell/Python they become.
+ */
+static char *dup_unquoted(const char *src)
+{
+    size_t n;
+    char *dst;
+    size_t di;
+    const char *p;
+    char last;
+
+    if (!src)
+        return NULL;
+    n = strlen(src);
+    dst = malloc(n + 1);
+    if (!dst)
+        return NULL;
+    di = 0;
+    last = 0;
+    for (p = src; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+
+        if (c == '\'' || c == '"')
+            continue;
+        if (c == '+' && last && is_ident_cont((unsigned char)last)) {
+            const char *nxt = p + 1;
+
+            while (*nxt == '\'' || *nxt == '"')
+                nxt++;
+            if (*nxt && is_ident_start((unsigned char)*nxt))
+                continue;
+        }
+        dst[di++] = *p;
+        last = *p;
+    }
+    dst[di] = '\0';
+    return dst;
+}
+
 static int is_cmd_word_start(const char *text, const char *p)
 {
     unsigned char prev;
@@ -261,33 +301,83 @@ static int command_mutates_home_or_pwd(const char *text)
 }
 
 /**
- * Bytes of a leading-slash escape that decodes to `/` (`\x2f`, `\u002f`,
- * `\U0000002f`, octal `\57` / `\057`). Not a Python interpreter: `chr(47)`
- * with no slash encoding in the text is still out of scope.
+ * Bytes of an escape that decodes to `/` or `.` (`\x2f` / `\x2e`, `\u002f`,
+ * `\u{2f}`, `\U0000002f`, octal `\57` / `\56`). Not a Python interpreter:
+ * `chr(47)` with no slash encoding in the text is still out of scope.
  */
-static size_t encoded_leading_slash_len(const char *p)
+static int hex_nibble(unsigned char c);
+static size_t encoded_dot_or_slash_len(const char *p, char *decoded)
 {
-    if (!p || p[0] != '\\' || p[1] == '\0')
-        return 0;
-    if ((p[1] == 'x' || p[1] == 'X') && p[2] == '2' &&
-        (p[3] == 'f' || p[3] == 'F'))
-        return 4;
-    if (p[1] == 'u' && p[2] == '0' && p[3] == '0' && p[4] == '2' &&
-        (p[5] == 'f' || p[5] == 'F'))
-        return 6;
-    if (p[1] == 'U' && p[2] == '0' && p[3] == '0' && p[4] == '0' &&
-        p[5] == '0' && p[6] == '0' && p[7] == '0' && p[8] == '2' &&
-        (p[9] == 'f' || p[9] == 'F'))
-        return 10;
-    if (p[1] >= '0' && p[1] <= '7') {
-        int val = 0;
-        size_t n = 0;
+    int hi;
+    int lo;
+    int val;
+    size_t n;
 
+    if (!p || !decoded || p[0] != '\\' || p[1] == '\0')
+        return 0;
+    if ((p[1] == 'x' || p[1] == 'X')) {
+        hi = hex_nibble((unsigned char)p[2]);
+        lo = hex_nibble((unsigned char)p[3]);
+        if (hi >= 0 && lo >= 0) {
+            val = (hi << 4) | lo;
+            if (val == 46 || val == 47) {
+                *decoded = (char)val;
+                return 4;
+            }
+        }
+    }
+    if (p[1] == 'u' && p[2] == '{') {
+        val = 0;
+        n = 0;
+        while (n < 6 && hex_nibble((unsigned char)p[3 + n]) >= 0) {
+            val = (val << 4) | hex_nibble((unsigned char)p[3 + n]);
+            n++;
+        }
+        if (n > 0 && p[3 + n] == '}' && (val == 46 || val == 47)) {
+            *decoded = (char)val;
+            return 4 + n;
+        }
+    }
+    if (p[1] == 'u') {
+        val = 0;
+        for (n = 0; n < 4; n++) {
+            hi = hex_nibble((unsigned char)p[2 + n]);
+            if (hi < 0) {
+                val = -1;
+                break;
+            }
+            val = (val << 4) | hi;
+        }
+        if (val == 46 || val == 47) {
+            *decoded = (char)val;
+            return 6;
+        }
+    }
+    if (p[1] == 'U') {
+        val = 0;
+        for (n = 0; n < 8; n++) {
+            hi = hex_nibble((unsigned char)p[2 + n]);
+            if (hi < 0) {
+                val = -1;
+                break;
+            }
+            val = (val << 4) | hi;
+        }
+        if (val == 46 || val == 47) {
+            *decoded = (char)val;
+            return 10;
+        }
+    }
+    if (p[1] >= '0' && p[1] <= '7') {
+        val = 0;
+        n = 0;
         while (n < 3 && p[1 + n] >= '0' && p[1 + n] <= '7') {
             val = val * 8 + (p[1 + n] - '0');
             n++;
-            if (val == 47)
-                return 1 + n;
+        }
+        if (n > 0 && (val == 46 || val == 47)) {
+            *decoded = (char)val;
+            return 1 + n;
         }
     }
     return 0;
@@ -475,8 +565,9 @@ static int block_if_embedded_paths_escape(const char *text, const char *workspac
 }
 
 /**
- * Reconstruct `/` + the following path body after `\x2f` / `\57` / `\u002f`
- * so a later literal slash in `etc/passwd` cannot hide the encoded root.
+ * Reconstruct `/` or `../` from encoded `.` / `/` so a later literal slash
+ * (`etc/passwd`) cannot hide the root, and `\x2e\x2e/secret` cannot hide `..`.
+ * `\N{` fail-closes without parsing Unicode names.
  */
 static int block_if_encoded_slash_escapes(const char *text, const char *workspace_root,
                                           char *reason_buf, size_t reason_cap)
@@ -487,21 +578,52 @@ static int block_if_encoded_slash_escapes(const char *text, const char *workspac
     for (p = text; *p; ) {
         size_t esc;
         size_t n;
-        const char *body;
+        const char *q;
         char reconstructed[PATH_MAX];
+        char ch;
 
-        esc = encoded_leading_slash_len(p);
+        if (p[0] == '\\' && p[1] == 'N' && p[2] == '{') {
+            set_reason(reason_buf, reason_cap,
+                       "command blocked: unresolved unicode name escape", "");
+            fprintf(stderr, "allowlist: blocked unicode name escape \\N{\n");
+            return 1;
+        }
+        esc = encoded_dot_or_slash_len(p, &ch);
         if (!esc) {
             p++;
             continue;
         }
-        body = p + esc;
-        reconstructed[0] = '/';
-        n = 1;
-        while (*body && is_path_body_char((unsigned char)*body) &&
-               n + 1 < sizeof(reconstructed))
-            reconstructed[n++] = *body++;
+        n = 0;
+        q = p;
+        while (n + 1 < sizeof(reconstructed)) {
+            size_t e2;
+            char ch2;
+
+            e2 = encoded_dot_or_slash_len(q, &ch2);
+            if (e2) {
+                reconstructed[n++] = ch2;
+                q += e2;
+                continue;
+            }
+            if (*q && is_path_body_char((unsigned char)*q)) {
+                reconstructed[n++] = *q++;
+                continue;
+            }
+            break;
+        }
         reconstructed[n] = '\0';
+        if (reconstructed[0] != '/') {
+            char joined[PATH_MAX];
+            int jn;
+
+            jn = snprintf(joined, sizeof(joined), "%s/%s", workspace_root, reconstructed);
+            if (jn < 0 || (size_t)jn >= sizeof(joined)) {
+                set_reason(reason_buf, reason_cap,
+                           "command blocked: path escapes workspace: ", reconstructed);
+                return 1;
+            }
+            memcpy(reconstructed, joined, (size_t)jn + 1);
+        }
         if (!allowlist_path_is_under_workspace(reconstructed, workspace_root)) {
             set_reason(reason_buf, reason_cap,
                        "command blocked: path escapes workspace: ", reconstructed);
@@ -509,7 +631,7 @@ static int block_if_encoded_slash_escapes(const char *text, const char *workspac
                     reconstructed);
             return 1;
         }
-        p = body;
+        p = q;
     }
     return 0;
 }
@@ -932,15 +1054,30 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
         ws_resolved[n] = '\0';
     }
     workspace_root = ws_resolved;
-    if (command_mutates_home_or_pwd(cmd)) {
-        set_reason(reason_buf, reason_cap,
-                   "command blocked: HOME/PWD assignment in command", "");
-        fprintf(stderr, "allowlist: blocked HOME/PWD assignment in command\n");
-        return 1;
+    {
+        char *unquoted = dup_unquoted(cmd);
+        int mutated;
+        int file_blocked = 0;
+
+        if (!unquoted) {
+            set_reason(reason_buf, reason_cap, "command blocked: out of memory", "");
+            return 1;
+        }
+        mutated = command_mutates_home_or_pwd(unquoted);
+        if (!mutated)
+            file_blocked = block_if_file_url_escapes(unquoted, workspace_root,
+                                                     reason_buf, reason_cap);
+        free(unquoted);
+        if (mutated) {
+            set_reason(reason_buf, reason_cap,
+                       "command blocked: HOME/PWD assignment in command", "");
+            fprintf(stderr, "allowlist: blocked HOME/PWD assignment in command\n");
+            return 1;
+        }
+        if (file_blocked)
+            return 1;
     }
     if (block_if_dollar_expansions_escape(cmd, workspace_root, reason_buf, reason_cap))
-        return 1;
-    if (block_if_file_url_escapes(cmd, workspace_root, reason_buf, reason_cap))
         return 1;
     if (block_if_encoded_slash_escapes(cmd, workspace_root, reason_buf, reason_cap))
         return 1;

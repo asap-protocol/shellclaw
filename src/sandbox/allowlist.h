@@ -21,9 +21,11 @@
  *     are collapsed lexically so `/ws/nope/../../../tmp` cannot stop at `/ws`;
  *     `..` is not cancelled across a symlink. Embedded relative `../` is joined
  *     to the workspace before the same check. Encoded leading slashes (`\\x2f`,
- *     `\\57`, `\\u002f`) are reconstructed as `/` plus the following path body.
+ *     `\\57`, `\\u002f`, `\\u{2f}`) are reconstructed as `/` or `../` plus the
+ *     following path body. `\\N{` fail-closes without parsing Unicode names.
  *     In-command `HOME=` / `PWD=` / `export` / `unset` of those names fail closed
- *     instead of trusting process getenv.
+ *     even inside quotes (`eval 'PWD=;'`). Quote-split `file:` schemes
+ *     (`f'ile://...`, `'f'+'ile://...'`) are joined before the URL check.
  *
  * Both checks are intentionally conservative and may produce false positives.
  * They are a best-effort defence-in-depth layer. sandbox_exec() isolates
