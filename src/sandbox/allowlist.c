@@ -260,7 +260,8 @@ static int name_is_home_or_pwd(const char *p, size_t *nlen)
 
 /**
  * Process getenv(HOME/PWD) is wrong after `PWD=; cat $PWD/etc/passwd`.
- * Fail closed when the command text assigns, exports, or unsets those names.
+ * Fail closed when the command text assigns, exports, unsets, namerefs, or
+ * clears those names (`declare -n`, `exec -c`).
  */
 static int command_mutates_home_or_pwd(const char *text)
 {
@@ -344,6 +345,72 @@ static int command_mutates_home_or_pwd(const char *text)
                     return 1;
                 while (*q && *q != ' ' && *q != '\t' && *q != ';' &&
                        *q != '|' && *q != '&' && *q != '\n')
+                    q++;
+            }
+        }
+        if (strncmp(p, "declare", 7) == 0 && !is_ident_cont((unsigned char)p[7])) {
+            const char *q = p + 7;
+            int saw_n = 0;
+
+            while (*q == ' ' || *q == '\t')
+                q++;
+            while (*q == '-') {
+                const char *f = q + 1;
+
+                if (*f == '-') {
+                    while (*q && *q != ' ' && *q != '\t' && *q != ';' &&
+                           *q != '|' && *q != '&' && *q != '\n')
+                        q++;
+                    while (*q == ' ' || *q == '\t')
+                        q++;
+                    continue;
+                }
+                while (*f && *f != ' ' && *f != '\t' && *f != ';' &&
+                       *f != '|' && *f != '&' && *f != '\n') {
+                    if (*f == 'n')
+                        saw_n = 1;
+                    f++;
+                }
+                q = f;
+                while (*q == ' ' || *q == '\t')
+                    q++;
+            }
+            if (saw_n) {
+                const char *s = q;
+
+                while (*s && *s != ';' && *s != '|' && *s != '&' && *s != '\n') {
+                    if (*s == '=' && name_is_home_or_pwd(s + 1, &nlen))
+                        return 1;
+                    if (is_cmd_word_start(text, s) && name_is_home_or_pwd(s, &nlen))
+                        return 1;
+                    s++;
+                }
+            }
+        }
+        if (strncmp(p, "exec", 4) == 0 && !is_ident_cont((unsigned char)p[4])) {
+            const char *q = p + 4;
+
+            while (*q == ' ' || *q == '\t')
+                q++;
+            while (*q == '-') {
+                const char *f = q + 1;
+
+                if (*f == '-') {
+                    while (*q && *q != ' ' && *q != '\t' && *q != ';' &&
+                           *q != '|' && *q != '&' && *q != '\n')
+                        q++;
+                    while (*q == ' ' || *q == '\t')
+                        q++;
+                    continue;
+                }
+                while (*f && *f != ' ' && *f != '\t' && *f != ';' &&
+                       *f != '|' && *f != '&' && *f != '\n') {
+                    if (*f == 'c')
+                        return 1;
+                    f++;
+                }
+                q = f;
+                while (*q == ' ' || *q == '\t')
                     q++;
             }
         }
@@ -1383,6 +1450,7 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
         char *decoded;
         int mutated;
         int file_blocked = 0;
+        int dollar_blocked = 0;
 
         if (!unquoted) {
             set_reason(reason_buf, reason_cap, "command blocked: out of memory", "");
@@ -1394,10 +1462,14 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
             set_reason(reason_buf, reason_cap, "command blocked: out of memory", "");
             return 1;
         }
-        mutated = command_mutates_home_or_pwd(unquoted);
+        /* Identity/hex/octal/unicode fold before HOME/PWD keywords and `$`. */
+        mutated = command_mutates_home_or_pwd(decoded);
         if (!mutated)
             file_blocked = block_if_file_url_escapes(decoded, workspace_root,
                                                      reason_buf, reason_cap);
+        if (!mutated && !file_blocked)
+            dollar_blocked = block_if_dollar_expansions_escape(decoded, workspace_root,
+                                                              reason_buf, reason_cap);
         free(decoded);
         free(unquoted);
         if (mutated) {
@@ -1406,11 +1478,9 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
             fprintf(stderr, "allowlist: blocked HOME/PWD assignment in command\n");
             return 1;
         }
-        if (file_blocked)
+        if (file_blocked || dollar_blocked)
             return 1;
     }
-    if (block_if_dollar_expansions_escape(cmd, workspace_root, reason_buf, reason_cap))
-        return 1;
     if (block_if_encoded_slash_escapes(cmd, workspace_root, reason_buf, reason_cap))
         return 1;
     if (block_if_embedded_paths_escape(cmd, workspace_root, reason_buf, reason_cap))

@@ -31,6 +31,9 @@
  *     (`\\x66ile:`, `\\u0066ile:`, `\\146ile:`, `f\\ile:`) are joined before the URL check.
  *     POSIX `\\` + newline line continuation is collapsed before HOME/PWD and `file:` scans.
  *     `printf -v HOME|PWD` and `os.environ["HOME"]=` / `.update({"HOME":...})` fail closed.
+ *     The same hex/unicode/octal/identity decode used for `file:` recovery runs before
+ *     the HOME/PWD keyword gate and the `$` scan (`PW\\D=`, `\\unset`, `\\x24HOME`,
+ *     `\\044`, `\\u0024`). `declare -n` targeting HOME|PWD and `exec -c` fail closed.
  *     `../` after `://` is still containment-checked so URL-disguised walks cannot skip the gate.
  *
  * Both checks are intentionally conservative and may produce false positives.
