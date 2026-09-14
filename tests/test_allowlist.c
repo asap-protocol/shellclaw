@@ -998,6 +998,171 @@ static int test_workspace_only_blocks_env_replace_and_comma_assign(void)
 	return 0;
 }
 
+/**
+ * POSIX `read HOME|PWD`, GNU `env --unset`, clustered `env -iu`, and
+ * Python `os.unsetenv` / `os.putenv` / `os.environ.clear` must fail closed
+ * so process getenv(PWD/HOME)=workspace cannot allow `$PWD/etc/passwd`.
+ */
+static int test_workspace_only_blocks_read_unset_and_clustered_env(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_rdun_XXXXXX";
+	char *dir;
+	const char *old_pwd;
+	const char *old_home;
+	char pwd_copy[256];
+	char home_copy[256];
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_read_unset_and_clustered_env: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_read_unset_and_clustered_env: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	old_home = getenv("HOME");
+	home_copy[0] = '\0';
+	if (old_home) {
+		if (strlen(old_home) >= sizeof(home_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_read_unset_and_clustered_env: HOME too long\n");
+			return 1;
+		}
+		memcpy(home_copy, old_home, strlen(old_home) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0 || setenv("HOME", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_read_unset_and_clustered_env: setenv failed\n");
+		return 1;
+	}
+
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("read PWD; cat $PWD/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("read HOME; cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("env --unset=HOME cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("env --unset HOME cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("env -iu HOME cat $HOME/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"os.unsetenv('HOME'); open('$HOME/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"os.putenv('HOME',''); open('$HOME/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"os.environ.clear(); open('$PWD/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	if (home_copy[0])
+		(void)setenv("HOME", home_copy, 1);
+	else
+		(void)unsetenv("HOME");
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * Perl braced octal `\o{57}` / `\o{057}` must reconstruct like `\x{2f}`.
+ * Not `chr(47)+` concatenation.
+ */
+static int test_workspace_only_blocks_perl_braced_octal(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_poct_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_perl_braced_octal: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"perl -e 'open F, \"\\o{57}etc/passwd\"'",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"perl -e 'open F, \"\\o{057}etc/passwd\"'",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"perl -e 'open F, \"\\o{056}\\o{056}/secret\"'",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"perl -e 'open F, \"notes.txt\"'",
+		&cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
+/**
+ * Encoded leading `f` (`\\x66` / `\\u0066`) must not hide a `file:` URL.
+ * Real `https://` fetches stay allowed.
+ */
+static int test_workspace_only_blocks_encoded_file_scheme(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_xfle_XXXXXX";
+	char *dir;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_encoded_file_scheme: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"curl \\x66ile://localhost/etc/passwd",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"curl \\u0066ile://localhost/etc/passwd",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"urllib.request.urlopen('\\x66ile:/etc/passwd')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("curl https://example.com/api",
+	                                    &cfg, reason, sizeof(reason)) == 0);
+	rmdir(dir);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
@@ -1042,6 +1207,9 @@ int main(void)
 	RUN(test_workspace_only_blocks_url_disguised_dotdot());
 	RUN(test_workspace_only_blocks_perl_braced_hex());
 	RUN(test_workspace_only_blocks_env_replace_and_comma_assign());
+	RUN(test_workspace_only_blocks_read_unset_and_clustered_env());
+	RUN(test_workspace_only_blocks_perl_braced_octal());
+	RUN(test_workspace_only_blocks_encoded_file_scheme());
 	printf("test_allowlist: all tests passed\n");
 	return 0;
 }
