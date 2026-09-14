@@ -261,6 +261,77 @@ static int test_workspace_only_blocks_home_env_expansion(void)
 	return 0;
 }
 
+/**
+ * Glued expansions never start a strtok token with `$` or `/`, so the host-FS
+ * gate must scan `$` on the full command. `$PWD/../outside` must use the
+ * process PWD, not only a mkdtemp workspace that happens to differ from PWD.
+ */
+static int test_workspace_only_blocks_glued_shell_expansions(void)
+{
+	allowlist_config_t cfg;
+	char reason[256];
+	char ws[] = "/tmp/sc_al_glue_XXXXXX";
+	char *dir;
+	char *old_pwd;
+	char pwd_copy[256];
+	char outside[512];
+	int rc;
+
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_workspace_only_blocks_glued_shell_expansions: mkdtemp failed\n");
+		return 1;
+	}
+	cfg.workspace_path = dir;
+	cfg.workspace_only = 1;
+
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat$IFS/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat${IFS}/etc/passwd",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat$'\\x20/etc/passwd'",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command(
+		"python3 -c \"open('$HOME/.shellclaw/auth_tokens.json')\"",
+		&cfg, reason, sizeof(reason)) == 1);
+	reason[0] = '\0';
+	ASSERT(allowlist_check_shell_command("cat\"$HOME/.bashrc\"",
+	                                    &cfg, reason, sizeof(reason)) == 1);
+
+	old_pwd = getenv("PWD");
+	pwd_copy[0] = '\0';
+	if (old_pwd) {
+		if (strlen(old_pwd) >= sizeof(pwd_copy)) {
+			rmdir(dir);
+			fprintf(stderr, "test_workspace_only_blocks_glued_shell_expansions: PWD too long\n");
+			return 1;
+		}
+		memcpy(pwd_copy, old_pwd, strlen(old_pwd) + 1);
+	}
+	if (setenv("PWD", dir, 1) != 0) {
+		rmdir(dir);
+		fprintf(stderr, "test_workspace_only_blocks_glued_shell_expansions: setenv PWD failed\n");
+		return 1;
+	}
+	snprintf(outside, sizeof(outside), "%s/../sc_al_pwd_stolen_%d.txt", dir, (int)getpid());
+	reason[0] = '\0';
+	rc = allowlist_check_shell_command("cat $PWD/../sc_al_pwd_stolen.txt",
+	                                   &cfg, reason, sizeof(reason));
+	if (pwd_copy[0])
+		(void)setenv("PWD", pwd_copy, 1);
+	else
+		(void)unsetenv("PWD");
+	ASSERT(rc == 1);
+	ASSERT(allowlist_path_is_under_workspace(outside, dir) == 0);
+
+	rmdir(dir);
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Symlink escape test (5.4)                                            */
 /* ------------------------------------------------------------------ */
@@ -371,6 +442,7 @@ int main(void)
 	RUN(test_workspace_only_allows_relative_and_url_slashes());
 	RUN(test_workspace_only_blocks_file_url());
 	RUN(test_workspace_only_blocks_home_env_expansion());
+	RUN(test_workspace_only_blocks_glued_shell_expansions());
 	RUN(test_symlink_escape());
 	RUN(test_dotdot_escape_nonexistent_destination());
 	printf("test_allowlist: all tests passed\n");
