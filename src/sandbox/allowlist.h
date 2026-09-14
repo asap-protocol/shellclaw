@@ -15,7 +15,11 @@
  *     `${HOME}`, `$PWD`, `${PWD}`, and other `$...` forms are also scanned on the
  *     full command so glued expansions (`cat$IFS/etc/passwd`, `cat"$HOME/.bashrc"`,
  *     ANSI-C `$'\x20/...'`) cannot skip tok[0]. Known HOME/PWD forms are expanded
- *     (including a following `/...` suffix); other `$` forms fail closed.
+ *     (including a following `/...` suffix); other `$` forms fail closed. `file:`
+ *     URLs are extracted even when `://` hides the path slash. Missing directories
+ *     before `..` are collapsed lexically so `/ws/nope/../../../tmp` cannot stop
+ *     at `/ws`. Embedded relative `../` is joined to the workspace before the
+ *     same check.
  *
  * Both checks are intentionally conservative and may produce false positives.
  * They are a best-effort defence-in-depth layer. sandbox_exec() isolates
@@ -64,9 +68,10 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
 /**
  * Check whether @p path is contained inside @p workspace_root after resolving symlinks.
  *
- * Uses realpath(3) when the path exists. If it does not, walks to the first
- * existing ancestor and checks that resolved directory (so `..` cannot escape
- * by targeting a file that has not been created yet).
+ * Uses realpath(3) when the path exists. `..` / `.` are collapsed lexically
+ * first so a missing directory before `..` cannot pin the walk at the workspace.
+ * If the collapsed path still does not exist, walks to the first existing
+ * ancestor and checks that resolved directory.
  *
  * Example: allowlist_path_is_under_workspace("/ws/../../tmp/x", "/ws") is 0
  * even when /tmp/x does not exist.
