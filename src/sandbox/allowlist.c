@@ -296,6 +296,27 @@ static int command_mutates_home_or_pwd(const char *text)
                     q++;
             }
         }
+        if (strncmp(p, "read", 4) == 0 && !is_ident_cont((unsigned char)p[4])) {
+            const char *q = p + 4;
+
+            while (*q && *q != ';' && *q != '|' && *q != '&' && *q != '\n') {
+                while (*q == ' ' || *q == '\t')
+                    q++;
+                if (*q == '\0' || *q == ';' || *q == '|' || *q == '&' || *q == '\n')
+                    break;
+                if (*q == '-') {
+                    while (*q && *q != ' ' && *q != '\t' && *q != ';' &&
+                           *q != '|' && *q != '&' && *q != '\n')
+                        q++;
+                    continue;
+                }
+                if (name_is_home_or_pwd(q, &nlen))
+                    return 1;
+                while (*q && *q != ' ' && *q != '\t' && *q != ';' &&
+                       *q != '|' && *q != '&' && *q != '\n')
+                    q++;
+            }
+        }
         if (strncmp(p, "env", 3) == 0 && !is_ident_cont((unsigned char)p[3])) {
             const char *q = p + 3;
 
@@ -303,23 +324,72 @@ static int command_mutates_home_or_pwd(const char *text)
                 if (strncmp(q, "--ignore-environment", 20) == 0 &&
                     !is_ident_cont((unsigned char)q[20]))
                     return 1;
-                if (q[0] == '-' && q[1] == 'i' &&
-                    (q[2] == '\0' || q[2] == ' ' || q[2] == '\t' || q[2] == '-'))
-                    return 1;
-                if (q[0] == '-' && q[1] == 'u') {
-                    const char *unset_arg = q + 2;
+                if (strncmp(q, "--unset", 7) == 0 &&
+                    (q[7] == '\0' || q[7] == ' ' || q[7] == '\t' || q[7] == '=')) {
+                    const char *unset_arg = q + 7;
 
+                    if (*unset_arg == '=')
+                        unset_arg++;
                     while (*unset_arg == ' ' || *unset_arg == '\t')
                         unset_arg++;
                     if (name_is_home_or_pwd(unset_arg, &nlen))
                         return 1;
                 }
+                if (q[0] == '-' && q[1] != '-' && q[1] != '\0') {
+                    const char *f = q + 1;
+                    int saw_i = 0;
+                    int saw_u = 0;
+                    const char *after_u = NULL;
+
+                    while (*f >= 'a' && *f <= 'z') {
+                        if (*f == 'i')
+                            saw_i = 1;
+                        if (*f == 'u') {
+                            saw_u = 1;
+                            after_u = f + 1;
+                        }
+                        f++;
+                    }
+                    if (saw_i)
+                        return 1;
+                    if (saw_u && after_u) {
+                        const char *unset_arg = after_u;
+
+                        while (*unset_arg == ' ' || *unset_arg == '\t')
+                            unset_arg++;
+                        if (name_is_home_or_pwd(unset_arg, &nlen))
+                            return 1;
+                    }
+                }
+                q++;
+            }
+        }
+        if (strncmp(p, "os.unsetenv", 11) == 0 &&
+            !is_ident_cont((unsigned char)p[11])) {
+            const char *q = p + 11;
+
+            while (*q && *q != ';' && *q != '\n') {
+                if (name_is_home_or_pwd(q, &nlen))
+                    return 1;
+                q++;
+            }
+        }
+        if (strncmp(p, "os.putenv", 9) == 0 &&
+            !is_ident_cont((unsigned char)p[9])) {
+            const char *q = p + 9;
+
+            while (*q && *q != ';' && *q != '\n') {
+                if (name_is_home_or_pwd(q, &nlen))
+                    return 1;
                 q++;
             }
         }
         if (strncmp(p, "os.environ", 10) == 0) {
             const char *q = p + 10;
 
+            if (strncmp(q, ".clear", 6) == 0 &&
+                !is_ident_cont((unsigned char)q[6]))
+                return 1;
             if (strncmp(q, ".pop", 4) == 0 ||
                 strncmp(q, ".__delitem__", 12) == 0) {
                 q += (q[1] == 'p') ? 4 : 12;
@@ -350,8 +420,9 @@ static int command_mutates_home_or_pwd(const char *text)
 
 /**
  * Bytes of an escape that decodes to `/` or `.` (`\x2f` / `\x2e`, `\x{2f}`,
- * `\u002f`, `\u{2f}`, `\U0000002f`, octal `\57` / `\56`). Not a Python
- * interpreter: `chr(47)` with no slash encoding in the text is still out of scope.
+ * `\u002f`, `\u{2f}`, `\U0000002f`, octal `\57` / `\56`, Perl `\o{57}` / `\o{056}`).
+ * Not a Python interpreter: `chr(47)` with no slash encoding in the text is
+ * still out of scope.
  */
 static int hex_nibble(unsigned char c);
 static size_t encoded_dot_or_slash_len(const char *p, char *decoded)
@@ -427,6 +498,18 @@ static size_t encoded_dot_or_slash_len(const char *p, char *decoded)
         if (val == 46 || val == 47) {
             *decoded = (char)val;
             return 10;
+        }
+    }
+    if ((p[1] == 'o' || p[1] == 'O') && p[2] == '{') {
+        val = 0;
+        n = 0;
+        while (n < 6 && p[3 + n] >= '0' && p[3 + n] <= '7') {
+            val = val * 8 + (p[3 + n] - '0');
+            n++;
+        }
+        if (n > 0 && p[3 + n] == '}' && (val == 46 || val == 47)) {
+            *decoded = (char)val;
+            return 4 + n;
         }
     }
     if (p[1] >= '0' && p[1] <= '7') {
@@ -828,6 +911,117 @@ static int prefix_ci_eq(const char *p, const char *prefix)
 }
 
 /**
+ * Bytes of `\\xNN` / `\\x{NN}` / `\\u00NN` / `\\u{NN}` / `\\U000000NN` that
+ * decode to a non-NUL byte. Used to recover a hidden `file:` scheme (`\\x66ile:`).
+ */
+static size_t encoded_hex_unicode_byte_len(const char *p, unsigned char *decoded)
+{
+    int hi;
+    int val;
+    size_t n;
+
+    if (!p || !decoded || p[0] != '\\' || p[1] == '\0')
+        return 0;
+    if ((p[1] == 'x' || p[1] == 'X') && p[2] == '{') {
+        val = 0;
+        n = 0;
+        while (n < 6 && hex_nibble((unsigned char)p[3 + n]) >= 0) {
+            val = (val << 4) | hex_nibble((unsigned char)p[3 + n]);
+            n++;
+        }
+        if (n > 0 && p[3 + n] == '}' && val >= 1 && val <= 255) {
+            *decoded = (unsigned char)val;
+            return 4 + n;
+        }
+        return 0;
+    }
+    if (p[1] == 'x' || p[1] == 'X') {
+        int lo;
+
+        hi = hex_nibble((unsigned char)p[2]);
+        lo = hex_nibble((unsigned char)p[3]);
+        if (hi >= 0 && lo >= 0) {
+            val = (hi << 4) | lo;
+            if (val >= 1 && val <= 255) {
+                *decoded = (unsigned char)val;
+                return 4;
+            }
+        }
+        return 0;
+    }
+    if (p[1] == 'u' && p[2] == '{') {
+        val = 0;
+        n = 0;
+        while (n < 6 && hex_nibble((unsigned char)p[3 + n]) >= 0) {
+            val = (val << 4) | hex_nibble((unsigned char)p[3 + n]);
+            n++;
+        }
+        if (n > 0 && p[3 + n] == '}' && val >= 1 && val <= 255) {
+            *decoded = (unsigned char)val;
+            return 4 + n;
+        }
+        return 0;
+    }
+    if (p[1] == 'u') {
+        val = 0;
+        for (n = 0; n < 4; n++) {
+            hi = hex_nibble((unsigned char)p[2 + n]);
+            if (hi < 0)
+                return 0;
+            val = (val << 4) | hi;
+        }
+        if (val >= 1 && val <= 255) {
+            *decoded = (unsigned char)val;
+            return 6;
+        }
+        return 0;
+    }
+    if (p[1] == 'U') {
+        val = 0;
+        for (n = 0; n < 8; n++) {
+            hi = hex_nibble((unsigned char)p[2 + n]);
+            if (hi < 0)
+                return 0;
+            val = (val << 4) | hi;
+        }
+        if (val >= 1 && val <= 255) {
+            *decoded = (unsigned char)val;
+            return 10;
+        }
+    }
+    return 0;
+}
+
+static char *dup_decode_hex_unicode(const char *src)
+{
+    size_t n;
+    size_t di;
+    char *dst;
+    const char *p;
+
+    if (!src)
+        return NULL;
+    n = strlen(src);
+    dst = malloc(n + 1);
+    if (!dst)
+        return NULL;
+    di = 0;
+    for (p = src; *p; ) {
+        unsigned char ch;
+        size_t esc = encoded_hex_unicode_byte_len(p, &ch);
+
+        if (esc) {
+            dst[di++] = (char)ch;
+            p += esc;
+        } else {
+            dst[di++] = *p++;
+        }
+    }
+    dst[di] = '\0';
+    return dst;
+}
+
+/**
  * `is_fs_absolute_path_start` skips `/` after `:`, so `file:/etc/passwd` and
  * `file://localhost/etc/passwd` never start a path fragment. Extract the local
  * path from `file:` URLs, percent-decode, and run the workspace check.
@@ -1117,6 +1311,7 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
     workspace_root = ws_resolved;
     {
         char *unquoted = dup_unquoted(cmd);
+        char *decoded;
         int mutated;
         int file_blocked = 0;
 
@@ -1124,10 +1319,17 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
             set_reason(reason_buf, reason_cap, "command blocked: out of memory", "");
             return 1;
         }
+        decoded = dup_decode_hex_unicode(unquoted);
+        if (!decoded) {
+            free(unquoted);
+            set_reason(reason_buf, reason_cap, "command blocked: out of memory", "");
+            return 1;
+        }
         mutated = command_mutates_home_or_pwd(unquoted);
         if (!mutated)
-            file_blocked = block_if_file_url_escapes(unquoted, workspace_root,
+            file_blocked = block_if_file_url_escapes(decoded, workspace_root,
                                                      reason_buf, reason_cap);
+        free(decoded);
         free(unquoted);
         if (mutated) {
             set_reason(reason_buf, reason_cap,
