@@ -57,8 +57,12 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
 /**
  * Check whether @p path is contained inside @p workspace_root after resolving symlinks.
  *
- * Uses realpath(3); if the path does not exist on disk, checks the string prefix
- * against the canonicalised workspace root.
+ * Uses realpath(3) when the path exists. If it does not, walks to the first
+ * existing ancestor and checks that resolved directory (so `..` cannot escape
+ * by targeting a file that has not been created yet).
+ *
+ * Example: allowlist_path_is_under_workspace("/ws/../../tmp/x", "/ws") is 0
+ * even when /tmp/x does not exist.
  *
  * @param path           Absolute or relative path to test.
  * @param workspace_root Absolute path to the workspace root (already resolved).
