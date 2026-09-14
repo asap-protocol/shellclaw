@@ -231,7 +231,7 @@ static int is_cmd_word_start(const char *text, const char *p)
     prev = (unsigned char)p[-1];
     return prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' ||
            prev == ';' || prev == '|' || prev == '&' || prev == '(' ||
-           prev == '{' || prev == ')';
+           prev == '{' || prev == ')' || prev == ',';
 }
 
 static int name_is_home_or_pwd(const char *p, size_t *nlen)
@@ -296,14 +296,62 @@ static int command_mutates_home_or_pwd(const char *text)
                     q++;
             }
         }
+        if (strncmp(p, "env", 3) == 0 && !is_ident_cont((unsigned char)p[3])) {
+            const char *q = p + 3;
+
+            while (*q && *q != ';' && *q != '|' && *q != '&' && *q != '\n') {
+                if (strncmp(q, "--ignore-environment", 20) == 0 &&
+                    !is_ident_cont((unsigned char)q[20]))
+                    return 1;
+                if (q[0] == '-' && q[1] == 'i' &&
+                    (q[2] == '\0' || q[2] == ' ' || q[2] == '\t' || q[2] == '-'))
+                    return 1;
+                if (q[0] == '-' && q[1] == 'u') {
+                    const char *unset_arg = q + 2;
+
+                    while (*unset_arg == ' ' || *unset_arg == '\t')
+                        unset_arg++;
+                    if (name_is_home_or_pwd(unset_arg, &nlen))
+                        return 1;
+                }
+                q++;
+            }
+        }
+        if (strncmp(p, "os.environ", 10) == 0) {
+            const char *q = p + 10;
+
+            if (strncmp(q, ".pop", 4) == 0 ||
+                strncmp(q, ".__delitem__", 12) == 0) {
+                q += (q[1] == 'p') ? 4 : 12;
+                while (*q && *q != ';' && *q != '\n') {
+                    if (name_is_home_or_pwd(q, &nlen))
+                        return 1;
+                    q++;
+                }
+            }
+        }
+        if (strncmp(p, "del", 3) == 0 && !is_ident_cont((unsigned char)p[3])) {
+            const char *q = p + 3;
+
+            while (*q == ' ' || *q == '\t')
+                q++;
+            if (strncmp(q, "os.environ", 10) == 0) {
+                q += 10;
+                while (*q && *q != ';' && *q != '\n') {
+                    if (name_is_home_or_pwd(q, &nlen))
+                        return 1;
+                    q++;
+                }
+            }
+        }
     }
     return 0;
 }
 
 /**
- * Bytes of an escape that decodes to `/` or `.` (`\x2f` / `\x2e`, `\u002f`,
- * `\u{2f}`, `\U0000002f`, octal `\57` / `\56`). Not a Python interpreter:
- * `chr(47)` with no slash encoding in the text is still out of scope.
+ * Bytes of an escape that decodes to `/` or `.` (`\x2f` / `\x2e`, `\x{2f}`,
+ * `\u002f`, `\u{2f}`, `\U0000002f`, octal `\57` / `\56`). Not a Python
+ * interpreter: `chr(47)` with no slash encoding in the text is still out of scope.
  */
 static int hex_nibble(unsigned char c);
 static size_t encoded_dot_or_slash_len(const char *p, char *decoded)
@@ -314,6 +362,18 @@ static size_t encoded_dot_or_slash_len(const char *p, char *decoded)
 
     if (!p || !decoded || p[0] != '\\' || p[1] == '\0')
         return 0;
+    if ((p[1] == 'x' || p[1] == 'X') && p[2] == '{') {
+        val = 0;
+        n = 0;
+        while (n < 6 && hex_nibble((unsigned char)p[3 + n]) >= 0) {
+            val = (val << 4) | hex_nibble((unsigned char)p[3 + n]);
+            n++;
+        }
+        if (n > 0 && p[3 + n] == '}' && (val == 46 || val == 47)) {
+            *decoded = (char)val;
+            return 4 + n;
+        }
+    }
     if ((p[1] == 'x' || p[1] == 'X')) {
         int lo;
 
@@ -440,7 +500,7 @@ static int slash_follows_home_or_pwd_brace(const char *text, const char *slash)
     return 0;
 }
 
-/** True when @p p sits in a `://` URL span (so `https://.../../` is not a host path). */
+/** True when @p p sits in a `://` URL span. `../` after that is still a path. */
 static int is_inside_url(const char *text, const char *p)
 {
     const char *q;
@@ -470,7 +530,7 @@ static int is_fs_absolute_path_start(const char *text, const char *p)
                                p[2] == '\'' || p[2] == '"' ||
                                !is_path_body_char((unsigned char)p[2])))))
             return 0;
-        if (is_inside_url(text, p))
+        if (is_inside_url(text, p) && p[1] != '.')
             return 0;
         if (p == text)
             return 1;
