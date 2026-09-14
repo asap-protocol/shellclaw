@@ -143,6 +143,7 @@ struct discord_ctx {
 	char *rx_buf;
 	size_t rx_len;
 	size_t rx_cap;
+	int rx_skip;
 	int heartbeat_interval_ms;
 	uint64_t last_seq;
 	char *session_id;
@@ -176,30 +177,14 @@ static uint64_t discord_now_ms(void)
 static void discord_rx_reset(struct discord_ctx *dc)
 {
 	dc->rx_len = 0;
+	dc->rx_skip = 0;
 }
 
 /** Appends one RX fragment; returns 0 ok, -1 overflow. */
 static int discord_rx_append(struct discord_ctx *dc, const void *in, size_t len)
 {
-	if (len > RX_MAX || dc->rx_len > RX_MAX - len)
-		return -1;
-	if (dc->rx_cap < dc->rx_len + len) {
-		size_t need = dc->rx_len + len + 1;
-		size_t ncap = dc->rx_cap ? dc->rx_cap * 2 : 4096;
-		while (ncap < need && ncap < RX_MAX)
-			ncap *= 2;
-		if (need > RX_MAX)
-			return -1;
-		char *p = realloc(dc->rx_buf, ncap);
-		if (!p)
-			return -1;
-		dc->rx_buf = p;
-		dc->rx_cap = ncap;
-	}
-	memcpy(dc->rx_buf + dc->rx_len, in, len);
-	dc->rx_len += len;
-	dc->rx_buf[dc->rx_len] = '\0';
-	return 0;
+	return discord_helpers_rx_append(&dc->rx_buf, &dc->rx_len, &dc->rx_cap, in, len,
+	                                 RX_MAX);
 }
 
 static int discord_send_json(struct lws *wsi, const char *json)
@@ -538,9 +523,15 @@ static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason,
 		}
 		break;
 	case LWS_CALLBACK_CLIENT_RECEIVE:
+		if (dc->rx_skip) {
+			if (lws_is_final_fragment(wsi))
+				dc->rx_skip = 0;
+			break;
+		}
 		if (discord_rx_append(dc, in, len) != 0) {
 			fprintf(stderr, "shellclaw: discord: gateway payload too large\n");
 			discord_rx_reset(dc);
+			dc->rx_skip = !lws_is_final_fragment(wsi);
 			break;
 		}
 		if (lws_is_final_fragment(wsi)) {

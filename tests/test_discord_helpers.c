@@ -7,6 +7,7 @@
 #include "channels/channel.h"
 #include "cJSON.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ASSERT(c) do { if (!(c)) { fprintf(stderr, "FAIL: %s:%d %s\n", __FILE__, __LINE__, #c); return 1; } } while (0)
@@ -140,6 +141,72 @@ static int test_route_message_create_rejects_edge_cases(void)
 	return 0;
 }
 
+/** Exact payload fill of a power-of-two cap must still reserve one byte for NUL. */
+static int test_rx_append_grows_for_nul(void)
+{
+	char *buf;
+	size_t len;
+	size_t cap;
+	char a[4095];
+	char one;
+	char *big;
+	char *big2;
+
+	buf = NULL;
+	len = 0;
+	cap = 0;
+	one = 'Z';
+	memset(a, 'A', sizeof(a));
+	ASSERT(discord_helpers_rx_append(&buf, &len, &cap, a, sizeof(a), 512 * 1024) == 0);
+	ASSERT(len == sizeof(a));
+	ASSERT(cap >= len + 1);
+	ASSERT(buf[len] == '\0');
+	ASSERT(discord_helpers_rx_append(&buf, &len, &cap, &one, 1, 512 * 1024) == 0);
+	ASSERT(len == 4096);
+	ASSERT(cap >= 4097);
+	ASSERT(buf[4096] == '\0');
+	ASSERT(buf[4095] == 'Z');
+
+	free(buf);
+	buf = NULL;
+	len = 0;
+	cap = 0;
+	big = malloc(65536);
+	big2 = malloc(65536);
+	ASSERT(big && big2);
+	memset(big, 'B', 65536);
+	memset(big2, 'C', 65536);
+	ASSERT(discord_helpers_rx_append(&buf, &len, &cap, big, 65536, 512 * 1024) == 0);
+	ASSERT(len == 65536);
+	ASSERT(cap == 131072);
+	ASSERT(discord_helpers_rx_append(&buf, &len, &cap, big2, 65536, 512 * 1024) == 0);
+	ASSERT(len == 131072);
+	ASSERT(cap >= 131073);
+	ASSERT(buf[131072] == '\0');
+	ASSERT(buf[0] == 'B' && buf[65535] == 'B');
+	ASSERT(buf[65536] == 'C' && buf[131071] == 'C');
+	free(big);
+	free(big2);
+	free(buf);
+	return 0;
+}
+
+static int test_rx_append_rejects_over_max(void)
+{
+	char *buf;
+	size_t len;
+	size_t cap;
+	char chunk[16];
+
+	buf = NULL;
+	len = 0;
+	cap = 0;
+	memset(chunk, 'x', sizeof(chunk));
+	ASSERT(discord_helpers_rx_append(&buf, &len, &cap, chunk, sizeof(chunk), 8) != 0);
+	ASSERT(buf == NULL);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_allow_entry_equals());
@@ -150,6 +217,8 @@ int main(void)
 	RUN(test_lifecycle_str());
 	RUN(test_route_message_create_fixture());
 	RUN(test_route_message_create_rejects_edge_cases());
+	RUN(test_rx_append_grows_for_nul());
+	RUN(test_rx_append_rejects_over_max());
 	printf("test_discord_helpers: all tests passed\n");
 	return 0;
 }
