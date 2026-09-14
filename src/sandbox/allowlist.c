@@ -309,13 +309,14 @@ static int hex_nibble(unsigned char c);
 static size_t encoded_dot_or_slash_len(const char *p, char *decoded)
 {
     int hi;
-    int lo;
     int val;
     size_t n;
 
     if (!p || !decoded || p[0] != '\\' || p[1] == '\0')
         return 0;
     if ((p[1] == 'x' || p[1] == 'X')) {
+        int lo;
+
         hi = hex_nibble((unsigned char)p[2]);
         lo = hex_nibble((unsigned char)p[3]);
         if (hi >= 0 && lo >= 0) {
