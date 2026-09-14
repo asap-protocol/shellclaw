@@ -84,6 +84,103 @@ static int has_path_chars(const char *tok)
     return tok[0] == '/' || tok[0] == '~' || tok[0] == '.';
 }
 
+static char *strip_surrounding_quotes(char *tok)
+{
+    size_t n;
+
+    if (!tok || !tok[0]) return tok;
+    n = strlen(tok);
+    if (n >= 2 && ((tok[0] == '\'' && tok[n - 1] == '\'') ||
+                   (tok[0] == '"' && tok[n - 1] == '"'))) {
+        tok[n - 1] = '\0';
+        return tok + 1;
+    }
+    return tok;
+}
+
+static int is_path_body_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '/' || c == '.' || c == '_' ||
+           c == '-' || c == '+' || c == '%' || c == '@';
+}
+
+static int is_fs_absolute_path_start(const char *text, const char *p)
+{
+    unsigned char prev;
+
+    if (!text || !p || (*p != '/' && *p != '~'))
+        return 0;
+    if (p == text)
+        return 1;
+    prev = (unsigned char)p[-1];
+    if (*p == '/' && prev == ':')
+        return 0;
+    if (*p == '/' && p >= text + 2 && p[-1] == '/' && p[-2] == ':')
+        return 0;
+    if (is_path_body_char(prev) && prev != '/')
+        return 0;
+    return 1;
+}
+
+static int expand_tilde_fragment(const char *fragment, char *dest, size_t dest_cap)
+{
+    const char *home;
+    int n;
+
+    if (!fragment || !dest || dest_cap == 0)
+        return -1;
+    if (fragment[0] != '~') {
+        if (strlen(fragment) >= dest_cap)
+            return -1;
+        memcpy(dest, fragment, strlen(fragment) + 1);
+        return 0;
+    }
+    home = getenv("HOME");
+    if (!home)
+        home = "";
+    n = snprintf(dest, dest_cap, "%s%s", home, fragment + 1);
+    if (n < 0 || (size_t)n >= dest_cap)
+        return -1;
+    return 0;
+}
+
+static int block_if_embedded_paths_escape(const char *text, const char *workspace_root,
+                                          char *reason_buf, size_t reason_cap)
+{
+    const char *p;
+
+    if (!text || !workspace_root) return 0;
+    for (p = text; *p; p++) {
+        char fragment[PATH_MAX];
+        char expanded[PATH_MAX];
+        size_t n = 0;
+        const char *start;
+
+        if (!is_fs_absolute_path_start(text, p))
+            continue;
+        start = p;
+        fragment[n++] = *p++;
+        while (*p && is_path_body_char((unsigned char)*p) && n + 1 < sizeof(fragment))
+            fragment[n++] = *p++;
+        fragment[n] = '\0';
+        if (expand_tilde_fragment(fragment, expanded, sizeof(expanded)) != 0) {
+            set_reason(reason_buf, reason_cap,
+                       "command blocked: path escapes workspace: ", fragment);
+            return 1;
+        }
+        if (!allowlist_path_is_under_workspace(expanded, workspace_root)) {
+            set_reason(reason_buf, reason_cap,
+                       "command blocked: path escapes workspace: ", expanded);
+            fprintf(stderr, "allowlist: blocked path outside workspace: %s\n", expanded);
+            return 1;
+        }
+        if (p > start)
+            p--;
+    }
+    return 0;
+}
+
 static int resolved_is_under_workspace(const char *resolved, const char *actual_ws, size_t wlen)
 {
     if (!resolved || !actual_ws || wlen == 0) return 0;
@@ -188,11 +285,16 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
         ws_resolved[n] = '\0';
     }
     workspace_root = ws_resolved;
-    /* Tokenize the command and check each path-like token. */
+    if (block_if_embedded_paths_escape(cmd, workspace_root, reason_buf, reason_cap))
+        return 1;
     cmd_copy = strdup(cmd);
-    if (!cmd_copy) return 0; /* fail-open on OOM */
+    if (!cmd_copy) {
+        set_reason(reason_buf, reason_cap, "command blocked: out of memory", "");
+        return 1;
+    }
     tok = strtok_r(cmd_copy, " \t\n;|&><", &saveptr);
     while (tok) {
+        tok = strip_surrounding_quotes(tok);
         if (has_path_chars(tok)) {
             /* Expand a leading tilde naively */
             char expanded[PATH_MAX];
