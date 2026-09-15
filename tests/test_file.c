@@ -196,6 +196,51 @@ static void test_symlink_escape_rejected(void)
 	rmdir(tmpdir);
 }
 
+/*
+ * write_file used the first existing ancestor when realpath failed. A dangling
+ * symlink in the workspace therefore passed the prefix check, and fopen("w")
+ * followed it and created/truncated a host file outside the workspace.
+ */
+static void test_file_write_dangling_symlink_rejected(void)
+{
+	char tmpdir[PATH_MAX];
+	char outside[PATH_MAX];
+	char link_path[PATH_MAX];
+	char config_path[PATH_MAX];
+	char args[PATH_MAX + 128];
+	char buf[256];
+	config_t *cfg;
+	const tool_t *t;
+	struct stat st;
+	int r;
+
+	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_dangle_%d", (int)getpid());
+	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
+	snprintf(outside, sizeof(outside), "/tmp/sc_file_pwned_%d", (int)getpid());
+	unlink(outside);
+	snprintf(link_path, sizeof(link_path), "%s/leak", tmpdir);
+	unlink(link_path);
+	if (symlink(outside, link_path) != 0) {
+		rmdir(tmpdir);
+		return;
+	}
+	cfg = make_ws_config(tmpdir, config_path, sizeof(config_path));
+	MU_ASSERT(cfg != NULL, "dangling symlink: load config");
+	tool_file_set_config(cfg);
+	t = tool_file_get();
+	snprintf(args, sizeof(args),
+		 "{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"pwned\"}",
+		 link_path);
+	r = t->execute(args, buf, sizeof(buf));
+	MU_ASSERT(r == -1, "write through dangling symlink rejected");
+	MU_ASSERT(stat(outside, &st) != 0, "host path outside workspace not created");
+	config_free(cfg);
+	unlink(config_path);
+	unlink(link_path);
+	unlink(outside);
+	rmdir(tmpdir);
+}
+
 int main(void)
 {
 	MU_RUN(test_file_read_write_list);
@@ -203,6 +248,7 @@ int main(void)
 	MU_RUN(test_file_outside_workspace_rejected);
 	MU_RUN(test_path_traversal_rejected);
 	MU_RUN(test_symlink_escape_rejected);
+	MU_RUN(test_file_write_dangling_symlink_rejected);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }

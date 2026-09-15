@@ -7,6 +7,7 @@
 #include "hardware/hardware_camera.h"
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static char s_spawn_out_path[256];
@@ -230,6 +231,35 @@ static int test_output_path_inside_workspace_allowed(void)
 				       sizeof(err)) == 0);
 	unlink(inside);
 	teardown();
+	rmdir(ws);
+	return 0;
+}
+
+static int test_output_dangling_symlink_rejected(void)
+{
+	char result[256];
+	char err[128];
+	char ws[128];
+	char link_path[256];
+	char outside[256];
+	struct stat st;
+
+	ASSERT(test_runner_mkdtemp_path("shellclaw_cam_dangle", ws, sizeof(ws)) == 0);
+	snprintf(outside, sizeof(outside), "/tmp/sc_cam_pwned_%d.jpg", (int)getpid());
+	unlink(outside);
+	snprintf(link_path, sizeof(link_path), "%s/shot.jpg", ws);
+	ASSERT(symlink(outside, link_path) == 0);
+	hardware_camera_set_workspace(ws);
+	RUN(setup_mock());
+	ASSERT(hardware_camera_capture(BOARD_JETSON_ORIN_NANO, "csi", "640x480", 75, 0, 0,
+				       link_path, result, sizeof(result), err,
+				       sizeof(err)) == -1);
+	ASSERT(strstr(err, "workspace") != NULL);
+	ASSERT(s_spawn_called == 0);
+	ASSERT(stat(outside, &st) != 0);
+	teardown();
+	unlink(link_path);
+	unlink(outside);
 	rmdir(ws);
 	return 0;
 }
@@ -606,6 +636,7 @@ int main(void)
 	RUN(test_unsafe_output_path_rejected());
 	RUN(test_output_path_outside_workspace_rejected());
 	RUN(test_output_path_inside_workspace_allowed());
+	RUN(test_output_dangling_symlink_rejected());
 	RUN(test_output_path_traversal_rejected());
 	RUN(test_resolution_injection_rejected());
 	RUN(test_camera_type_injection_rejected());

@@ -115,6 +115,11 @@ static int path_inside_workspace(const char *path)
 		return 0;
 	if (realpath(path, resolved) != NULL)
 		return resolved_under_workspace(resolved, ws_resolved);
+	{
+		struct stat lst;
+		if (lstat(path, &lst) == 0 && S_ISLNK(lst.st_mode))
+			return 0;
+	}
 	snprintf(path_copy, sizeof(path_copy), "%s", path);
 	for (;;) {
 		char *dir = dirname(path_copy);
