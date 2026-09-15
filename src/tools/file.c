@@ -10,6 +10,8 @@
 #include "core/config.h"
 #include "cJSON.h"
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
 #include <stdio.h>
@@ -49,6 +51,13 @@ static int path_within_workspace(const char *path, char *resolved, size_t resolv
 		if (strncmp(resolved, ws_resolved, ws_len) != 0) return 0;
 		if (resolved[ws_len] != '\0' && resolved[ws_len] != '/') return 0;
 		return 1;
+	}
+	{
+		struct stat lst;
+		/* Dangling (or otherwise unresolvable) symlink: do not treat the
+		 * workspace ancestor as sufficient — fopen/open would follow it. */
+		if (lstat(path, &lst) == 0 && S_ISLNK(lst.st_mode))
+			return 0;
 	}
 	char path_copy[PATH_MAX];
 	snprintf(path_copy, sizeof(path_copy), "%s", path);
@@ -104,6 +113,7 @@ static int file_write(const char *path, const char *content, char *result_buf, s
 	}
 	int ws_only = g_file_cfg ? config_workspace_only(g_file_cfg) : 0;
 	char safe_path[PATH_MAX];
+	FILE *f;
 	if (!ws_only) {
 		snprintf(safe_path, sizeof(safe_path), "%s", path);
 	} else {
@@ -124,10 +134,25 @@ static int file_write(const char *path, const char *content, char *result_buf, s
 			memcpy(safe_path + res_len + 1, base, base_len + 1);
 		}
 	}
-	FILE *f = fopen(safe_path, "w");
-	if (!f) {
-		snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
-		return -1;
+	{
+		int flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
+		int fd;
+		if (ws_only)
+			flags |= O_NOFOLLOW;
+		fd = open(safe_path, flags, 0644);
+		if (fd < 0) {
+			if (ws_only && errno == ELOOP)
+				snprintf(result_buf, max_len, "{\"error\":\"path outside workspace\"}");
+			else
+				snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
+			return -1;
+		}
+		f = fdopen(fd, "w");
+		if (!f) {
+			close(fd);
+			snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
+			return -1;
+		}
 	}
 	if (content) {
 		size_t len = strlen(content);
