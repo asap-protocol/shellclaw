@@ -214,6 +214,36 @@ static int test_output_path_outside_workspace_rejected(void)
 	return 0;
 }
 
+/**
+ * workspace_only with empty workspace_path must fail closed (file.c parity).
+ * Previously path_inside_workspace treated empty s_workspace as "allow all".
+ */
+static int test_empty_workspace_enforced_denies_outside(void)
+{
+	char result[256];
+	char err[128];
+	const char *outside = "/tmp/shellclaw_cam_empty_ws_escape.jpg";
+
+	unlink(outside);
+	/* Non-NULL empty string: workspace_only on, path missing/empty. */
+	hardware_camera_set_workspace("");
+	ASSERT(hardware_camera_output_allowed(outside) == 0);
+	RUN(setup_mock());
+	ASSERT(hardware_camera_capture(BOARD_JETSON_ORIN_NANO, "csi", "640x480", 75, 0, 0,
+				       outside, result, sizeof(result), err,
+				       sizeof(err)) == -1);
+	ASSERT(strstr(err, "workspace") != NULL);
+	ASSERT(s_spawn_called == 0);
+	ASSERT(access(outside, F_OK) != 0);
+	teardown();
+	/* NULL: workspace_only off — containment disabled. */
+	hardware_camera_init();
+	hardware_camera_set_workspace(NULL);
+	ASSERT(hardware_camera_output_allowed(outside) == 1);
+	hardware_camera_shutdown();
+	return 0;
+}
+
 static int test_output_path_inside_workspace_allowed(void)
 {
 	char result[256];
@@ -605,6 +635,7 @@ int main(void)
 	RUN(test_capture_argument_validation());
 	RUN(test_unsafe_output_path_rejected());
 	RUN(test_output_path_outside_workspace_rejected());
+	RUN(test_empty_workspace_enforced_denies_outside());
 	RUN(test_output_path_inside_workspace_allowed());
 	RUN(test_output_path_traversal_rejected());
 	RUN(test_resolution_injection_rejected());

@@ -16,6 +16,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ### Security
 - Camera auto-output keeps the exclusive `mkstemp` inode (no unlink + `${tmpl}.jpg` sibling).
 - Reject I2C `bus` outside 0–255 at the tool JSON boundary.
+- `camera_capture` fails closed when `workspace_only` is on but `workspace_path` is empty (same deny policy as `write_file`); previously an empty workspace root allowed arbitrary JPEG output paths.
 
 ---
 

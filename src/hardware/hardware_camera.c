@@ -32,6 +32,9 @@ typedef enum camera_cli_kind {
 
 static int s_camera_ready;
 static char s_workspace[PATH_MAX];
+/** Non-zero when workspace_only is on (set_workspace with non-NULL). Empty
+ * s_workspace with enforcement fails closed — same policy as write_file. */
+static int s_workspace_enforced;
 static hardware_camera_spawn_fn s_test_spawn;
 static char *s_last_argv[HARDWARE_CAMERA_ARGV_MAX];
 static char s_last_argv_storage[HARDWARE_CAMERA_ARGV_MAX][ARG_BUF_SZ];
@@ -109,8 +112,12 @@ static int path_inside_workspace(const char *path)
 	char resolved[PATH_MAX];
 	char path_copy[PATH_MAX];
 
-	if (s_workspace[0] == '\0' || !path || path[0] == '\0')
+	/* workspace_only off (set_workspace(NULL)): no containment. */
+	if (!s_workspace_enforced)
 		return 1;
+	/* Enforced but missing/empty root or empty path: deny (file.c parity). */
+	if (s_workspace[0] == '\0' || !path || path[0] == '\0')
+		return 0;
 	if (realpath(s_workspace, ws_resolved) == NULL)
 		return 0;
 	if (realpath(path, resolved) != NULL)
@@ -417,7 +424,15 @@ int hardware_camera_init(void)
 
 void hardware_camera_set_workspace(const char *workspace)
 {
-	if (!workspace || workspace[0] == '\0') {
+	if (!workspace) {
+		/* workspace_only off: do not enforce containment. */
+		s_workspace[0] = '\0';
+		s_workspace_enforced = 0;
+		return;
+	}
+	/* workspace_only on: enforce. Empty string fails closed (cannot validate). */
+	s_workspace_enforced = 1;
+	if (workspace[0] == '\0') {
 		s_workspace[0] = '\0';
 		return;
 	}
@@ -436,6 +451,7 @@ void hardware_camera_shutdown(void)
 	s_test_spawn = NULL;
 	s_camera_ready = 0;
 	s_workspace[0] = '\0';
+	s_workspace_enforced = 0;
 	s_spawn_timeout_ms = HARDWARE_CAMERA_SPAWN_TIMEOUT_MS;
 	s_last_argv_count = 0;
 	memset(s_last_argv, 0, sizeof(s_last_argv));
