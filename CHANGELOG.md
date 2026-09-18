@@ -14,6 +14,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Gateway `/health` `version` matches `SHELLCLAW_RELEASE_VERSION`.
 
 ### Security
+- `auth_pair` fails closed when bearer RNG fails (no uninitialized token, no tokens-file write, pairing code kept).
 - Camera auto-output keeps the exclusive `mkstemp` inode (no unlink + `${tmpl}.jpg` sibling).
 - Reject I2C `bus` outside 0–255 at the tool JSON boundary.
 

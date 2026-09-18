@@ -174,7 +174,9 @@ int auth_pair(auth_ctx_t *ctx, const char *code, char *token_out, size_t token_s
 	    !constant_time_cmp(code, ctx->pending_pairing_code, PAIRING_CODE_LEN))
 		return -1;
 	char new_token[TOKEN_LEN + 1];
-	generate_random_hex(new_token, TOKEN_LEN);
+	/* Fail closed: never persist or return an uninitialized bearer on RNG/OOM. */
+	if (generate_random_hex(new_token, TOKEN_LEN) != 0)
+		return -1;
 	/* Read existing tokens and append (multi-device support). */
 	cJSON *arr = NULL;
 	{

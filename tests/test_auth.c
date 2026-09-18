@@ -5,10 +5,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/auth.h"
+#include "crypto/crypto.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define ASSERT(c) do { if (!(c)) { fprintf(stderr, "FAIL: %s:%d %s\n", __FILE__, __LINE__, #c); return 1; } } while (0)
@@ -302,6 +304,47 @@ static int test_pair_lockout_null_ip(void)
 	return 0;
 }
 
+/**
+ * auth_pair must fail closed when bearer RNG fails: do not return success,
+ * do not write auth_tokens.json, and keep the pending pairing code usable.
+ */
+static int test_auth_pair_fails_closed_on_urandom_failure(void)
+{
+	const char *path = "/tmp/shellclaw_test_tokens_urandom_fail.json";
+	auth_ctx_t *ctx;
+	char *code;
+	char token[64];
+	struct stat st;
+	int paired_after;
+
+	unlink(path);
+	ctx = auth_init(path);
+	ASSERT(ctx != NULL);
+	code = auth_get_or_create_pairing_code(ctx);
+	ASSERT(code != NULL);
+
+	memset(token, 0x41, sizeof(token));
+	token[sizeof(token) - 1] = '\0';
+	crypto_test_force_urandom_fail(1);
+	ASSERT(auth_pair(ctx, code, token, sizeof(token)) != 0);
+	crypto_test_clear_force_urandom_fail();
+
+	/* Must not leave a success-looking empty/garbage bearer or tokens file. */
+	ASSERT(token[0] == 'A');
+	ASSERT(stat(path, &st) != 0);
+
+	memset(token, 0, sizeof(token));
+	paired_after = auth_pair(ctx, code, token, sizeof(token));
+	ASSERT(paired_after == 0);
+	ASSERT(strlen(token) == TEST_TOKEN_HEX_LEN);
+	ASSERT(auth_validate_token(ctx, token) == 1);
+
+	free(code);
+	auth_cleanup(ctx);
+	unlink(path);
+	return 0;
+}
+
 static int test_auth_pair_rejects_malformed_code(void)
 {
 	const char *path = "/tmp/shellclaw_test_tokens_malformed.json";
@@ -469,6 +512,7 @@ int main(void)
 	if (test_pair_lockout_clear_on_success() != 0) { fprintf(stderr, "test_pair_lockout_clear_on_success failed\n"); failed++; }
 	if (test_pair_lockout_independent_ips() != 0) { fprintf(stderr, "test_pair_lockout_independent_ips failed\n"); failed++; }
 	if (test_pair_lockout_null_ip() != 0) { fprintf(stderr, "test_pair_lockout_null_ip failed\n"); failed++; }
+	if (test_auth_pair_fails_closed_on_urandom_failure() != 0) { fprintf(stderr, "test_auth_pair_fails_closed_on_urandom_failure failed\n"); failed++; }
 	if (test_auth_pair_rejects_malformed_code() != 0) { fprintf(stderr, "test_auth_pair_rejects_malformed_code failed\n"); failed++; }
 	if (test_auth_pair_evicts_oldest_at_cap() != 0) { fprintf(stderr, "test_auth_pair_evicts_oldest_at_cap failed\n"); failed++; }
 	if (test_auth_validate_token_rejects_length_mismatch() != 0) { fprintf(stderr, "test_auth_validate_token_rejects_length_mismatch failed\n"); failed++; }
