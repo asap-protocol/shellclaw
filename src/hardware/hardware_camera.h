@@ -51,14 +51,18 @@ int hardware_camera_capture(board_id_t board, const char *camera_type,
 
 /**
  * Bind the file-tool workspace root used for caller-supplied capture paths.
- * NULL or empty disables the check (auto temp files and unit tests).
+ * NULL disables containment (workspace_only off). Non-NULL enables enforcement;
+ * an empty string fails closed (deny caller paths) — same as write_file when
+ * workspace_path is missing/empty under workspace_only.
+ *
+ * Example: hardware_camera_set_workspace("") denies /tmp/out.jpg; NULL allows it.
  */
 void hardware_camera_set_workspace(const char *workspace);
 
 /**
  * Return 1 if @p path may be used as a caller-supplied capture output.
- * Auto temp (NULL/empty) is always allowed. When a workspace is bound,
- * the path must resolve under that root (same policy as write_file).
+ * Auto temp (NULL/empty) is always allowed. When enforcement is on, the path
+ * must resolve under the bound root (same policy as write_file).
  */
 int hardware_camera_output_allowed(const char *path);
 
