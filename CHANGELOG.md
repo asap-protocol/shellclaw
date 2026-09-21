@@ -8,6 +8,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Unsandboxed `shell` no longer blocks forever in `waitpid` after the output cap fills; leftover children (including background grandchildren) are SIGKILL'd via the command process group, and truncated capture is NUL-terminated (#69).
 - `write_file` maps to the intended path instead of the first existing ancestor, so a nested path cannot truncate a workspace file treated as a directory or overwrite a same-named file in a parent (#67). Leaf workspace symlinks (dangling or an in-workspace alias) are rejected (`lstat` + `O_NOFOLLOW`) instead of creating host files outside the workspace (#90).
 - `write_file` persists via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe an existing workspace file and a sibling `path.tmp` is not truncated (#78).
+- Skill create/update persist via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe an existing skill file (#77).
 - Camera capture fails closed when `workspace_only` is on with an empty `workspace_path`, and rejects leaf symlink outputs (#91, #90).
 - Cron job `schedule` and `message` are delivered as full SQLite TEXT instead of truncating to 127/511 bytes (#73).
 - Cron jobs are committed (delete/advance) only after successful agent delivery, so a failed `agent_run` cannot drop a reminder (#57).
@@ -40,6 +41,8 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Gateway `/health` `version` matches `SHELLCLAW_RELEASE_VERSION`.
 
 ### Security
+- `auth_pair` persists tokens via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe `auth_tokens.json` (#71).
+- `auth_pair` fails closed when bearer RNG fails (no uninitialized token, no tokens-file write, pairing code kept) (#92).
 - Gateway shutdown joins the HTTP thread before `auth_cleanup`, so in-flight `/api/*`, `/pair`, and WebSocket upgrades cannot call `auth_validate_token` / `auth_pair` on a freed `auth_ctx`.
 - Gateway listen bind now uses `gateway.host` (`lws` `info.iface`). `host = "127.0.0.1"` is loopback-only. Bind-all forms (`0.0.0.0`, `*`, `::`, `[::]`, empty) require `allow_bind_all`.
 - Camera auto-output keeps the exclusive `mkstemp` inode (no unlink + `${tmpl}.jpg` sibling).
