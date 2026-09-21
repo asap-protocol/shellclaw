@@ -212,7 +212,7 @@ $(RELOAD_CHANNEL_STUB_O): tests/stubs/reload_channel_stub.c src/channels/channel
 $(HTTP_RELOAD_STUB_O): tests/stubs/http_reload_stub.c src/gateway/http.h src/core/config.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ tests/stubs/http_reload_stub.c
 
-$(DISPATCH_O): src/core/dispatch.c src/core/dispatch.h src/core/agent.h src/core/bootstrap.h src/core/memory.h src/channels/channel.h
+$(DISPATCH_O): src/core/dispatch.c src/core/dispatch.h src/core/agent.h src/core/bootstrap.h src/core/memory.h src/channels/channel.h src/tools/cron.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/core/dispatch.c
 
 $(TOML_O): vendor/tomlc99/toml.c vendor/tomlc99/toml.h

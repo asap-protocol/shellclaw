@@ -19,6 +19,7 @@ void bootstrap_add_tool_for_test(const tool_t *tool);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ASSERT(c)                                                                              \
@@ -59,6 +60,14 @@ static int mock_send(const char *session_id, const char *text,
 
 static const channel_t mock_channel = {
 	.name = "mock",
+	.init = NULL,
+	.poll = NULL,
+	.send = mock_send,
+	.cleanup = NULL,
+};
+
+static const channel_t cron_mock_channel = {
+	.name = "cron",
 	.init = NULL,
 	.poll = NULL,
 	.send = mock_send,
@@ -340,6 +349,96 @@ static int test_dispatch_forwards_full_hardware_tool_table(void)
 	return 0;
 }
 
+static int test_cron_slash_commands_ack_jobs(void)
+{
+	const char *db_path = "build/test_dispatch_cron_slash.db";
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_cron_slash_XXXXXX";
+	channel_incoming_msg_t msg = {0};
+	config_t *cfg = NULL;
+	cron_job_row_t row;
+	long long now;
+	int fd;
+	reset_send_spy();
+	memory_cleanup();
+	remove(db_path);
+	ASSERT(memory_init(db_path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("cron_reset", "at:9999999999", "/reset", "cli", "default",
+			       now - 1, 1) == 0);
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	bootstrap_set_cfg(cfg);
+	bootstrap_reset_tools_for_test();
+	msg.session_id = "cli:default";
+	msg.user_id = "cron_reset";
+	msg.text = "/reset";
+	ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+	ASSERT(strstr(g_last_text, "Session cleared") != NULL);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("cron_reset", &row) == 0);
+	ASSERT(cron_job_create("cron_status", "interval:3600", "/status", "cli", "default",
+			       now - 1, 1) == 0);
+	msg.user_id = "cron_status";
+	msg.text = "/status";
+	ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("cron_status", &row) == 1);
+	ASSERT(row.next_run > now - 1);
+	cron_job_row_free(&row);
+	msg.user_id = "missing_cron_job";
+	ASSERT(handle_message(&cron_mock_channel, &msg) != 0);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	config_free(cfg);
+	unlink(tmpl);
+	memory_cleanup();
+	remove(db_path);
+	return 0;
+}
+
+static int test_cron_agent_failure_does_not_ack(void)
+{
+	const char *db_path = "build/test_dispatch_cron_fail.db";
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_cron_fail_XXXXXX";
+	channel_incoming_msg_t msg = {0};
+	config_t *cfg = NULL;
+	cron_job_row_t row;
+	long long due_at;
+	int fd;
+	reset_send_spy();
+	memory_cleanup();
+	remove(db_path);
+	ASSERT(memory_init(db_path) == 0);
+	due_at = (long long)time(NULL) - 1;
+	ASSERT(cron_job_create("cron_fail", "interval:60", "hello", "cli", "default",
+			       due_at, 1) == 0);
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	bootstrap_set_cfg(cfg);
+	bootstrap_set_provider_for_test(&fail_provider);
+	bootstrap_reset_tools_for_test();
+	msg.session_id = "cli:default";
+	msg.user_id = "cron_fail";
+	msg.text = "hello";
+	ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("cron_fail", &row) == 1);
+	ASSERT(row.next_run == due_at);
+	cron_job_row_free(&row);
+	config_free(cfg);
+	unlink(tmpl);
+	memory_cleanup();
+	remove(db_path);
+	return 0;
+}
+
 static int test_handle_message_holds_agent_mutex(void)
 {
 	channel_incoming_msg_t msg = {0};
@@ -377,6 +476,8 @@ int main(void)
 	RUN(test_normal_message_uses_provider());
 	RUN(test_dispatch_forwards_full_hardware_tool_table());
 	RUN(test_handle_message_holds_agent_mutex());
+	RUN(test_cron_slash_commands_ack_jobs());
+	RUN(test_cron_agent_failure_does_not_ack());
 	puts("test_dispatch OK");
 	return 0;
 }
