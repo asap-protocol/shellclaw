@@ -84,7 +84,6 @@ static int fill_response_envelope(asap_envelope_t *out, const asap_envelope_t *i
 	const char *payload_type, cJSON *payload)
 {
 	char ulid_buf[ULID_STRING_LEN + 1];
-	cJSON *owned_payload;
 	if (!out || !in || !payload_type || !payload) {
 		if (payload) cJSON_Delete(payload);
 		return -32603;
@@ -101,8 +100,7 @@ static int fill_response_envelope(asap_envelope_t *out, const asap_envelope_t *i
 	out->recipient = in->sender ? strdup(in->sender) : NULL;
 	out->payload_type = strdup(payload_type);
 	/* Ownership of payload moves to out; asap_envelope_clear frees it once. */
-	owned_payload = payload;
-	out->payload = owned_payload;
+	out->payload = payload;
 	if (in->correlation_id)
 		out->correlation_id = strdup(in->correlation_id);
 	if (in->trace_id)
