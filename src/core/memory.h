@@ -120,6 +120,9 @@ int config_kv_get(const char *key, char *value_out, size_t max_len);
  */
 int config_kv_set(const char *key, const char *value);
 
+/** Max bytes accepted for cron schedule/message TEXT (create and read). */
+#define CRON_JOB_TEXT_MAX (32 * 1024)
+
 /**
  * Row from cron_jobs table for list/get operations.
  *

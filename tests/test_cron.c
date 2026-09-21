@@ -236,25 +236,44 @@ static int test_due_job_delivers_full_message(void)
 static int test_long_interval_schedule_roundtrips(void)
 {
 	const char *path = "/tmp/shellclaw_test_cron_long_schedule.db";
+	const channel_t *ch;
+	channel_incoming_msg_t msg;
+	cron_job_row_t due;
+	cron_job_row_t after;
+	char zeros[121];
+	char schedule[160];
+	long long parsed = 0;
+	long long now;
 	remove(path);
 	ASSERT(memory_init(path) == 0);
-	char zeros[121];
 	memset(zeros, '0', 120);
 	zeros[120] = '\0';
-	char schedule[160];
 	snprintf(schedule, sizeof(schedule), "interval:%s60", zeros);
 	ASSERT(strlen(schedule) > 127);
-	long long parsed = 0;
-	long long now = (long long)time(NULL);
+	now = (long long)time(NULL);
 	ASSERT(cron_parse_next_run(schedule, now, &parsed) == 0);
 	ASSERT(parsed == now + 60);
 	ASSERT(cron_job_create("longsched", schedule, "tick", "cli", "default", now - 1, 1) == 0);
-	cron_job_row_t due;
 	memset(&due, 0, sizeof(due));
 	ASSERT(cron_job_get_next_due(now, &due) == 1);
 	ASSERT(due.schedule != NULL);
 	ASSERT(strcmp(due.schedule, schedule) == 0);
 	cron_job_row_free(&due);
+	ch = channel_cron_get();
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(ch->poll(&msg, 0) == 1);
+	ASSERT(msg.user_id != NULL);
+	ASSERT(strcmp(msg.user_id, "longsched") == 0);
+	ASSERT(cron_ack_delivery(msg.user_id) == 0);
+	channel_incoming_msg_clear(&msg);
+	memset(&after, 0, sizeof(after));
+	ASSERT(cron_job_get_by_id("longsched", &after) == 1);
+	ASSERT(after.next_run > now);
+	ASSERT(after.schedule != NULL);
+	ASSERT(strcmp(after.schedule, schedule) == 0);
+	cron_job_row_free(&after);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(ch->poll(&msg, 0) == 0);
 	memory_cleanup();
 	remove(path);
 	return 0;
@@ -383,6 +402,53 @@ static int test_cron_ack_fail_closed_on_parse_error(void)
 	return 0;
 }
 
+static int test_cron_poll_waits_before_reoffer(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_reoffer.db";
+	const channel_t *cron_ch;
+	channel_incoming_msg_t msg;
+	struct timespec t0;
+	struct timespec t1;
+	long elapsed_ms;
+	long long now;
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("reoffer", "interval:60", "again", "cli", "default", now - 1, 1) == 0);
+	cron_ch = channel_cron_get();
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 1);
+	channel_incoming_msg_clear(&msg);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+	ASSERT(cron_ch->poll(&msg, 80) == 1);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	ASSERT(elapsed_ms >= 40);
+	channel_incoming_msg_clear(&msg);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
+static int test_cron_job_rejects_oversized_text(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_text_cap.db";
+	char *too_big;
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	too_big = malloc((size_t)CRON_JOB_TEXT_MAX + 2);
+	ASSERT(too_big != NULL);
+	memset(too_big, 'A', (size_t)CRON_JOB_TEXT_MAX + 1);
+	too_big[CRON_JOB_TEXT_MAX + 1] = '\0';
+	ASSERT(cron_job_create("bigmsg", "interval:60", too_big, "cli", "default", 1, 1) != 0);
+	ASSERT(cron_job_create("bigsched", too_big, "tick", "cli", "default", 1, 1) != 0);
+	free(too_big);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_interval_next_run());
@@ -401,6 +467,8 @@ int main(void)
 	RUN(test_cron_poll_keeps_job_until_ack());
 	RUN(test_cron_ack_advances_recurring_past_due_minute());
 	RUN(test_cron_ack_fail_closed_on_parse_error());
+	RUN(test_cron_poll_waits_before_reoffer());
+	RUN(test_cron_job_rejects_oversized_text());
 	printf("test_cron: all tests passed\n");
 	return 0;
 }

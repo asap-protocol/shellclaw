@@ -360,7 +360,11 @@ static void copy_str_bounded(char *dst, size_t dst_size, const char *src)
 
 static char *dup_sqlite_text(sqlite3_stmt *stmt, int col)
 {
-	const unsigned char *p = sqlite3_column_text(stmt, col);
+	const unsigned char *p;
+	int nbytes = sqlite3_column_bytes(stmt, col);
+	if (nbytes > CRON_JOB_TEXT_MAX)
+		return NULL;
+	p = sqlite3_column_text(stmt, col);
 	return strdup(p ? (const char *)p : "");
 }
 
@@ -394,6 +398,8 @@ int cron_job_create(const char *id, const char *schedule, const char *message,
                     const char *channel, const char *recipient, long long next_run, int enabled)
 {
 	if (!g_db || !id || !schedule || !message) return -1;
+	if (strlen(schedule) > (size_t)CRON_JOB_TEXT_MAX) return -1;
+	if (strlen(message) > (size_t)CRON_JOB_TEXT_MAX) return -1;
 	const char *ch = channel ? channel : "";
 	const char *rec = recipient ? recipient : "";
 	const char *sql = "INSERT INTO cron_jobs(id, schedule, message, channel, recipient, next_run, enabled) "

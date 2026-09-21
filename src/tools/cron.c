@@ -178,16 +178,50 @@ static int cron_init(const config_t *cfg)
 	return 0;
 }
 
+static char s_offered_id[128];
+static struct timespec s_offered_mono;
+
+static void cron_wait_if_reoffer(const char *job_id, int timeout_ms)
+{
+	struct timespec now;
+	struct timespec remain;
+	long elapsed_ms;
+	long wait_ms;
+	if (timeout_ms <= 0 || !job_id || job_id[0] == '\0')
+		return;
+	if (s_offered_id[0] == '\0' || strcmp(s_offered_id, job_id) != 0)
+		return;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return;
+	elapsed_ms = (now.tv_sec - s_offered_mono.tv_sec) * 1000L
+		+ (now.tv_nsec - s_offered_mono.tv_nsec) / 1000000L;
+	if (elapsed_ms >= timeout_ms)
+		return;
+	wait_ms = timeout_ms - elapsed_ms;
+	remain.tv_sec = wait_ms / 1000;
+	remain.tv_nsec = (wait_ms % 1000) * 1000000L;
+	nanosleep(&remain, NULL);
+}
+
+static void cron_mark_offered(const char *job_id)
+{
+	if (!job_id)
+		return;
+	snprintf(s_offered_id, sizeof(s_offered_id), "%s", job_id);
+	clock_gettime(CLOCK_MONOTONIC, &s_offered_mono);
+}
+
 static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 {
-	if (!out) return -1;
-	(void)timeout_ms;
-	long long now = (long long)time(NULL);
 	cron_job_row_t row;
+	char session_id[256];
+	long long now;
+	if (!out) return -1;
+	now = (long long)time(NULL);
 	memset(&row, 0, sizeof(row));
 	if (cron_job_get_next_due(now, &row) != 1) return 0;
+	cron_wait_if_reoffer(row.id, timeout_ms);
 	memset(out, 0, sizeof(*out));
-	char session_id[256];
 	snprintf(session_id, sizeof(session_id), "%s:%s",
 		row.channel[0] ? row.channel : "cli",
 		row.recipient[0] ? row.recipient : "default");
@@ -196,6 +230,7 @@ static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 	out->text = strdup(row.message ? row.message : "");
 	out->attachments = NULL;
 	out->attachments_count = 0;
+	cron_mark_offered(row.id);
 	cron_job_row_free(&row);
 	if (!out->session_id || !out->user_id || !out->text) {
 		channel_incoming_msg_clear(out);
