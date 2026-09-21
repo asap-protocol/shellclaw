@@ -196,6 +196,15 @@ int cron_job_list(cron_job_row_t *out, int max_count);
 int cron_job_get_next_due(long long now, cron_job_row_t *out);
 
 /**
+ * Load a cron job by id.
+ *
+ * @param id  Job id.
+ * @param out Filled with job data if found. Caller must cron_job_row_free().
+ * @return 1 if found, 0 if missing, -1 on error.
+ */
+int cron_job_get_by_id(const char *id, cron_job_row_t *out);
+
+/**
  * Release resources and close the database. Safe to call multiple times.
  */
 void memory_cleanup(void);

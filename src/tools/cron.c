@@ -179,14 +179,6 @@ static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 	cron_job_row_t row;
 	memset(&row, 0, sizeof(row));
 	if (cron_job_get_next_due(now, &row) != 1) return 0;
-	int is_one_shot = cron_is_one_shot(row.schedule);
-	if (is_one_shot) {
-		cron_job_delete(row.id);
-	} else {
-		long long next = 0;
-		if (cron_parse_next_run(row.schedule, now, &next) == 0)
-			cron_job_update_next_run(row.id, next);
-	}
 	memset(out, 0, sizeof(*out));
 	char session_id[256];
 	snprintf(session_id, sizeof(session_id), "%s:%s",
@@ -198,7 +190,33 @@ static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 	out->attachments = NULL;
 	out->attachments_count = 0;
 	cron_job_row_free(&row);
+	if (!out->session_id || !out->user_id || !out->text) {
+		channel_incoming_msg_clear(out);
+		return -1;
+	}
 	return 1;
+}
+
+int cron_ack_delivery(const char *job_id)
+{
+	cron_job_row_t row;
+	long long now;
+	long long next = 0;
+	int rc;
+
+	if (!job_id || !job_id[0]) return -1;
+	memset(&row, 0, sizeof(row));
+	if (cron_job_get_by_id(job_id, &row) != 1) return -1;
+	if (cron_is_one_shot(row.schedule)) {
+		rc = cron_job_delete(row.id);
+		cron_job_row_free(&row);
+		return rc;
+	}
+	now = (long long)time(NULL);
+	rc = cron_parse_next_run(row.schedule, now, &next);
+	cron_job_row_free(&row);
+	if (rc != 0) return -1;
+	return cron_job_update_next_run(job_id, next);
 }
 
 static int cron_send(const char *recipient, const char *text,

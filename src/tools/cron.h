@@ -34,6 +34,15 @@ int cron_parse_next_run(const char *schedule, long long now, long long *next_out
 int cron_is_one_shot(const char *schedule);
 
 /**
+ * Commit cron delivery after the agent successfully handles a fired job.
+ * One-shot jobs are deleted; recurring jobs advance next_run.
+ *
+ * @param job_id Job id from cron poll user_id field.
+ * @return 0 on success, non-zero on error.
+ */
+int cron_ack_delivery(const char *job_id);
+
+/**
  * Get the cron channel (poll returns due jobs, send routes to target channel).
  */
 const channel_t *channel_cron_get(void);

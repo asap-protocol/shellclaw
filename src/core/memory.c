@@ -489,6 +489,27 @@ int cron_job_get_next_due(long long now, cron_job_row_t *out)
 	return ret;
 }
 
+int cron_job_get_by_id(const char *id, cron_job_row_t *out)
+{
+	const char *sql;
+	sqlite3_stmt *stmt = NULL;
+	int ret = 0;
+
+	if (!g_db || !id || !out) return -1;
+	sql = "SELECT id, schedule, message, channel, recipient, next_run, enabled FROM cron_jobs WHERE id = ?1";
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+	sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT);
+	if (sqlite3_step(stmt) == SQLITE_ROW) {
+		if (fill_cron_job_row(stmt, out) != 0) {
+			sqlite3_finalize(stmt);
+			return -1;
+		}
+		ret = 1;
+	}
+	sqlite3_finalize(stmt);
+	return ret;
+}
+
 void memory_cleanup(void)
 {
 	if (g_db) {
