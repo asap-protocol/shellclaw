@@ -2,6 +2,7 @@
  * @file test_cron.c
  * @brief Unit tests for cron: schedule parsing, next_run, one-shot.
  */
+#define _POSIX_C_SOURCE 200809L
 
 #include "tools/cron.h"
 #include "core/memory.h"
@@ -42,7 +43,7 @@ static int test_cron_expr_next_run(void)
 	long long now = 1700000000;
 	long long next = 0;
 	ASSERT(cron_parse_next_run("0 0 * * *", now, &next) == 0);
-	ASSERT(next >= now);
+	ASSERT(next > now);
 	return 0;
 }
 
@@ -51,7 +52,58 @@ static int test_cron_expr_with_prefix(void)
 	long long now = 1700000000;
 	long long next = 0;
 	ASSERT(cron_parse_next_run("cron:0 0 * * *", now, &next) == 0);
-	ASSERT(next >= now);
+	ASSERT(next > now);
+	return 0;
+}
+
+static int test_cron_expr_skips_current_minute(void)
+{
+	long long now = 1700000017;
+	time_t t = (time_t)now;
+	struct tm tm;
+	char schedule[64];
+	long long next = 0;
+	time_t next_t;
+	struct tm next_tm;
+
+	ASSERT(localtime_r(&t, &tm) != NULL);
+	snprintf(schedule, sizeof(schedule), "cron:%d %d * * *", tm.tm_min, tm.tm_hour);
+	ASSERT(cron_parse_next_run(schedule, now, &next) == 0);
+	ASSERT(next > now);
+	ASSERT(next >= (now - (now % 60) + 60));
+	next_t = (time_t)next;
+	ASSERT(localtime_r(&next_t, &next_tm) != NULL);
+	ASSERT(next_tm.tm_min == tm.tm_min);
+	ASSERT(next_tm.tm_hour == tm.tm_hour);
+	return 0;
+}
+
+static int test_cron_expr_monthly_beyond_eight_days(void)
+{
+	time_t t = 1700000000;
+	struct tm tm;
+	long long now;
+	long long next = 0;
+	time_t next_t;
+	struct tm next_tm;
+
+	ASSERT(localtime_r(&t, &tm) != NULL);
+	tm.tm_mday = 15;
+	tm.tm_hour = 12;
+	tm.tm_min = 0;
+	tm.tm_sec = 0;
+	tm.tm_isdst = -1;
+	t = mktime(&tm);
+	ASSERT(t != (time_t)-1);
+	now = (long long)t;
+	ASSERT(cron_parse_next_run("cron:0 0 1 * *", now, &next) == 0);
+	ASSERT(next > now);
+	ASSERT(next - now > 8LL * 24 * 3600);
+	next_t = (time_t)next;
+	ASSERT(localtime_r(&next_t, &next_tm) != NULL);
+	ASSERT(next_tm.tm_mday == 1);
+	ASSERT(next_tm.tm_hour == 0);
+	ASSERT(next_tm.tm_min == 0);
 	return 0;
 }
 
@@ -267,12 +319,78 @@ static int test_cron_poll_keeps_job_until_ack(void)
 	return 0;
 }
 
+static int test_cron_ack_advances_recurring_past_due_minute(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_ack_advance.db";
+	const channel_t *cron_ch;
+	channel_incoming_msg_t msg;
+	cron_job_row_t rows[4];
+	long long now;
+	time_t t;
+	struct tm tm;
+	char schedule[64];
+
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	t = (time_t)now;
+	ASSERT(localtime_r(&t, &tm) != NULL);
+	snprintf(schedule, sizeof(schedule), "cron:%d %d * * *", tm.tm_min, tm.tm_hour);
+	ASSERT(cron_job_create("poll_adv1", schedule, "due now", "cli", "default", now - 1, 1) == 0);
+	cron_ch = channel_cron_get();
+	ASSERT(cron_ch != NULL && cron_ch->poll != NULL);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 1);
+	ASSERT(msg.user_id != NULL);
+	ASSERT(cron_ack_delivery(msg.user_id) == 0);
+	channel_incoming_msg_clear(&msg);
+	memset(rows, 0, sizeof(rows));
+	ASSERT(cron_job_list(rows, 4) == 1);
+	ASSERT(strcmp(rows[0].id, "poll_adv1") == 0);
+	ASSERT(rows[0].next_run > now);
+	ASSERT(rows[0].next_run >= (now - (now % 60) + 60));
+	cron_job_row_free(&rows[0]);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 0);
+	cron_job_delete("poll_adv1");
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
+static int test_cron_ack_fail_closed_on_parse_error(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_ack_fail_closed.db";
+	cron_job_row_t row;
+	long long now;
+	long long floor_next;
+	long long ceil_next;
+
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("bad_sched", "cron:not-a-schedule", "msg", "cli", "default", now - 1, 1) == 0);
+	ASSERT(cron_ack_delivery("bad_sched") == 0);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("bad_sched", &row) == 1);
+	floor_next = now + 365LL * 24 * 3600 - 2;
+	ceil_next = now + 365LL * 24 * 3600 + 2;
+	ASSERT(row.next_run >= floor_next);
+	ASSERT(row.next_run <= ceil_next);
+	cron_job_row_free(&row);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_interval_next_run());
 	RUN(test_at_one_shot());
 	RUN(test_cron_expr_next_run());
 	RUN(test_cron_expr_with_prefix());
+	RUN(test_cron_expr_skips_current_minute());
+	RUN(test_cron_expr_monthly_beyond_eight_days());
 	RUN(test_invalid_schedule());
 	RUN(test_cron_job_crud_and_due());
 	RUN(test_cron_tool_execute());
@@ -281,6 +399,8 @@ int main(void)
 	RUN(test_long_interval_schedule_roundtrips());
 	RUN(test_cron_ack_delivery_deferred());
 	RUN(test_cron_poll_keeps_job_until_ack());
+	RUN(test_cron_ack_advances_recurring_past_due_minute());
+	RUN(test_cron_ack_fail_closed_on_parse_error());
 	printf("test_cron: all tests passed\n");
 	return 0;
 }
