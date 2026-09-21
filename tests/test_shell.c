@@ -2,6 +2,7 @@
  * @file test_shell.c
  * @brief Unit tests for shell tool: safe commands, blocklist, timeout.
  */
+#define _POSIX_C_SOURCE 200809L
 
 #include "tools/tool.h"
 #include "tools/shell.h"
