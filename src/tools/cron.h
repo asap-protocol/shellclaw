@@ -14,13 +14,15 @@ extern "C" {
 #endif
 
 /**
- * Parse schedule and compute next_run from current time.
+ * Parse schedule and compute next_run strictly after `now`.
  * Formats: "cron:min hour dom month dow", "interval:N", "at:unix_ts".
  * Cron: 5 fields, * or N or N-M. dow 0-6 (Sun-Sat).
+ * Cron expressions start searching at the next minute boundary so a just-fired
+ * job cannot remain due in the same minute.
  *
  * @param schedule Schedule string.
  * @param now      Current Unix timestamp.
- * @param next_out Output: next run time.
+ * @param next_out Output: next run time (always > now on success for cron:/interval:).
  * @return 0 on success, -1 on parse error.
  */
 int cron_parse_next_run(const char *schedule, long long now, long long *next_out);
@@ -32,6 +34,15 @@ int cron_parse_next_run(const char *schedule, long long now, long long *next_out
  * @return 1 if one-shot, 0 otherwise.
  */
 int cron_is_one_shot(const char *schedule);
+
+/**
+ * Commit cron delivery after the agent successfully handles a fired job.
+ * One-shot jobs are deleted; recurring jobs advance next_run.
+ *
+ * @param job_id Job id from cron poll user_id field.
+ * @return 0 on success, non-zero on error.
+ */
+int cron_ack_delivery(const char *job_id);
 
 /**
  * Get the cron channel (poll returns due jobs, send routes to target channel).
