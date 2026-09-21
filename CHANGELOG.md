@@ -25,6 +25,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - `memory_init` no longer deletes an existing SQLite DB when `sqlite3_open` fails (permissions or transient I/O).
 - Anthropic `content` parse fails closed when growing the text buffer or `tool_use` array cannot `realloc`, instead of copying against an inflated cap.
 - HTTP 200 JSON-RPC results with a malformed ASAP envelope no longer double-free the duplicated request id.
+- `POST /asap` honors the 1 MiB dynamic body cap instead of 413'ing envelopes above the 64 KiB static `PUT /api/config` buffer.
 - Inbound ASAP `mcp.tool_call` and `state.query` now hold `agent_lock()` around tool execute and SQLite `g_db` reads, matching `task.request`.
 - Inbound `POST /asap` now wires the process provider and tool table into `asap_ctx`, so `task.request` and `mcp.tool_call` dispatch instead of failing with `server missing cfg or provider`.
 - `POST /asap` rejects serialized JSON-RPC larger than the 64 KiB gateway HTTP buffer (HTTP 500 / JSON-RPC `-32603`) instead of truncating the body.
@@ -41,6 +42,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Gateway `/health` `version` matches `SHELLCLAW_RELEASE_VERSION`.
 
 ### Security
+- Inbound ASAP response builder no longer double-frees the payload cJSON when a required envelope field cannot be allocated (unauthenticated `POST /asap` `state.query` / `task.cancel`).
 - `auth_pair` persists tokens via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe `auth_tokens.json` (#71).
 - `auth_pair` fails closed when bearer RNG fails (no uninitialized token, no tokens-file write, pairing code kept) (#92).
 - Gateway shutdown joins the HTTP thread before `auth_cleanup`, so in-flight `/api/*`, `/pair`, and WebSocket upgrades cannot call `auth_validate_token` / `auth_pair` on a freed `auth_ctx`.
