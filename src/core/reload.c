@@ -61,10 +61,19 @@ void stale_free_all(void)
 
 void try_config_reload(config_t **pcfg)
 {
+	config_t *old;
 	config_t *new_cfg;
 	char errbuf[256];
 	const char *config_path = bootstrap_get_config_path();
 	if (!pcfg || !*pcfg || !config_path)
+		return;
+	/* Dashboard PUT may reload from the HTTP thread while main still holds the
+	 * previous pointer. Always enqueue the live bootstrap cfg, not the caller's
+	 * possibly-stale copy, so a later SIGHUP does not double-free. */
+	old = bootstrap_get_cfg();
+	if (!old)
+		old = *pcfg;
+	if (!old)
 		return;
 	new_cfg = NULL;
 	if (config_load(config_path, &new_cfg, errbuf, sizeof(errbuf)) != 0) {
@@ -72,7 +81,7 @@ void try_config_reload(config_t **pcfg)
 		        errbuf[0] ? errbuf : "unknown error");
 		return;
 	}
-	if (stale_enqueue(*pcfg) != 0) {
+	if (stale_enqueue(old) != 0) {
 		fprintf(stderr, "shellclaw: SIGHUP config reload failed: out of memory\n");
 		config_free(new_cfg);
 		return;

@@ -1058,6 +1058,34 @@ static int test_api_config_put_valid(const char *token, int port, const char *co
 	return 0;
 }
 
+static int test_api_config_put_json(const char *token, int port)
+{
+	long code;
+	char *body = NULL;
+	char json[256];
+	int r;
+	snprintf(json, sizeof(json),
+		 "{\"model\":\"patched-model\",\"max_tokens\":2048,\"temperature\":0.5,"
+		 "\"gateway_host\":\"127.0.0.1\",\"gateway_port\":%d}",
+		 port);
+	r = http_put_auth(gw_url("/api/config"), token, json, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "\"ok\":true") != NULL || strstr(body, "\"ok\": true") != NULL);
+	free(body);
+	body = NULL;
+	r = http_get_auth(gw_url("/api/config"), token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "\"patched-model\"") != NULL);
+	ASSERT(strstr(body, "\"max_tokens\":2048") != NULL ||
+	       strstr(body, "\"max_tokens\": 2048") != NULL);
+	free(body);
+	return 0;
+}
+
 static int test_api_skills_list(const char *token)
 {
 	long code;
@@ -1606,6 +1634,10 @@ int main(int argc, char **argv)
 		}
 		if (test_api_config_put_valid(token, port, config_path) != 0) {
 			fprintf(stderr, "test_api_config_put_valid failed\n");
+			failed++;
+		}
+		if (test_api_config_put_json(token, port) != 0) {
+			fprintf(stderr, "test_api_config_put_json failed\n");
 			failed++;
 		}
 		if (test_api_status_get(token) != 0) { fprintf(stderr, "test_api_status_get failed\n"); failed++; }

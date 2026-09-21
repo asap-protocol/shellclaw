@@ -197,10 +197,13 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	main_loop(g_cli_one_shot != NULL, &cfg);
-	cleanup_subsystems();
-	curl_global_cleanup();
-	daemon_pid_cleanup();
-	stale_free_all();
-	config_free(cfg);
+	{
+		config_t *live = bootstrap_get_cfg();
+		cleanup_subsystems();
+		curl_global_cleanup();
+		daemon_pid_cleanup();
+		stale_free_all();
+		config_free(live);
+	}
 	return 0;
 }

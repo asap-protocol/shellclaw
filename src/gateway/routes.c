@@ -6,6 +6,7 @@
 
 #include "gateway/routes.h"
 #include "gateway/routes_hardware.h"
+#include "gateway/http.h"
 #include "gateway/auth.h"
 #include "gateway/rate_limit.h"
 #include "channels/channel.h"
@@ -16,7 +17,9 @@
 #include "asap/log.h"
 #include "core/bootstrap.h"
 #include "core/config.h"
+#include "core/config_patch.h"
 #include "core/memory.h"
+#include "core/reload.h"
 #include "core/skill.h"
 #include "providers/provider.h"
 #include "tools/context.h"
@@ -187,9 +190,54 @@ static void handle_config_get(const config_t *cfg, char *buf, size_t size, int *
 	}
 }
 
+static int body_is_json_object(const char *body, size_t body_len)
+{
+	size_t i;
+	for (i = 0; i < body_len; i++) {
+		unsigned char c = (unsigned char)body[i];
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+			continue;
+		return c == '{';
+	}
+	return 0;
+}
+
+static int config_put_patch_json(http_server_ctx_t *ctx, const char *body, size_t body_len,
+                                 char **out_toml, size_t *out_len, char *buf, size_t size,
+                                 int *status)
+{
+	char *json_nul;
+	char errbuf[256] = {0};
+	json_nul = malloc(body_len + 1);
+	if (!json_nul) {
+		json_error(buf, size, status, 500, "Out of memory");
+		return -1;
+	}
+	memcpy(json_nul, body, body_len);
+	json_nul[body_len] = '\0';
+	if (config_patch_dashboard_json(ctx->config_path, json_nul, out_toml, out_len, errbuf,
+	                                sizeof(errbuf)) != 0) {
+		free(json_nul);
+		json_error(buf, size, status, 400, errbuf[0] ? errbuf : "Invalid config patch");
+		return -1;
+	}
+	free(json_nul);
+	return 0;
+}
+
 static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t body_len,
                               char *buf, size_t size, int *status)
 {
+	char *patched_body = NULL;
+	size_t patched_len = 0;
+	char errbuf[256] = {0};
+	const char *write_body = body;
+	size_t write_len = body_len;
+	size_t path_len;
+	char *tmp_path;
+	FILE *f;
+	size_t written;
+	config_t *cfg = NULL;
 	if (!ctx->config_path || !body || body_len == 0) {
 		json_error(buf, size, status, 400, "Bad request");
 		return;
@@ -198,29 +246,41 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 		json_error(buf, size, status, 400, "Config too large");
 		return;
 	}
-	size_t path_len = strlen(ctx->config_path);
-	char *tmp_path = malloc(path_len + 8);
-	if (!tmp_path) { json_error(buf, size, status, 500, "Out of memory"); return; }
+	if (body_is_json_object(body, body_len)) {
+		if (config_put_patch_json(ctx, body, body_len, &patched_body, &patched_len, buf, size,
+		                          status) != 0)
+			return;
+		write_body = patched_body;
+		write_len = patched_len;
+	}
+	path_len = strlen(ctx->config_path);
+	tmp_path = malloc(path_len + 8);
+	if (!tmp_path) {
+		free(patched_body);
+		json_error(buf, size, status, 500, "Out of memory");
+		return;
+	}
 	snprintf(tmp_path, path_len + 8, "%s.tmp", ctx->config_path);
-	FILE *f = fopen(tmp_path, "w");
+	f = fopen(tmp_path, "w");
 	if (!f) {
 		free(tmp_path);
+		free(patched_body);
 		json_error(buf, size, status, 500, "Failed to write config");
 		return;
 	}
-	size_t written = fwrite(body, 1, body_len, f);
+	written = fwrite(write_body, 1, write_len, f);
 	fclose(f);
-	if (written != body_len) {
+	if (written != write_len) {
 		unlink(tmp_path);
 		free(tmp_path);
+		free(patched_body);
 		json_error(buf, size, status, 500, "Failed to write config");
 		return;
 	}
-	config_t *cfg = NULL;
-	char errbuf[256] = {0};
 	if (config_load(tmp_path, &cfg, errbuf, sizeof(errbuf)) != 0) {
 		unlink(tmp_path);
 		free(tmp_path);
+		free(patched_body);
 		json_error(buf, size, status, 400, errbuf[0] ? errbuf : "Invalid TOML");
 		return;
 	}
@@ -228,10 +288,21 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 	if (rename(tmp_path, ctx->config_path) != 0) {
 		unlink(tmp_path);
 		free(tmp_path);
+		free(patched_body);
 		json_error(buf, size, status, 500, "Failed to save config");
 		return;
 	}
 	free(tmp_path);
+	free(patched_body);
+	/* Dashboard/TOML save: swap live cfg now instead of waiting for SIGHUP.
+	 * Call http_set_live_config here: test_reload rebuilds reload.o with
+	 * GATEWAY=0, so try_config_reload may omit the gateway pointer swap. */
+	{
+		config_t *live_cfg = bootstrap_get_cfg();
+		if (live_cfg)
+			try_config_reload(&live_cfg);
+		http_set_live_config(bootstrap_get_cfg());
+	}
 	*status = 200;
 	json_response(buf, size, status, "{\"ok\":true}");
 }
