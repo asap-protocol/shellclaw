@@ -327,6 +327,64 @@ static void test_file_write_dangling_symlink_rejected(void)
 	rmdir(tmpdir);
 }
 
+static void test_file_write_failure_preserves_existing(void)
+{
+	char tmpdir[PATH_MAX];
+	char notes_path[PATH_MAX];
+	char config_path[PATH_MAX];
+	char args[PATH_MAX + 128];
+	char buf[256];
+	config_t *cfg;
+	const tool_t *t;
+	int write_ret;
+
+	/*
+	 * Directory without write permission: creating path.tmp fails, but
+	 * fopen/open O_TRUNC on the existing file still succeeds. Atomic
+	 * replace must leave the original body intact.
+	 */
+	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_nowrite_%d", (int)getpid());
+	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
+	snprintf(notes_path, sizeof(notes_path), "%s/notes.md", tmpdir);
+	cfg = make_ws_config(tmpdir, config_path, sizeof(config_path));
+	MU_ASSERT(cfg != NULL, "nowrite: load config");
+	tool_file_set_config(cfg);
+	t = tool_file_get();
+
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"original notes that must survive\"}",
+		notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "seed original file");
+
+	MU_ASSERT(chmod(tmpdir, 0555) == 0, "make workspace dir non-writable");
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"should not land\"}",
+		notes_path);
+	write_ret = t->execute(args, buf, sizeof(buf));
+	MU_ASSERT(chmod(tmpdir, 0755) == 0, "restore workspace dir mode");
+
+	MU_ASSERT(write_ret != 0, "write into non-writable dir fails");
+	snprintf(args, sizeof(args), "{\"operation\":\"read_file\",\"path\":\"%s\"}", notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "read after failed write");
+	MU_ASSERT(strstr(buf, "original notes that must survive") != NULL,
+		"failed write must not wipe original");
+
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"recovered after chmod\"}",
+		notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "write recovers after chmod");
+	snprintf(args, sizeof(args), "{\"operation\":\"read_file\",\"path\":\"%s\"}", notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "read recovered file");
+	MU_ASSERT(strstr(buf, "recovered after chmod") != NULL, "recovered content present");
+
+	config_free(cfg);
+	unlink(config_path);
+	unlink(notes_path);
+	snprintf(notes_path, sizeof(notes_path), "%s/notes.md.tmp", tmpdir);
+	unlink(notes_path);
+	rmdir(tmpdir);
+}
+
 int main(void)
 {
 	MU_RUN(test_file_read_write_list);
@@ -337,6 +395,7 @@ int main(void)
 	MU_RUN(test_write_does_not_truncate_file_used_as_directory);
 	MU_RUN(test_write_does_not_collapse_missing_parent_onto_basename);
 	MU_RUN(test_file_write_dangling_symlink_rejected);
+	MU_RUN(test_file_write_failure_preserves_existing);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }

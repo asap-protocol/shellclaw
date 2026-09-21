@@ -13,7 +13,6 @@
 #include "core/config.h"
 #include "cJSON.h"
 #include <dirent.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
@@ -124,30 +123,71 @@ static int resolve_workspace_write_path(const char *path, char *safe_path, size_
 	return n > 0 && (size_t)n < cap;
 }
 
-static int open_write_nofollow(const char *safe_path, int ws_only,
-			       char *result_buf, size_t max_len, FILE **out)
+static void discard_file_tmp(int fd, char *tmp_path)
 {
+	if (fd >= 0)
+		(void)close(fd);
+	if (tmp_path) {
+		unlink(tmp_path);
+		free(tmp_path);
+	}
+}
+
+static int write_all(int fd, const char *buf, size_t len)
+{
+	size_t off = 0;
+
+	while (off < len) {
+		ssize_t n = write(fd, buf + off, len - off);
+		if (n <= 0)
+			return -1;
+		off += (size_t)n;
+	}
+	return 0;
+}
+
+/*
+ * Temp+rename so O_TRUNC cannot wipe the live workspace file before the
+ * new bytes are durable (ENOSPC, EFBIG, or a non-writable parent dir).
+ */
+static int write_file_atomic(const char *path, const char *content, int ws_only)
+{
+	size_t path_len;
+	char *tmp_path;
 	int flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
 	int fd;
-	FILE *f;
 
+	if (!path || !content)
+		return -1;
+	path_len = strlen(path);
+	tmp_path = malloc(path_len + 8);
+	if (!tmp_path)
+		return -1;
+	snprintf(tmp_path, path_len + 8, "%s.tmp", path);
 	if (ws_only)
 		flags |= O_NOFOLLOW;
-	fd = open(safe_path, flags, 0644);
+	fd = open(tmp_path, flags, 0644);
 	if (fd < 0) {
-		if (ws_only && errno == ELOOP)
-			snprintf(result_buf, max_len, "{\"error\":\"path outside workspace\"}");
-		else
-			snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
+		free(tmp_path);
 		return -1;
 	}
-	f = fdopen(fd, "w");
-	if (!f) {
-		close(fd);
-		snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
+	if (write_all(fd, content, strlen(content)) != 0) {
+		discard_file_tmp(fd, tmp_path);
 		return -1;
 	}
-	*out = f;
+	if (fsync(fd) != 0) {
+		discard_file_tmp(fd, tmp_path);
+		return -1;
+	}
+	if (close(fd) != 0) {
+		discard_file_tmp(-1, tmp_path);
+		return -1;
+	}
+	if (rename(tmp_path, path) != 0) {
+		discard_file_tmp(-1, tmp_path);
+		return -1;
+	}
+	free(tmp_path);
 	return 0;
 }
 
@@ -188,30 +228,24 @@ static int file_read(const char *path, char *result_buf, size_t max_len)
 static int file_write(const char *path, const char *content, char *result_buf, size_t max_len)
 {
 	char resolved[PATH_MAX];
+	int ws_only;
+	char safe_path[PATH_MAX];
+
 	if (!path_within_workspace(path, resolved, sizeof(resolved))) {
 		snprintf(result_buf, max_len, "{\"error\":\"path outside workspace\"}");
 		return -1;
 	}
-	int ws_only = g_file_cfg ? config_workspace_only(g_file_cfg) : 0;
-	char safe_path[PATH_MAX];
-	FILE *f;
+	ws_only = g_file_cfg ? config_workspace_only(g_file_cfg) : 0;
 	if (!ws_only) {
 		snprintf(safe_path, sizeof(safe_path), "%s", path);
 	} else if (!resolve_workspace_write_path(path, safe_path, sizeof(safe_path))) {
 		snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
 		return -1;
 	}
-	if (open_write_nofollow(safe_path, ws_only, result_buf, max_len, &f) != 0)
+	if (write_file_atomic(safe_path, content ? content : "", ws_only) != 0) {
+		snprintf(result_buf, max_len, "{\"error\":\"write failed\"}");
 		return -1;
-	if (content) {
-		size_t len = strlen(content);
-		if (fwrite(content, 1, len, f) != len) {
-			fclose(f);
-			snprintf(result_buf, max_len, "{\"error\":\"write failed\"}");
-			return -1;
-		}
 	}
-	fclose(f);
 	snprintf(result_buf, max_len, "{\"status\":\"ok\"}");
 	return 0;
 }
