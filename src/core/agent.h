@@ -54,6 +54,8 @@ int agent_run(const config_t *cfg, const char *session_id, const char *user_mess
  * Every agent_run() caller (main-loop handle_message, inbound ASAP HTTP,
  * WebSocket dispatcher) must hold this mutex for the duration of agent_run().
  * /reset in handle_message must also hold it around session_delete().
+ * After a successful cron ch->send, handle_message re-takes it around
+ * cron_ack_delivery() (SQLite amalgamation is SQLITE_THREADSAFE=0).
  * Inbound mcp.tool_call must hold it around tool execute (see #60).
  * Inbound state.query must hold it around memory_get_row_counts() (see #60).
  * Release before channel I/O (ch->send). The mutex is not recursive.
@@ -62,7 +64,8 @@ void agent_lock(void);
 
 /**
  * Release the global agent mutex after agent_run(), a locked session_delete(),
- * inbound mcp.tool_call execute, or a locked state.query memory read.
+ * inbound mcp.tool_call execute, a locked state.query memory read, or a
+ * locked cron_ack_delivery().
  */
 void agent_unlock(void);
 

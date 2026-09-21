@@ -5,6 +5,12 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Cron job `schedule` and `message` are delivered as full SQLite TEXT instead of truncating to 127/511 bytes (#73).
+- Cron jobs are committed (delete/advance) only after successful agent delivery, so a failed `agent_run` cannot drop a reminder (#57).
+- Recurring cron jobs search the next run from the following minute with a 366-day window; ack fail-closes unparseable schedules to now+365d so they cannot re-fire every poll (#65).
+- Cron `/reset` and `/status` jobs are acked after a successful channel send, matching the agent-run path, so they cannot stay due and re-fire every poll.
+- `cron_poll` honors `timeout_ms` before re-offering the same still-due job (process-local; the DB is not mutated) so a failed delivery cannot busy-spin the daemon.
+- Cron `schedule` and `message` TEXT is rejected above 32 KiB at create and at read, instead of unbounded `strdup`.
 - Discord Gateway RX grows for the trailing NUL so two 64 KiB libwebsockets fragments cannot write one byte past the heap block (typical READY payloads).
 - WebChat inbound WS `rx_buffer_size` is `WS_RX_BUFFER_SIZE` (`WS_TEXT_MAX` plus JSON envelope) so dashboard messages are not split across 256-byte RECEIVE callbacks and dropped.
 - WebChat WebSocket sends now accept agent replies up to 32 KiB (`WS_TEXT_MAX`, matching `RESPONSE_BUF_SIZE`) instead of silently dropping payloads above 8 KiB. Dest buffers are `WS_TEXT_BUF_SIZE` so a max-length payload keeps its NUL; a too-large frame is logged instead of skipped with `<`.
