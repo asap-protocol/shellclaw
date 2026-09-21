@@ -5,9 +5,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
-- `write_file` maps to the intended path instead of the first existing ancestor, so a nested path cannot truncate a workspace file treated as a directory or overwrite a same-named file in a parent (#67). Dangling workspace symlinks are rejected (`lstat` + `O_NOFOLLOW`) instead of creating host files outside the workspace (#90).
-- `write_file` persists via temp+fsync+rename so a failed write cannot wipe an existing workspace file (#78).
-- Camera capture fails closed when `workspace_only` is on with an empty `workspace_path`, and rejects dangling symlink outputs (#91, #90).
+- `write_file` maps to the intended path instead of the first existing ancestor, so a nested path cannot truncate a workspace file treated as a directory or overwrite a same-named file in a parent (#67). Leaf workspace symlinks (dangling or an in-workspace alias) are rejected (`lstat` + `O_NOFOLLOW`) instead of creating host files outside the workspace (#90).
+- `write_file` persists via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe an existing workspace file and a sibling `path.tmp` is not truncated (#78).
+- Camera capture fails closed when `workspace_only` is on with an empty `workspace_path`, and rejects leaf symlink outputs (#91, #90).
 - Discord Gateway RX grows for the trailing NUL so two 64 KiB libwebsockets fragments cannot write one byte past the heap block (typical READY payloads).
 - WebChat inbound WS `rx_buffer_size` is `WS_RX_BUFFER_SIZE` (`WS_TEXT_MAX` plus JSON envelope) so dashboard messages are not split across 256-byte RECEIVE callbacks and dropped.
 - WebChat WebSocket sends now accept agent replies up to 32 KiB (`WS_TEXT_MAX`, matching `RESPONSE_BUF_SIZE`) instead of silently dropping payloads above 8 KiB. Dest buffers are `WS_TEXT_BUF_SIZE` so a max-length payload keeps its NUL; a too-large frame is logged instead of skipped with `<`.

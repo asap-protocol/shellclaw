@@ -51,7 +51,7 @@ static int resolved_is_under_workspace(const char *resolved)
 	return 1;
 }
 
-static int path_is_dangling_symlink(const char *path)
+static int path_is_symlink(const char *path)
 {
 	struct stat lst;
 
@@ -75,8 +75,8 @@ static int path_within_workspace(const char *path, char *resolved, size_t resolv
 		return 0;
 	if (realpath(path, resolved) != NULL)
 		return resolved_is_under_workspace(resolved);
-	/* Dangling symlink: ancestor prefix is not enough — open() would follow it. */
-	if (path_is_dangling_symlink(path))
+	/* Leaf symlink: ancestor prefix is not enough — open() would follow it. */
+	if (path_is_symlink(path))
 		return 0;
 	snprintf(path_copy, sizeof(path_copy), "%s", path);
 	for (;;) {
@@ -103,7 +103,7 @@ static int resolve_workspace_write_path(const char *path, char *safe_path, size_
 	char *dir;
 	int n;
 
-	if (path_is_dangling_symlink(path))
+	if (path_is_symlink(path))
 		return 0;
 	if (realpath(path, safe_path) != NULL) {
 		if (stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) return 0;
@@ -123,14 +123,12 @@ static int resolve_workspace_write_path(const char *path, char *safe_path, size_
 	return n > 0 && (size_t)n < cap;
 }
 
-static void discard_file_tmp(int fd, char *tmp_path)
+static void discard_file_tmp(int fd, const char *tmp_path)
 {
 	if (fd >= 0)
 		(void)close(fd);
-	if (tmp_path) {
-		unlink(tmp_path);
-		free(tmp_path);
-	}
+	if (tmp_path && tmp_path[0] != '\0')
+		(void)unlink(tmp_path);
 }
 
 static int write_all(int fd, const char *buf, size_t len)
@@ -147,28 +145,35 @@ static int write_all(int fd, const char *buf, size_t len)
 }
 
 /*
- * Temp+rename so O_TRUNC cannot wipe the live workspace file before the
- * new bytes are durable (ENOSPC, EFBIG, or a non-writable parent dir).
+ * Unique temp+rename so O_TRUNC cannot wipe the live file, and a sibling
+ * named path.tmp is not used as the sidecar (ENOSPC, EFBIG, or a
+ * non-writable parent dir). mkstemp uses O_EXCL, so a planted symlink at
+ * the random name cannot be followed (the path.tmp #90 shape).
  */
-static int write_file_atomic(const char *path, const char *content, int ws_only)
+static int write_file_atomic(const char *path, const char *content)
 {
-	size_t path_len;
-	char *tmp_path;
-	int flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
+	char path_copy[PATH_MAX];
+	char tmp_path[PATH_MAX];
+	char *dir;
 	int fd;
+	int n;
 
 	if (!path || !content)
 		return -1;
-	path_len = strlen(path);
-	tmp_path = malloc(path_len + 8);
-	if (!tmp_path)
+	if (snprintf(path_copy, sizeof(path_copy), "%s", path) >= (int)sizeof(path_copy))
 		return -1;
-	snprintf(tmp_path, path_len + 8, "%s.tmp", path);
-	if (ws_only)
-		flags |= O_NOFOLLOW;
-	fd = open(tmp_path, flags, 0644);
-	if (fd < 0) {
-		free(tmp_path);
+	dir = dirname(path_copy);
+	if (!dir || dir[0] == '\0')
+		return -1;
+	n = snprintf(tmp_path, sizeof(tmp_path), "%s/.sc-write-XXXXXX", dir);
+	if (n < 0 || (size_t)n >= sizeof(tmp_path))
+		return -1;
+	fd = mkstemp(tmp_path);
+	if (fd < 0)
+		return -1;
+	(void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+	if (fchmod(fd, 0644) != 0) {
+		discard_file_tmp(fd, tmp_path);
 		return -1;
 	}
 	if (write_all(fd, content, strlen(content)) != 0) {
@@ -187,7 +192,6 @@ static int write_file_atomic(const char *path, const char *content, int ws_only)
 		discard_file_tmp(-1, tmp_path);
 		return -1;
 	}
-	free(tmp_path);
 	return 0;
 }
 
@@ -242,7 +246,7 @@ static int file_write(const char *path, const char *content, char *result_buf, s
 		snprintf(result_buf, max_len, "{\"error\":\"cannot write file\"}");
 		return -1;
 	}
-	if (write_file_atomic(safe_path, content ? content : "", ws_only) != 0) {
+	if (write_file_atomic(safe_path, content ? content : "") != 0) {
 		snprintf(result_buf, max_len, "{\"error\":\"write failed\"}");
 		return -1;
 	}

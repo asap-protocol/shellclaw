@@ -339,9 +339,9 @@ static void test_file_write_failure_preserves_existing(void)
 	int write_ret;
 
 	/*
-	 * Directory without write permission: creating path.tmp fails, but
-	 * fopen/open O_TRUNC on the existing file still succeeds. Atomic
-	 * replace must leave the original body intact.
+	 * Directory without write permission: creating the mkstemp sidecar
+	 * fails, but fopen/open O_TRUNC on the existing file still succeeds.
+	 * Atomic replace must leave the original body intact.
 	 */
 	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_nowrite_%d", (int)getpid());
 	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
@@ -385,6 +385,91 @@ static void test_file_write_failure_preserves_existing(void)
 	rmdir(tmpdir);
 }
 
+static void test_write_does_not_clobber_sibling_tmp(void)
+{
+	char tmpdir[PATH_MAX];
+	char notes_path[PATH_MAX];
+	char sibling_tmp[PATH_MAX];
+	char config_path[PATH_MAX];
+	char args[PATH_MAX + 128];
+	char buf[256];
+	char kept[64];
+	config_t *cfg;
+	const tool_t *t;
+	FILE *f;
+
+	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_sibtmp_%d", (int)getpid());
+	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
+	snprintf(notes_path, sizeof(notes_path), "%s/notes.md", tmpdir);
+	snprintf(sibling_tmp, sizeof(sibling_tmp), "%s/notes.md.tmp", tmpdir);
+	f = fopen(sibling_tmp, "w");
+	MU_ASSERT(f != NULL, "create sibling notes.md.tmp");
+	fputs("SIBLING KEEP", f);
+	fclose(f);
+	cfg = make_ws_config(tmpdir, config_path, sizeof(config_path));
+	MU_ASSERT(cfg != NULL, "sibling tmp: load config");
+	tool_file_set_config(cfg);
+	t = tool_file_get();
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"NEW NOTES\"}",
+		notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == 0, "write notes.md succeeds");
+	MU_ASSERT(slurp_file(notes_path, kept, sizeof(kept)) == 0, "notes.md readable");
+	MU_ASSERT(strcmp(kept, "NEW NOTES") == 0, "notes.md has new content");
+	MU_ASSERT(slurp_file(sibling_tmp, kept, sizeof(kept)) == 0, "sibling tmp still readable");
+	MU_ASSERT(strcmp(kept, "SIBLING KEEP") == 0, "write must not O_TRUNC notes.md.tmp");
+	config_free(cfg);
+	unlink(config_path);
+	unlink(notes_path);
+	unlink(sibling_tmp);
+	rmdir(tmpdir);
+}
+
+static void test_write_in_workspace_symlink_alias_rejected(void)
+{
+	char tmpdir[PATH_MAX];
+	char notes_path[PATH_MAX];
+	char alias_path[PATH_MAX];
+	char config_path[PATH_MAX];
+	char args[PATH_MAX + 128];
+	char buf[256];
+	char kept[64];
+	config_t *cfg;
+	const tool_t *t;
+	FILE *f;
+
+	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_alias_%d", (int)getpid());
+	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
+	snprintf(notes_path, sizeof(notes_path), "%s/notes.md", tmpdir);
+	snprintf(alias_path, sizeof(alias_path), "%s/alias.md", tmpdir);
+	f = fopen(notes_path, "w");
+	MU_ASSERT(f != NULL, "create notes.md");
+	fputs("KEEP", f);
+	fclose(f);
+	unlink(alias_path);
+	if (symlink(notes_path, alias_path) != 0 && symlink("notes.md", alias_path) != 0) {
+		unlink(notes_path);
+		rmdir(tmpdir);
+		return;
+	}
+	cfg = make_ws_config(tmpdir, config_path, sizeof(config_path));
+	MU_ASSERT(cfg != NULL, "alias: load config");
+	tool_file_set_config(cfg);
+	t = tool_file_get();
+	snprintf(args, sizeof(args),
+		"{\"operation\":\"write_file\",\"path\":\"%s\",\"content\":\"PWNED\"}",
+		alias_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == -1,
+		"write through in-workspace symlink alias is rejected");
+	MU_ASSERT(slurp_file(notes_path, kept, sizeof(kept)) == 0, "notes.md still readable");
+	MU_ASSERT(strcmp(kept, "KEEP") == 0, "alias write must not change notes.md");
+	config_free(cfg);
+	unlink(config_path);
+	unlink(alias_path);
+	unlink(notes_path);
+	rmdir(tmpdir);
+}
+
 int main(void)
 {
 	MU_RUN(test_file_read_write_list);
@@ -396,6 +481,8 @@ int main(void)
 	MU_RUN(test_write_does_not_collapse_missing_parent_onto_basename);
 	MU_RUN(test_file_write_dangling_symlink_rejected);
 	MU_RUN(test_file_write_failure_preserves_existing);
+	MU_RUN(test_write_does_not_clobber_sibling_tmp);
+	MU_RUN(test_write_in_workspace_symlink_alias_rejected);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }
