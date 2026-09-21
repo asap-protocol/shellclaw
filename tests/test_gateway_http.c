@@ -1609,6 +1609,13 @@ int main(int argc, char **argv)
 		failed++;
 	}
 	if (test_health_wellknown() != 0) { fprintf(stderr, "test_health_wellknown failed\n"); failed++; }
+	/*
+	 * Per-IP /asap is ASAP_RATE_LIMIT_RPM (10) per 60s, counted in
+	 * handle_asap after dyn malloc. CL > 1 MiB 413s at LWS init and is
+	 * not counted. Seven POSTs reach handle_asap (invalid_body,
+	 * missing_fields, task_request, mcp_tool_call, mcp_unknown_tool,
+	 * oversized_response, body_over_static_cap_accepted). Headroom is 3.
+	 */
 	if (test_asap_body_over_max() != 0) {
 		fprintf(stderr, "test_asap_body_over_max failed\n");
 		failed++;
