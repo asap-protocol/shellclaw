@@ -775,6 +775,38 @@ static int test_tool_execute_nonzero_reports_error(void)
 	return 0;
 }
 
+/*
+ * fill_response_envelope used to cJSON_Delete(payload) after assigning
+ * out->payload, then asap_envelope_clear(out) deleted the same object.
+ * HTTP parse always supplies sender/recipient, so production hits this on
+ * post-attach strdup OOM; dropping sender here is the same cleanup path.
+ */
+static int test_response_builder_missing_sender_does_not_double_free(void)
+{
+	asap_envelope_t in;
+	asap_envelope_t out;
+	asap_server_ctx_t ctx;
+	char err[128];
+	cJSON *pl;
+	int rc;
+
+	pl = cJSON_CreateObject();
+	ASSERT(pl != NULL);
+	ASSERT(cJSON_AddNullToObject(pl, "task_id") != NULL);
+	ASSERT(wrap_build(&in, "task.cancel", pl) == 0);
+	free(in.sender);
+	in.sender = NULL;
+	memset(&ctx, 0, sizeof ctx);
+	asap_envelope_init(&out);
+	rc = asap_server_handle(&in, &out, &ctx, err, sizeof err);
+	ASSERT(rc == -32603);
+	ASSERT(strstr(err, "envelope") != NULL);
+	ASSERT(out.payload == NULL);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
 static int submit_task_request(asap_server_ctx_t *ctx, const char *sender, const char *input)
 {
 	asap_envelope_t in;
@@ -1055,6 +1087,7 @@ int main(void)
 	r |= test_mcp_omitted_arguments_defaults_to_empty_object();
 	r |= test_tool_call_hook_overrides_builtin_dispatch();
 	r |= test_tool_execute_nonzero_reports_error();
+	r |= test_response_builder_missing_sender_does_not_double_free();
 	r |= test_trust_sender_rejects_blank_sender_when_list_nonempty();
 	r |= test_mcp_tool_call_holds_agent_mutex();
 	r |= test_mcp_tool_call_hook_holds_agent_mutex();
