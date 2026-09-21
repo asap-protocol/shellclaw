@@ -34,11 +34,12 @@ int asap_http_body_parse_content_length(const char *cl_buf, long *cl_out);
  * True when Content-Length exceeds the static POST/PUT cap (BODY_BUF_SIZE).
  * POST /asap uses a 1 MiB dynamic buffer (use_dyn_body); skip the static cap
  * so envelopes between 64 KiB and ASAP_BODY_MAX are not 413'd.
+ * A NULL body pointer is fail-closed (returns 1).
  *
  * Example: asap_http_body_exceeds_static_cap(&body, 70000) is 0 when
  * body.use_dyn_body is set, and 1 for the default static buffer.
  *
- * @return 1 if the static cap applies and is exceeded; 0 otherwise.
+ * @return 1 if the static cap applies and is exceeded, or body is NULL; 0 otherwise.
  */
 int asap_http_body_exceeds_static_cap(const asap_http_body_t *body, long content_length);
 

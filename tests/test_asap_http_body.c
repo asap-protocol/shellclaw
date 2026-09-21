@@ -73,7 +73,8 @@ static int test_exceeds_static_cap(void)
 	asap_http_body_t body;
 
 	memset(&body, 0, sizeof(body));
-	ASSERT(asap_http_body_exceeds_static_cap(NULL, (long)BODY_BUF_SIZE + 1) == 0);
+	ASSERT(asap_http_body_exceeds_static_cap(NULL, (long)BODY_BUF_SIZE + 1) == 1);
+	ASSERT(asap_http_body_exceeds_static_cap(NULL, 0) == 1);
 	ASSERT(asap_http_body_exceeds_static_cap(&body, (long)BODY_BUF_SIZE) == 0);
 	ASSERT(asap_http_body_exceeds_static_cap(&body, (long)BODY_BUF_SIZE + 1) == 1);
 	body.use_dyn_body = 1;

@@ -46,7 +46,9 @@ int asap_http_body_parse_content_length(const char *cl_buf, long *cl_out)
 
 int asap_http_body_exceeds_static_cap(const asap_http_body_t *body, long content_length)
 {
-	if (!body || body->use_dyn_body)
+	if (!body)
+		return 1;
+	if (body->use_dyn_body)
 		return 0;
 	return content_length > (long)BODY_BUF_SIZE;
 }
