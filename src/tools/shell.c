@@ -64,16 +64,19 @@ static void kill_command_tree(pid_t pid)
 		(void)kill(pid, SIGKILL);
 }
 
-/* Kill leftover children after drain (timeout or output cap), matching sandbox_exec. */
+/* Always SIGKILL the process group first so background grandchildren cannot
+ * leak after the shell has already exited (SIGPIPE, or `cmd &`). Then reap
+ * the tracked pid. Matching the hang fix for #69 / #96. */
 static int reap_running_child(pid_t pid)
 {
 	int status = 0;
-	int wr = waitpid(pid, &status, WNOHANG);
+	int wr;
 	int retries;
 	struct timespec ts;
+	kill_command_tree(pid);
+	wr = waitpid(pid, &status, WNOHANG);
 	if (wr != 0)
 		return 0;
-	kill_command_tree(pid);
 	for (retries = 0; retries < 40; retries++) {
 		wr = waitpid(pid, &status, WNOHANG);
 		if (wr != 0)
