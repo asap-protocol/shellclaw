@@ -1029,6 +1029,27 @@ static int test_api_config_put_invalid_toml(const char *token)
 	return 0;
 }
 
+static int test_api_config_put_rejects_oversized_body(const char *token)
+{
+	long code;
+	char *body = NULL;
+	char *huge;
+	size_t n = 70000;
+	int r;
+	huge = malloc(n + 1);
+	ASSERT(huge != NULL);
+	memset(huge, 'a', n);
+	huge[n] = '\0';
+	r = http_put_auth(gw_url("/api/config"), token, huge, &code, &body);
+	free(huge);
+	ASSERT(r == 0);
+	ASSERT(code == 413);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "large") != NULL || strstr(body, "error") != NULL);
+	free(body);
+	return 0;
+}
+
 static int test_api_config_put_valid(const char *token, int port, const char *config_path)
 {
 	long code;
@@ -1630,6 +1651,10 @@ int main(int argc, char **argv)
 		if (test_api_config_get(token) != 0) { fprintf(stderr, "test_api_config_get failed\n"); failed++; }
 		if (test_api_config_put_invalid_toml(token) != 0) {
 			fprintf(stderr, "test_api_config_put_invalid_toml failed\n");
+			failed++;
+		}
+		if (test_api_config_put_rejects_oversized_body(token) != 0) {
+			fprintf(stderr, "test_api_config_put_rejects_oversized_body failed\n");
 			failed++;
 		}
 		if (test_api_config_put_valid(token, port, config_path) != 0) {
