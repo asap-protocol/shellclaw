@@ -21,7 +21,8 @@
 #define CRON_PREFIX_INTERVAL "interval:"
 #define CRON_PREFIX_AT       "at:"
 #define CRON_PREFIX_CRON     "cron:"
-#define CRON_MAX_ITER_MINUTES (8 * 24 * 60)
+/* Cover at least one leap year so monthly/yearly exprs can advance after firing. */
+#define CRON_MAX_ITER_MINUTES (366 * 24 * 60)
 
 static int parse_field(const char *s, int *out, int min_val, int max_val)
 {
@@ -104,7 +105,13 @@ static long long cron_next_from_expr(const char *cron_part, long long now)
 {
 	int fields[10];
 	if (parse_cron_expr(cron_part, fields) != 0) return -1;
-	time_t t = (time_t)now;
+	/*
+	 * Start at the beginning of the *next* minute. Returning the current
+	 * minute would leave next_run <= now after a fire, so the job would
+	 * re-deliver every poll until the minute rolled over — and forever if
+	 * the following match was outside the search window.
+	 */
+	time_t t = (time_t)(now - (now % 60) + 60);
 	struct tm tm;
 	if (!localtime_r(&t, &tm)) return -1;
 	int min = tm.tm_min, hour = tm.tm_hour, mday = tm.tm_mday, mon = tm.tm_mon + 1, wday = tm.tm_wday;
@@ -171,33 +178,88 @@ static int cron_init(const config_t *cfg)
 	return 0;
 }
 
+static char s_offered_id[128];
+static struct timespec s_offered_mono;
+
+static void cron_wait_if_reoffer(const char *job_id, int timeout_ms)
+{
+	struct timespec now;
+	struct timespec remain;
+	long elapsed_ms;
+	long wait_ms;
+	if (timeout_ms <= 0 || !job_id || job_id[0] == '\0')
+		return;
+	if (s_offered_id[0] == '\0' || strcmp(s_offered_id, job_id) != 0)
+		return;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return;
+	elapsed_ms = (now.tv_sec - s_offered_mono.tv_sec) * 1000L
+		+ (now.tv_nsec - s_offered_mono.tv_nsec) / 1000000L;
+	if (elapsed_ms >= timeout_ms)
+		return;
+	wait_ms = timeout_ms - elapsed_ms;
+	remain.tv_sec = wait_ms / 1000;
+	remain.tv_nsec = (wait_ms % 1000) * 1000000L;
+	nanosleep(&remain, NULL);
+}
+
+static void cron_mark_offered(const char *job_id)
+{
+	if (!job_id)
+		return;
+	snprintf(s_offered_id, sizeof(s_offered_id), "%s", job_id);
+	clock_gettime(CLOCK_MONOTONIC, &s_offered_mono);
+}
+
 static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 {
-	if (!out) return -1;
-	(void)timeout_ms;
-	long long now = (long long)time(NULL);
 	cron_job_row_t row;
+	char session_id[256];
+	long long now;
+	if (!out) return -1;
+	now = (long long)time(NULL);
 	memset(&row, 0, sizeof(row));
 	if (cron_job_get_next_due(now, &row) != 1) return 0;
-	int is_one_shot = cron_is_one_shot(row.schedule);
-	if (is_one_shot) {
-		cron_job_delete(row.id);
-	} else {
-		long long next = 0;
-		if (cron_parse_next_run(row.schedule, now, &next) == 0)
-			cron_job_update_next_run(row.id, next);
-	}
+	cron_wait_if_reoffer(row.id, timeout_ms);
 	memset(out, 0, sizeof(*out));
-	char session_id[256];
 	snprintf(session_id, sizeof(session_id), "%s:%s",
 		row.channel[0] ? row.channel : "cli",
 		row.recipient[0] ? row.recipient : "default");
 	out->session_id = strdup(session_id);
 	out->user_id = strdup(row.id);
-	out->text = strdup(row.message);
+	out->text = strdup(row.message ? row.message : "");
 	out->attachments = NULL;
 	out->attachments_count = 0;
+	cron_mark_offered(row.id);
+	cron_job_row_free(&row);
+	if (!out->session_id || !out->user_id || !out->text) {
+		channel_incoming_msg_clear(out);
+		return -1;
+	}
 	return 1;
+}
+
+int cron_ack_delivery(const char *job_id)
+{
+	cron_job_row_t row;
+	long long now;
+	long long next = 0;
+	int rc;
+
+	if (!job_id || !job_id[0]) return -1;
+	memset(&row, 0, sizeof(row));
+	if (cron_job_get_by_id(job_id, &row) != 1) return -1;
+	if (cron_is_one_shot(row.schedule)) {
+		rc = cron_job_delete(row.id);
+		cron_job_row_free(&row);
+		return rc;
+	}
+	now = (long long)time(NULL);
+	rc = cron_parse_next_run(row.schedule, now, &next);
+	cron_job_row_free(&row);
+	if (rc != 0)
+		next = now + 365LL * 24 * 3600;
+	return cron_job_update_next_run(job_id, next);
 }
 
 static int cron_send(const char *recipient, const char *text,
@@ -251,21 +313,35 @@ static int cron_tool_execute(const char *args_json, char *result_buf, size_t max
 	int ret = 0;
 	if (strcmp(operation, "list") == 0) {
 		cron_job_row_t rows[64];
-		int n = cron_job_list(rows, 64);
+		int n;
+		int i;
+		memset(rows, 0, sizeof(rows));
+		n = cron_job_list(rows, 64);
+		if (n < 0) {
+			cJSON_Delete(root);
+			snprintf(result_buf, max_len, "{\"error\":\"failed to list jobs\"}");
+			return -1;
+		}
 		cJSON *arr = cJSON_CreateArray();
-		if (!arr) { cJSON_Delete(root); snprintf(result_buf, max_len, "{\"error\":\"out of memory\"}"); return -1; }
-		for (int i = 0; i < n; i++) {
+		if (!arr) {
+			for (i = 0; i < n; i++) cron_job_row_free(&rows[i]);
+			cJSON_Delete(root);
+			snprintf(result_buf, max_len, "{\"error\":\"out of memory\"}");
+			return -1;
+		}
+		for (i = 0; i < n; i++) {
 			cJSON *obj = cJSON_CreateObject();
 			if (!obj) break;
 			cJSON_AddItemToObject(obj, "id", cJSON_CreateString(rows[i].id));
-			cJSON_AddItemToObject(obj, "schedule", cJSON_CreateString(rows[i].schedule));
-			cJSON_AddItemToObject(obj, "message", cJSON_CreateString(rows[i].message));
+			cJSON_AddItemToObject(obj, "schedule", cJSON_CreateString(rows[i].schedule ? rows[i].schedule : ""));
+			cJSON_AddItemToObject(obj, "message", cJSON_CreateString(rows[i].message ? rows[i].message : ""));
 			cJSON_AddItemToObject(obj, "channel", cJSON_CreateString(rows[i].channel));
 			cJSON_AddItemToObject(obj, "recipient", cJSON_CreateString(rows[i].recipient));
 			cJSON_AddItemToObject(obj, "next_run", cJSON_CreateNumber((double)rows[i].next_run));
 			cJSON_AddItemToObject(obj, "enabled", cJSON_CreateBool(rows[i].enabled));
 			cJSON_AddItemToArray(arr, obj);
 		}
+		for (i = 0; i < n; i++) cron_job_row_free(&rows[i]);
 		char *s = cJSON_PrintUnformatted(arr);
 		cJSON_Delete(arr);
 		if (s) {

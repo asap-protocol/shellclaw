@@ -5,10 +5,13 @@
 
 #include "core/config.h"
 #include "core/skill.h"
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
+#include <sys/resource.h>
+#include <unistd.h>
 
 #define ASSERT(c) do { if (!(c)) { fprintf(stderr, "FAIL: %s:%d %s\n", __FILE__, __LINE__, #c); return 1; } } while (0)
 #define RUN(t) do { int r = (t); if (r) return r; } while (0)
@@ -194,6 +197,58 @@ static int test_skill_crud(void)
 	return 0;
 }
 
+/*
+ * skill_update used fopen("w") which truncates before write. A failed write
+ * (ENOSPC/EFBIG) wiped the live skill. Atomic temp+rename must preserve it.
+ */
+static int test_skill_update_write_failure_preserves_existing(void)
+{
+	char cmd[256];
+	char content[256];
+	char oversized[512];
+	struct rlimit old_lim;
+	struct rlimit new_lim;
+	int update_ret;
+	size_t i;
+	config_t *cfg = NULL;
+	char errbuf[256];
+
+	snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" && mkdir -p \"%s\"", TMP_DIR, TMP_DIR);
+	ASSERT(system(cmd) == 0);
+	ASSERT(write_minimal_config(TMP_DIR) == 0);
+	ASSERT(config_load(TMP_CONFIG, &cfg, errbuf, sizeof(errbuf)) == 0);
+	ASSERT(skill_create(cfg, "keepme", "# Keep\nOriginal skill body that must survive") == 0);
+	ASSERT(skill_get_content(cfg, "keepme", content, sizeof(content)) == 0);
+	ASSERT(strstr(content, "Original skill body that must survive") != NULL);
+
+	for (i = 0; i < sizeof(oversized) - 1; i++)
+		oversized[i] = 'A';
+	oversized[sizeof(oversized) - 1] = '\0';
+
+	ASSERT(getrlimit(RLIMIT_FSIZE, &old_lim) == 0);
+	new_lim = old_lim;
+	new_lim.rlim_cur = 8;
+	(void)signal(SIGXFSZ, SIG_IGN);
+	ASSERT(setrlimit(RLIMIT_FSIZE, &new_lim) == 0);
+
+	update_ret = skill_update(cfg, "keepme", oversized);
+	ASSERT(setrlimit(RLIMIT_FSIZE, &old_lim) == 0);
+
+	ASSERT(update_ret != 0);
+	ASSERT(skill_get_content(cfg, "keepme", content, sizeof(content)) == 0);
+	ASSERT(strstr(content, "Original skill body that must survive") != NULL);
+
+	ASSERT(skill_update(cfg, "keepme", "# Keep\nRecovered after limit") == 0);
+	ASSERT(skill_get_content(cfg, "keepme", content, sizeof(content)) == 0);
+	ASSERT(strstr(content, "Recovered after limit") != NULL);
+
+	config_free(cfg);
+	remove(TMP_CONFIG);
+	snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", TMP_DIR);
+	(void)system(cmd);
+	return 0;
+}
+
 static int test_hot_reload_watch(void)
 {
 	char cmd[256];
@@ -231,6 +286,7 @@ int main(void)
 	RUN(test_missing_dir_no_crash());
 	RUN(test_system_prompt_base_order());
 	RUN(test_skill_crud());
+	RUN(test_skill_update_write_failure_preserves_existing());
 	RUN(test_hot_reload_watch());
 	printf("test_skill: all tests passed\n");
 	return 0;

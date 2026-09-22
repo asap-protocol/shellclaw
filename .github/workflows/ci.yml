@@ -1,15 +1,17 @@
 # CI: static analysis, tests, release build. Required for branch protection.
+# PRs may target `main` or `development`. Jetson on-device sign-off is not a CI gate.
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
 
 jobs:
   ci:
     name: static, test, release
-    runs-on: ubuntu-latest
+    # libgpiod v2 API (gpiod_chip_request_lines, etc.) needs Ubuntu 24.04+ apt packages
+    runs-on: ubuntu-24.04
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -18,23 +20,28 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev cppcheck lcov nodejs
+          sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libgpiod-dev i2c-tools cppcheck lcov nodejs
 
       - name: Static analysis (cppcheck)
         run: make static
 
-      - name: Build and test
+      - name: Build and test (libgpiod present)
         run: make clean && make test
         env:
           CI: true
           GATEWAY: "1"
 
+      - name: Build and test without libgpiod (stub GPIO fallback)
+        run: make clean && LIBGPIOD=0 make test
+        env:
+          CI: true
+          GATEWAY: "1"
+
       - name: AddressSanitizer + UBSan
-        run: |
-          make clean
-          CFLAGS="-std=c11 -Wall -Wextra -Werror -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer" \
-          LDFLAGS="-fsanitize=address,undefined" \
-          GATEWAY=1 make test
+        run: make test-sanitize
+        env:
+          CI: true
+          GATEWAY: "1"
 
       - name: Release build
         run: make clean && make release
@@ -48,7 +55,7 @@ jobs:
           fi
           echo "Binary size: $size bytes (OK)"
 
-      - name: Coverage (core modules >= 80%)
+      - name: Coverage (agent core >= 80%, hardware excluded)
         run: GATEWAY=1 make coverage
 
       - name: ASAP compliance check

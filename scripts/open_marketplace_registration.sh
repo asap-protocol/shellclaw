@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Print ASAP marketplace IssueOps URL and in-repo prefill path (no network).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ISSUEOPS_URL="https://github.com/asap-protocol/asap-protocol/issues/new?template=register_agent.yml"
+PREFILL="${ROOT}/docs/issueops/register-agent-prefill.md"
+VERIFY="${ROOT}/docs/issueops/VERIFY_MARKETPLACE.md"
+STATUS="${ROOT}/docs/MARKETPLACE_STATUS.md"
+MANIFEST_URL="https://asap-protocol.github.io/shellclaw/manifest.json"
+
+echo "ASAP marketplace registration (ShellClaw v1.0)"
+echo ""
+echo "IssueOps (open in browser):"
+echo "  ${ISSUEOPS_URL}"
+echo ""
+echo "Copy-paste prefill:"
+echo "  ${PREFILL}"
+echo ""
+echo "Post-submit verification runbook:"
+echo "  ${VERIFY}"
+echo ""
+echo "Tracking (update issue URL when filed):"
+echo "  ${STATUS}"
+echo ""
+echo "Manifest URL (pre-submit gate):"
+echo "  ${MANIFEST_URL}"
+echo ""
+echo "Pre-submit verify (requires asap package):"
+echo "  curl -fsS ${MANIFEST_URL} | python3 -m asap.crypto.verify_manifest"

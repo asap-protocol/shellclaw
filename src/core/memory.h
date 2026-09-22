@@ -43,12 +43,21 @@ int memory_save(const char *key, const char *content, const char *metadata);
 int memory_recall(const char *query, char *results, size_t max_len, int limit);
 
 /**
+ * Stored session JSON does not fit the caller buffer. messages_out is left empty.
+ * Distinct from "not found" so callers can skip persist instead of overwriting.
+ */
+#define SESSION_LOAD_TOO_LARGE (-2)
+
+/**
  * Load session messages by session ID (e.g. "cli:default" or "telegram:123456789").
  *
  * @param session_id   Session identifier.
  * @param messages_out Output buffer for JSON array of messages; caller must free if allocated.
  * @param max_len      Size of messages_out buffer (or 0 if messages_out is to be allocated by implementation).
- * @return 0 on success, non-zero if not found or error.
+ * @return 0 on success, SESSION_LOAD_TOO_LARGE if the blob does not fit max_len,
+ *         -1 if not found or error.
+ *
+ * Example: `if (session_load(id, buf, sizeof(buf)) == SESSION_LOAD_TOO_LARGE) skip_save;`
  */
 int session_load(const char *session_id, char *messages_out, size_t max_len);
 
@@ -68,6 +77,20 @@ int session_save(const char *session_id, const char *messages);
  * @return 0 on success, non-zero on error.
  */
 int session_delete(const char *session_id);
+
+/**
+ * Test-only: invoke @p hook from session_delete before the SQL DELETE.
+ * Pass NULL to clear. Used by dispatch tests to assert /reset holds the
+ * agent mutex (see #54).
+ */
+void session_delete_set_hook_for_test(void (*hook)(const char *session_id));
+
+/**
+ * Test-only: invoke @p hook from memory_get_row_counts before the COUNT queries.
+ * Pass NULL to clear. Used by ASAP server tests to assert state.query holds
+ * the agent mutex (see #60).
+ */
+void memory_get_row_counts_set_hook_for_test(void (*hook)(void));
 
 /**
  * List session IDs from the database.
@@ -97,16 +120,35 @@ int config_kv_get(const char *key, char *value_out, size_t max_len);
  */
 int config_kv_set(const char *key, const char *value);
 
-/** Row from cron_jobs table for list/get operations. */
+/** Max bytes accepted for cron schedule/message TEXT (create and read). */
+#define CRON_JOB_TEXT_MAX (32 * 1024)
+
+/**
+ * Row from cron_jobs table for list/get operations.
+ *
+ * schedule and message are heap copies of the SQLite TEXT columns. The
+ * caller must cron_job_row_free() each filled row. Example:
+ *   cron_job_row_t row;
+ *   memset(&row, 0, sizeof(row));
+ *   if (cron_job_get_next_due(now, &row) == 1)
+ *       cron_job_row_free(&row);
+ */
 typedef struct cron_job_row {
 	char id[128];
-	char schedule[128];
-	char message[512];
+	char *schedule;
+	char *message;
 	char channel[64];
 	char recipient[64];
 	long long next_run;
 	int enabled;
 } cron_job_row_t;
+
+/**
+ * Free heap fields on a cron job row. Safe on NULL, zeroed, or already-freed rows.
+ *
+ * @param row Row to release (may be NULL).
+ */
+void cron_job_row_free(cron_job_row_t *row);
 
 /**
  * Create a cron job.
@@ -140,7 +182,8 @@ int cron_job_update_next_run(const char *id, long long next_run);
 /**
  * List cron jobs into output array.
  *
- * @param out       Array to fill (caller-allocated).
+ * @param out       Array to fill (caller-allocated). Heap fields are owned
+ *                  by the caller on success; on -1, no row is owned.
  * @param max_count Maximum jobs to return.
  * @return Number of jobs written, or -1 on error.
  */
@@ -150,10 +193,19 @@ int cron_job_list(cron_job_row_t *out, int max_count);
  * Get the next due job (next_run <= now, enabled).
  *
  * @param now Current Unix timestamp.
- * @param out Filled with job data if found.
+ * @param out Filled with job data if found. Caller must cron_job_row_free().
  * @return 1 if found, 0 if none, -1 on error.
  */
 int cron_job_get_next_due(long long now, cron_job_row_t *out);
+
+/**
+ * Load a cron job by id.
+ *
+ * @param id  Job id.
+ * @param out Filled with job data if found. Caller must cron_job_row_free().
+ * @return 1 if found, 0 if missing, -1 on error.
+ */
+int cron_job_get_by_id(const char *id, cron_job_row_t *out);
 
 /**
  * Release resources and close the database. Safe to call multiple times.

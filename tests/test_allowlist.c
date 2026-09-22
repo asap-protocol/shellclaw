@@ -5,6 +5,10 @@
  * Tests cover: built-in blocklist patterns, workspace-only path containment,
  * realpath-based symlink escape detection, and edge cases (NULL, empty string).
  */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#endif
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/allowlist.h"
@@ -68,6 +72,23 @@ static int test_block_shutdown(void)
 static int test_block_etc_shadow(void)
 {
 	ASSERT(allowlist_check_shell_command("cat /etc/shadow", NULL, NULL, 0) == 1);
+	return 0;
+}
+
+/** Wave 7.3: Argus socket must not be touched from sandboxed shell commands. */
+static int test_block_argus_socket(void)
+{
+	ASSERT(allowlist_check_shell_command("cat /tmp/argus_socket", NULL, NULL, 0) == 1);
+	ASSERT(allowlist_check_shell_command("ls -la /tmp/argus_socket", NULL, NULL, 0) == 1);
+	return 0;
+}
+
+/** Wave 7.1: Jetson GPU device paths must not be opened from sandboxed shell. */
+static int test_block_jetson_gpu_devices(void)
+{
+	ASSERT(allowlist_check_shell_command("cat /dev/nvgpu", NULL, NULL, 0) == 1);
+	ASSERT(allowlist_check_shell_command("dd if=/dev/nvmap", NULL, NULL, 0) == 1);
+	ASSERT(allowlist_check_shell_command("ls /dev/nvhost-ctrl", NULL, NULL, 0) == 1);
 	return 0;
 }
 
@@ -268,6 +289,8 @@ int main(void)
 	RUN(test_block_fork_bomb());
 	RUN(test_block_shutdown());
 	RUN(test_block_etc_shadow());
+	RUN(test_block_jetson_gpu_devices());
+	RUN(test_block_argus_socket());
 	RUN(test_allow_safe_command());
 	RUN(test_allow_echo());
 	RUN(test_null_command_blocked());

@@ -1,7 +1,7 @@
 /**
  * @file discord_helpers.h
  * @brief Pure helpers shared by Discord channel and unit tests (allowlist, session id, mentions,
- *        REST 429 backoff calculation).
+ *        REST 429 backoff calculation, Gateway RX append).
  */
 
 #ifndef SHELLCLAW_DISCORD_HELPERS_H
@@ -52,6 +52,16 @@ int discord_helpers_send_backoff_ms(int attempt, double retry_after_sec, int jit
 int discord_helpers_route_message_create(const cJSON *payload, const char *const *allowed,
                                          int allowed_count, const char *bot_user_id,
                                          char *session_out, size_t session_outsz);
+
+/**
+ * Append one Gateway RX fragment, growing so payload plus a trailing NUL always fit.
+ *
+ * @return 0 on success, -1 if the total would exceed @p max_cap or allocation failed.
+ *
+ * Example: two 64 KiB LWS fragments must grow past 131072 so the NUL fits.
+ */
+int discord_helpers_rx_append(char **buf, size_t *len, size_t *cap, const void *in,
+                              size_t chunk_len, size_t max_cap);
 
 #ifdef __cplusplus
 }

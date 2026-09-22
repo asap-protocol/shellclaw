@@ -14,6 +14,7 @@
 #include "gateway/auth.h"
 #include "gateway/http.h"
 #include "gateway/ws.h"
+#include "asap/manifest_keys.h"
 #endif
 #include <errno.h>
 #include <limits.h>
@@ -24,7 +25,6 @@
 
 #define SKILLS_BUF_SIZE (256 * 1024)
 #define SYSTEM_PROMPT_BUF_SIZE (256 * 1024)
-#define MAX_TOOLS 8
 #define MAX_CHANNELS 8
 
 static int g_verbose;
@@ -32,7 +32,7 @@ static const char *g_cli_one_shot;
 static const char *g_config_path;
 static config_t *g_cfg;
 static const provider_t *g_provider;
-static const tool_t *g_tools[MAX_TOOLS];
+static const tool_t *g_tools[SHELLCLAW_MAX_TOOLS];
 static size_t g_tool_count;
 static const channel_t *g_channels[MAX_CHANNELS];
 static int g_channel_count;
@@ -97,6 +97,28 @@ const tool_t *bootstrap_tool_at(size_t index)
 	if (index >= g_tool_count)
 		return NULL;
 	return g_tools[index];
+}
+
+size_t bootstrap_fill_agent_tools(agent_tool_t *out, size_t cap)
+{
+	size_t tool_count = g_tool_count;
+	size_t i;
+	if (!out || cap == 0)
+		return 0;
+	if (tool_count > cap)
+		tool_count = cap;
+	for (i = 0; i < tool_count; i++) {
+		const tool_t *t = g_tools[i];
+		if (!t) {
+			tool_count = i;
+			break;
+		}
+		out[i].name = t->name;
+		out[i].description = t->description;
+		out[i].parameters_json = t->parameters_json;
+		out[i].execute = t->execute;
+	}
+	return tool_count;
 }
 
 static int memory_init_from_config(const config_t *cfg)
@@ -217,14 +239,13 @@ static void channels_cleanup(void)
 
 static void ensure_workspace_directory(const char *workspace)
 {
-	char parent[PATH_MAX];
 	const char *slash;
-	size_t parent_len;
 
 	if (!workspace || !workspace[0]) return;
 	slash = strrchr(workspace, '/');
 	if (slash && slash != workspace) {
-		parent_len = (size_t)(slash - workspace);
+		char parent[PATH_MAX];
+		size_t parent_len = (size_t)(slash - workspace);
 		if (parent_len < sizeof(parent)) {
 			memcpy(parent, workspace, parent_len);
 			parent[parent_len] = '\0';
@@ -242,7 +263,7 @@ int tools_init(const config_t *cfg)
 {
 	ensure_workspace_directory(config_workspace_path(cfg));
 	tool_set_config(cfg);
-	g_tool_count = tool_get_all(g_tools, MAX_TOOLS);
+	g_tool_count = tool_get_all(g_tools, SHELLCLAW_MAX_TOOLS);
 	return 0;
 }
 
@@ -290,6 +311,25 @@ int init_subsystems(config_t *cfg)
 		if (code) {
 			free(code);
 		}
+		/* Create/load signing keys eagerly at gateway startup so the FIRST
+		 * unauthenticated /.well-known/asap/manifest.json request never
+		 * triggers keypair creation + disk fsync (DoS surface). The gateway
+		 * must not start if it cannot sign manifests. */
+		{
+			char keys_err[256] = {0};
+
+			if (manifest_keys_ensure_loaded(keys_err, sizeof(keys_err)) != 0) {
+				fprintf(stderr, "shellclaw: signing keys unavailable: %s\n",
+					keys_err[0] ? keys_err : "unknown error");
+				auth_cleanup(g_auth_ctx);
+				g_auth_ctx = NULL;
+				channels_cleanup();
+				providers_cleanup();
+				skills_cleanup();
+				memory_cleanup();
+				return -1;
+			}
+		}
 		if (http_start(cfg, g_auth_ctx, g_config_path) != 0) {
 			fprintf(stderr, "Error: gateway start failed\n");
 			auth_cleanup(g_auth_ctx);
@@ -322,12 +362,14 @@ int init_subsystems(config_t *cfg)
 void cleanup_subsystems(void)
 {
 #ifdef SHELLCLAW_GATEWAY
+	/* HTTP/WS callbacks still call auth_validate_token(ctx->auth). Join the
+	 * lws thread before freeing auth_ctx (same order as tools_init failure). */
 	ws_shutdown_signal();
+	http_stop();
 	if (g_auth_ctx) {
 		auth_cleanup(g_auth_ctx);
 		g_auth_ctx = NULL;
 	}
-	http_stop();
 	ws_cleanup();
 #endif
 	tools_cleanup();

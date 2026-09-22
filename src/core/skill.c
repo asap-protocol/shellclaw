@@ -3,6 +3,9 @@
  * @brief Skill loader: scan skills directory for .md files and concatenate contents.
  * Hot-reload via inotify (Linux) or kqueue (macOS).
  */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "config.h"
@@ -10,6 +13,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libgen.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -333,6 +337,112 @@ int skill_get_content(const config_t *cfg, const char *name, char *out_buf, size
 	return 0;
 }
 
+int skill_get_description(const config_t *cfg, const char *name, char *out_buf, size_t out_size)
+{
+	const char *override;
+	char line[512];
+	char *nl;
+	const char *start;
+	size_t len;
+
+	if (!cfg || !name || !out_buf || out_size == 0) return -1;
+	override = config_asap_skill_description(cfg, name);
+	if (override && override[0] != '\0') {
+		snprintf(out_buf, out_size, "%s", override);
+		return 0;
+	}
+	if (build_skill_path(cfg, name, line, sizeof(line)) != 0) return -1;
+	{
+		FILE *f = fopen(line, "r");
+		if (!f) return -1;
+		if (!fgets(line, (int)sizeof(line), f)) {
+			fclose(f);
+			return -1;
+		}
+		fclose(f);
+	}
+	nl = strchr(line, '\n');
+	if (nl) *nl = '\0';
+	start = line;
+	while (*start == ' ' || *start == '\t') start++;
+	if (start[0] == '#' && start[1] == ' ') start += 2;
+	else if (start[0] == '#') start += 1;
+	while (*start == ' ' || *start == '\t') start++;
+	if (start[0] == '\0') return -1;
+	len = strlen(start);
+	if (len >= out_size) len = out_size - 1;
+	memcpy(out_buf, start, len);
+	out_buf[len] = '\0';
+	return 0;
+}
+
+static void discard_skill_tmp(int fd, const char *tmp_path)
+{
+	if (fd >= 0)
+		(void)close(fd);
+	if (tmp_path && tmp_path[0] != '\0')
+		(void)unlink(tmp_path);
+}
+
+static int skill_write_all(int fd, const char *buf, size_t len)
+{
+	size_t off = 0;
+
+	while (off < len) {
+		ssize_t n = write(fd, buf + off, len - off);
+		if (n <= 0)
+			return -1;
+		off += (size_t)n;
+	}
+	return 0;
+}
+
+/*
+ * Unique temp+rename so fopen("w") cannot wipe an existing skill before the
+ * new content is fully on disk (ENOSPC / EFBIG / crash). mkstemp uses O_EXCL
+ * so a planted path.tmp symlink is not followed (the #90 shape).
+ */
+static int write_skill_atomic(const char *path, const char *content)
+{
+	char path_copy[PATH_MAX];
+	char tmp_path[PATH_MAX];
+	char *dir;
+	int fd;
+	int n;
+
+	if (!path || !content)
+		return -1;
+	if (snprintf(path_copy, sizeof(path_copy), "%s", path) >= (int)sizeof(path_copy))
+		return -1;
+	dir = dirname(path_copy);
+	if (!dir || dir[0] == '\0')
+		return -1;
+	n = snprintf(tmp_path, sizeof(tmp_path), "%s/.sc-skill-XXXXXX", dir);
+	if (n < 0 || (size_t)n >= sizeof(tmp_path))
+		return -1;
+	fd = mkstemp(tmp_path);
+	if (fd < 0)
+		return -1;
+	(void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+	if (skill_write_all(fd, content, strlen(content)) != 0) {
+		discard_skill_tmp(fd, tmp_path);
+		return -1;
+	}
+	if (fsync(fd) != 0) {
+		discard_skill_tmp(fd, tmp_path);
+		return -1;
+	}
+	if (close(fd) != 0) {
+		discard_skill_tmp(-1, tmp_path);
+		return -1;
+	}
+	if (rename(tmp_path, path) != 0) {
+		discard_skill_tmp(-1, tmp_path);
+		return -1;
+	}
+	return 0;
+}
+
 int skill_create(const config_t *cfg, const char *name, const char *content)
 {
 	if (!cfg || !name || !content) return -1;
@@ -343,12 +453,7 @@ int skill_create(const config_t *cfg, const char *name, const char *content)
 		fclose(f);
 		return -1;
 	}
-	f = fopen(path, "w");
-	if (!f) return -1;
-	size_t len = strlen(content);
-	size_t written = fwrite(content, 1, len, f);
-	fclose(f);
-	return (written == len) ? 0 : -1;
+	return write_skill_atomic(path, content);
 }
 
 int skill_update(const config_t *cfg, const char *name, const char *content)
@@ -356,12 +461,7 @@ int skill_update(const config_t *cfg, const char *name, const char *content)
 	if (!cfg || !name || !content) return -1;
 	char path[MAX_PATH_LEN];
 	if (build_skill_path(cfg, name, path, sizeof(path)) != 0) return -1;
-	FILE *f = fopen(path, "w");
-	if (!f) return -1;
-	size_t len = strlen(content);
-	size_t written = fwrite(content, 1, len, f);
-	fclose(f);
-	return (written == len) ? 0 : -1;
+	return write_skill_atomic(path, content);
 }
 
 int skill_delete(const config_t *cfg, const char *name)

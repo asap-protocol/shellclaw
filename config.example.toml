@@ -23,9 +23,10 @@ api_key_env = "OPENAI_API_KEY"
 api_key_env = "OPENROUTER_API_KEY"
 
 [providers.local]
-# llama.cpp server endpoint (started separately)
+# llama.cpp server endpoint (started separately via systemd/llama-server.service)
 endpoint = "http://127.0.0.1:8080/v1/chat/completions"
-model = "tinyllama-1.1b-q4"
+# Jetson default (Phi-3-mini Q4_K_M); RPi uses tinyllama-1.1b-chat-Q4_K_M — see scripts/download_model.sh
+model = "Phi-3-mini-4k-instruct-Q4_K_M"
 
 [channels.telegram]
 enabled = true
@@ -69,11 +70,32 @@ hot_reload = true
 
 [asap]
 enabled = false
-agent_urn = "urn:asap:agent:shellclaw-home-01"
-agent_name = "ShellClaw Home Agent"
+agent_urn = "urn:asap:agent:shellclaw"
+agent_name = "ShellClaw"
+description = "C-native edge-AI ASAP agent on NVIDIA Jetson Orin Nano Super (CUDA, GPIO, I2C)."
+# Production: set to your HTTPS origin before marketplace registration (example.com is dev-only).
+public_base_url = "https://shellclaw.example.com"
 registry_url = "https://raw.githubusercontent.com/asap-protocol/asap-protocol/main/registry.json"
+# POST /asap is protocol-public (rate-limited, not Bearer). Empty trusted_senders
+# allows every sender URN. After inbound dispatch is wired, a trusted (or, with
+# an empty list, any) sender can run task.request (agent_run + tool table) and
+# mcp.tool_call (direct tool execute, no LLM). Default gateway bind is 127.0.0.1.
+# Set this in production before exposing the gateway so sessions keyed as
+# asap:<sender> cannot be spoofed and local tools are not open to any URN.
+# trusted_senders = ["urn:asap:agent:peer"]
+
+[asap.skill_descriptions]
+# assistant = "Override text for manifest capabilities.skills[].description"
 
 [hardware]
-gpio_enabled = false
-i2c_enabled = false
-camera_enabled = false
+enabled = true
+# board = "jetson"       # optional override (jetson | rpi | stub); auto-detect via device-tree when unset
+# SHELLCLAW_BOARD env overrides this at runtime
+class = "edge_accelerator"
+model = "jetson_orin_nano_super_8gb"
+io = ["gpio", "i2c"]
+i2c_bus = 7              # Jetson default; RPi Zero 2 W uses 1
+gpio_test_pin = 33       # optional; on-device test pin (Jetson default 33, RPi default 11)
+camera_type = "auto"     # csi | usb | auto — Jetson CSI via nvarguscamerasrc when auto
+camera_resolution = "640x480"
+camera_quality = 75      # JPEG quality 1–100 for future capture path (v1.2)

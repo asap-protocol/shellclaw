@@ -44,14 +44,29 @@
 #define ENV_GATEWAY_ALLOW_BIND   "SHELLCLAW_GATEWAY_ALLOW_BIND_ALL"
 #define ENV_ASAP_REGISTRY_URL         "SHELLCLAW_ASAP_REGISTRY_URL"
 #define ENV_ASAP_REVOCATION_LIST_URL  "SHELLCLAW_ASAP_REVOCATION_LIST_URL"
+#define ENV_ASAP_DESCRIPTION          "SHELLCLAW_ASAP_DESCRIPTION"
+#define ENV_ASAP_PUBLIC_BASE_URL      "SHELLCLAW_ASAP_PUBLIC_BASE_URL"
+#define ENV_HARDWARE_CLASS            "SHELLCLAW_HARDWARE_CLASS"
+#define ENV_HARDWARE_MODEL            "SHELLCLAW_HARDWARE_MODEL"
+#define DEFAULT_ASAP_DESCRIPTION \
+	"C-native edge-AI ASAP agent for ShellClaw edge hardware."
+#define DEFAULT_ASAP_PUBLIC_BASE_URL "https://shellclaw.example.com"
+#define MAX_HARDWARE_IO_ENTRIES 16
+#define MAX_ASAP_SKILL_DESCRIPTIONS 64
 #define ENV_FALLBACK_CHAIN           "SHELLCLAW_FALLBACK_CHAIN"
 #define ENV_LOCAL_ENDPOINT           "SHELLCLAW_LOCAL_ENDPOINT"
 #define ENV_LOCAL_MODEL              "SHELLCLAW_LOCAL_MODEL"
 #define ENV_AGENT_LATITUDE           "SHELLCLAW_AGENT_LATITUDE"
 #define ENV_AGENT_LONGITUDE          "SHELLCLAW_AGENT_LONGITUDE"
 #define ENV_AGENT_COUNTRY_CODE       "SHELLCLAW_AGENT_COUNTRY_CODE"
+#define ENV_HARDWARE_BOARD           "SHELLCLAW_BOARD"
+#define ENV_HARDWARE_I2C_BUS         "SHELLCLAW_I2C_BUS"
+#define ENV_HARDWARE_CAMERA_TYPE     "SHELLCLAW_CAMERA_TYPE"
 
 #define DEFAULT_LOCAL_ENDPOINT "http://127.0.0.1:8080/v1/chat/completions"
+#define DEFAULT_CAMERA_TYPE "auto"
+#define DEFAULT_CAMERA_RESOLUTION "640x480"
+#define DEFAULT_CAMERA_QUALITY 75
 #define DEFAULT_LOCAL_MODEL "tinyllama-1.1b-q4"
 
 struct config {
@@ -100,7 +115,12 @@ struct config {
 	int asap_enabled;
 	char *asap_agent_urn;
 	char *asap_agent_name;
+	char *asap_description;
+	char *asap_public_base_url;
 	char *asap_registry_url;
+	char **asap_skill_desc_ids;
+	char **asap_skill_desc_texts;
+	int asap_skill_desc_count;
 	char *asap_revocation_list_url;
 	int asap_client_timeout_sec;
 	char **asap_trusted_senders;
@@ -110,6 +130,19 @@ struct config {
 	char *heartbeat_default_channel;
 	char *brave_api_key_env;
 	char *tavily_api_key_env;
+	int hardware_enabled;
+	char *hardware_board;
+	char *hardware_class;
+	char *hardware_model;
+	char **hardware_io;
+	int hardware_io_count;
+	int hardware_has_i2c_bus;
+	int hardware_i2c_bus;
+	char *hardware_camera_type;
+	char *hardware_camera_resolution;
+	int hardware_camera_quality;
+	int hardware_has_gpio_test_pin;
+	int hardware_gpio_test_pin;
 };
 
 static void set_string(char **dst, const char *src)
@@ -439,6 +472,33 @@ static int parse_gateway(const toml_table_t *root, config_t *cfg)
 	return 0;
 }
 
+static void free_string_array(char **items, int count)
+{
+	int i;
+	if (!items) return;
+	for (i = 0; i < count; i++)
+		free(items[i]);
+	free(items);
+}
+
+static void free_asap_skill_descriptions(config_t *cfg)
+{
+	if (!cfg) return;
+	free_string_array(cfg->asap_skill_desc_ids, cfg->asap_skill_desc_count);
+	free_string_array(cfg->asap_skill_desc_texts, cfg->asap_skill_desc_count);
+	cfg->asap_skill_desc_ids = NULL;
+	cfg->asap_skill_desc_texts = NULL;
+	cfg->asap_skill_desc_count = 0;
+}
+
+static void free_hardware_io(config_t *cfg)
+{
+	if (!cfg) return;
+	free_string_array(cfg->hardware_io, cfg->hardware_io_count);
+	cfg->hardware_io = NULL;
+	cfg->hardware_io_count = 0;
+}
+
 static void free_asap_trusted_senders(config_t *cfg)
 {
 	int i;
@@ -465,6 +525,62 @@ static int parse_asap(const toml_table_t *root, config_t *cfg, char *errbuf, siz
 	if (d.ok) { set_string(&cfg->asap_agent_urn, d.u.s); free(d.u.s); }
 	d = toml_string_in(asap, "agent_name");
 	if (d.ok) { set_string(&cfg->asap_agent_name, d.u.s); free(d.u.s); }
+	d = toml_string_in(asap, "description");
+	if (d.ok) { set_string(&cfg->asap_description, d.u.s); free(d.u.s); }
+	d = toml_string_in(asap, "public_base_url");
+	if (d.ok) { set_string(&cfg->asap_public_base_url, d.u.s); free(d.u.s); }
+	{
+		const toml_table_t *desc_tbl = toml_table_in(asap, "skill_descriptions");
+		if (desc_tbl) {
+			int desc_n = toml_table_nkval(desc_tbl);
+			if (desc_n > 0) {
+				char **ids = calloc((size_t)desc_n, sizeof(char *));
+				char **texts = calloc((size_t)desc_n, sizeof(char *));
+				int desc_count = 0;
+				if (!ids || !texts) {
+					free(ids);
+					free(texts);
+					ERRBUF_COPY(errbuf, errbufsz, "out of memory allocating asap skill_descriptions");
+					return -1;
+				}
+				for (int desc_i = 0; desc_i < desc_n && desc_count < MAX_ASAP_SKILL_DESCRIPTIONS; desc_i++) {
+					const char *kid = toml_key_in(desc_tbl, desc_i);
+					toml_datum_t val;
+					if (!kid || !kid[0]) continue;
+					val = toml_string_in(desc_tbl, kid);
+					if (!val.ok || !val.u.s || !val.u.s[0]) {
+						if (val.ok) free(val.u.s);
+						continue;
+					}
+					ids[desc_count] = strdup(kid);
+					texts[desc_count] = val.u.s;
+					if (!ids[desc_count] || !texts[desc_count]) {
+						free(val.u.s);
+						if (ids[desc_count]) free(ids[desc_count]);
+						int j;
+						for (j = 0; j < desc_count; j++) {
+							free(ids[j]);
+							free(texts[j]);
+						}
+						free(ids);
+						free(texts);
+						ERRBUF_COPY(errbuf, errbufsz, "out of memory copying asap skill_descriptions");
+						return -1;
+					}
+					desc_count++;
+				}
+				if (desc_count > 0) {
+					free_asap_skill_descriptions(cfg);
+					cfg->asap_skill_desc_ids = ids;
+					cfg->asap_skill_desc_texts = texts;
+					cfg->asap_skill_desc_count = desc_count;
+				} else {
+					free(ids);
+					free(texts);
+				}
+			}
+		}
+	}
 	d = toml_string_in(asap, "registry_url");
 	if (d.ok) { set_string(&cfg->asap_registry_url, d.u.s); free(d.u.s); }
 	d = toml_string_in(asap, "revocation_list_url");
@@ -528,6 +644,65 @@ static int parse_web_search(const toml_table_t *root, config_t *cfg)
 	if (d.ok) { set_string(&cfg->brave_api_key_env, d.u.s); free(d.u.s); }
 	d = toml_string_in(ws, "tavily_api_key_env");
 	if (d.ok) { set_string(&cfg->tavily_api_key_env, d.u.s); free(d.u.s); }
+	return 0;
+}
+
+static int parse_hardware(const toml_table_t *root, config_t *cfg)
+{
+	const toml_table_t *hw = toml_table_in(root, "hardware");
+	toml_datum_t d;
+	if (!hw) return 0;
+	d = toml_bool_in(hw, "enabled");
+	if (d.ok) cfg->hardware_enabled = d.u.b;
+	d = toml_string_in(hw, "board");
+	if (d.ok) { set_string(&cfg->hardware_board, d.u.s); free(d.u.s); }
+	d = toml_string_in(hw, "class");
+	if (d.ok) { set_string(&cfg->hardware_class, d.u.s); free(d.u.s); }
+	d = toml_string_in(hw, "model");
+	if (d.ok) { set_string(&cfg->hardware_model, d.u.s); free(d.u.s); }
+	{
+		const toml_array_t *io_arr = toml_array_in(hw, "io");
+		if (io_arr) {
+			int io_n = toml_array_nelem(io_arr);
+			if (io_n > 0 && io_n <= MAX_HARDWARE_IO_ENTRIES) {
+				char **io = calloc((size_t)io_n, sizeof(char *));
+				int io_count = 0;
+				if (!io) return -1;
+				for (int io_i = 0; io_i < io_n && io_count < MAX_HARDWARE_IO_ENTRIES; io_i++) {
+					toml_datum_t s = toml_string_at(io_arr, io_i);
+					if (!s.ok || !s.u.s || !s.u.s[0]) {
+						if (s.ok) free(s.u.s);
+						continue;
+					}
+					io[io_count] = s.u.s;
+					io_count++;
+				}
+				if (io_count > 0) {
+					free_hardware_io(cfg);
+					cfg->hardware_io = io;
+					cfg->hardware_io_count = io_count;
+				} else {
+					free(io);
+				}
+			}
+		}
+	}
+	d = toml_int_in(hw, "i2c_bus");
+	if (d.ok) {
+		cfg->hardware_i2c_bus = (int)d.u.i;
+		cfg->hardware_has_i2c_bus = 1;
+	}
+	d = toml_string_in(hw, "camera_type");
+	if (d.ok) { set_string(&cfg->hardware_camera_type, d.u.s); free(d.u.s); }
+	d = toml_string_in(hw, "camera_resolution");
+	if (d.ok) { set_string(&cfg->hardware_camera_resolution, d.u.s); free(d.u.s); }
+	d = toml_int_in(hw, "camera_quality");
+	if (d.ok) cfg->hardware_camera_quality = (int)d.u.i;
+	d = toml_int_in(hw, "gpio_test_pin");
+	if (d.ok) {
+		cfg->hardware_gpio_test_pin = (int)d.u.i;
+		cfg->hardware_has_gpio_test_pin = 1;
+	}
 	return 0;
 }
 
@@ -639,6 +814,21 @@ static int apply_env_overrides(config_t *cfg)
 	if (v) set_string(&cfg->asap_registry_url, v);
 	v = getenv(ENV_ASAP_REVOCATION_LIST_URL);
 	if (v) set_string(&cfg->asap_revocation_list_url, v);
+	v = getenv(ENV_ASAP_DESCRIPTION);
+	if (v && v[0]) set_string(&cfg->asap_description, v);
+	v = getenv(ENV_ASAP_PUBLIC_BASE_URL);
+	if (v && v[0]) set_string(&cfg->asap_public_base_url, v);
+	v = getenv(ENV_HARDWARE_CLASS);
+	if (v && v[0]) set_string(&cfg->hardware_class, v);
+	v = getenv(ENV_HARDWARE_MODEL);
+	if (v && v[0]) set_string(&cfg->hardware_model, v);
+	v = getenv(ENV_HARDWARE_BOARD);
+	if (v && v[0]) set_string(&cfg->hardware_board, v);
+	v = getenv(ENV_HARDWARE_I2C_BUS);
+	if (v && parse_int_env(v, &cfg->hardware_i2c_bus, 0, 255))
+		cfg->hardware_has_i2c_bus = 1;
+	v = getenv(ENV_HARDWARE_CAMERA_TYPE);
+	if (v && v[0]) set_string(&cfg->hardware_camera_type, v);
 	return 0;
 }
 
@@ -744,11 +934,17 @@ int config_load(const char *path, config_t **out, char *errbuf, size_t errbufsz)
 	set_string(&cfg->workspace_path, "~/.shellclaw/workspace");
 	set_string(&cfg->asap_agent_urn, "urn:asap:agent:shellclaw");
 	set_string(&cfg->asap_agent_name, "ShellClaw");
+	set_string(&cfg->asap_description, DEFAULT_ASAP_DESCRIPTION);
+	set_string(&cfg->asap_public_base_url, DEFAULT_ASAP_PUBLIC_BASE_URL);
 	cfg->heartbeat_interval_minutes = 30;
 	set_string(&cfg->heartbeat_default_channel, "cli");
 	set_string(&cfg->brave_api_key_env, "BRAVE_API_KEY");
 	set_string(&cfg->tavily_api_key_env, "TAVILY_API_KEY");
 	cfg->shell_timeout_sec = DEFAULT_SHELL_TIMEOUT_SEC;
+	cfg->hardware_enabled = 1;
+	set_string(&cfg->hardware_camera_type, DEFAULT_CAMERA_TYPE);
+	set_string(&cfg->hardware_camera_resolution, DEFAULT_CAMERA_RESOLUTION);
+	cfg->hardware_camera_quality = DEFAULT_CAMERA_QUALITY;
 	int err = parse_agent(tab, cfg, errbuf, errbufsz);
 	if (err) goto fail;
 	err = parse_providers(tab, cfg, errbuf, errbufsz);
@@ -763,6 +959,8 @@ int config_load(const char *path, config_t **out, char *errbuf, size_t errbufsz)
 	if (err) goto fail;
 	parse_heartbeat(tab, cfg);
 	parse_web_search(tab, cfg);
+	err = parse_hardware(tab, cfg);
+	if (err) goto fail;
 	toml_free(tab);
 	tab = NULL;
 	if (apply_env_overrides(cfg) != 0) {
@@ -820,6 +1018,9 @@ void config_free(config_t *cfg)
 	set_string(&cfg->gateway_host, NULL);
 	set_string(&cfg->asap_agent_urn, NULL);
 	set_string(&cfg->asap_agent_name, NULL);
+	set_string(&cfg->asap_description, NULL);
+	set_string(&cfg->asap_public_base_url, NULL);
+	free_asap_skill_descriptions(cfg);
 	set_string(&cfg->asap_registry_url, NULL);
 	set_string(&cfg->asap_revocation_list_url, NULL);
 	free_asap_trusted_senders(cfg);
@@ -828,6 +1029,12 @@ void config_free(config_t *cfg)
 	set_string(&cfg->tavily_api_key_env, NULL);
 	set_string(&cfg->sandbox_cpu_max, NULL);
 	set_string(&cfg->sandbox_cgroup_base, NULL);
+	set_string(&cfg->hardware_board, NULL);
+	set_string(&cfg->hardware_class, NULL);
+	set_string(&cfg->hardware_model, NULL);
+	free_hardware_io(cfg);
+	set_string(&cfg->hardware_camera_type, NULL);
+	set_string(&cfg->hardware_camera_resolution, NULL);
 	free(cfg);
 }
 
@@ -932,6 +1139,33 @@ int config_gateway_allow_bind_all(const config_t *c) { return c ? c->gateway_all
 int config_asap_enabled(const config_t *c) { return c ? c->asap_enabled : 0; }
 const char *config_asap_agent_urn(const config_t *c) { return c && c->asap_agent_urn ? c->asap_agent_urn : "urn:asap:agent:shellclaw"; }
 const char *config_asap_agent_name(const config_t *c) { return c && c->asap_agent_name ? c->asap_agent_name : "ShellClaw"; }
+
+const char *config_asap_description(const config_t *c)
+{
+	if (!c || !c->asap_description || c->asap_description[0] == '\0')
+		return DEFAULT_ASAP_DESCRIPTION;
+	return c->asap_description;
+}
+
+const char *config_asap_public_base_url(const config_t *c)
+{
+	if (!c || !c->asap_public_base_url || c->asap_public_base_url[0] == '\0')
+		return DEFAULT_ASAP_PUBLIC_BASE_URL;
+	return c->asap_public_base_url;
+}
+
+const char *config_asap_skill_description(const config_t *c, const char *skill_id)
+{
+	int i;
+	if (!c || !skill_id || !skill_id[0] || !c->asap_skill_desc_ids)
+		return NULL;
+	for (i = 0; i < c->asap_skill_desc_count; i++) {
+		if (c->asap_skill_desc_ids[i] && strcmp(c->asap_skill_desc_ids[i], skill_id) == 0)
+			return c->asap_skill_desc_texts[i];
+	}
+	return NULL;
+}
+
 const char *config_asap_registry_url(const config_t *c) { return c ? c->asap_registry_url : NULL; }
 const char *config_asap_revocation_list_url(const config_t *c) { return c ? c->asap_revocation_list_url : NULL; }
 int config_asap_client_timeout_sec(const config_t *c) { if (!c || c->asap_client_timeout_sec <= 0) return 30; return c->asap_client_timeout_sec; }
@@ -954,3 +1188,76 @@ int config_sandbox_enabled(const config_t *c) { return c ? c->sandbox_enabled : 
 size_t config_sandbox_memory_max_bytes(const config_t *c) { return c ? c->sandbox_memory_max_bytes : 0; }
 const char *config_sandbox_cpu_max(const config_t *c) { return c ? c->sandbox_cpu_max : NULL; }
 const char *config_sandbox_cgroup_base(const config_t *c) { return c ? c->sandbox_cgroup_base : NULL; }
+
+int config_hardware_enabled(const config_t *c)
+{
+	return c ? c->hardware_enabled : 1;
+}
+
+const char *config_hardware_board(const config_t *c)
+{
+	return c ? c->hardware_board : NULL;
+}
+
+const char *config_hardware_class(const config_t *c)
+{
+	return c ? c->hardware_class : NULL;
+}
+
+const char *config_hardware_model(const config_t *c)
+{
+	return c ? c->hardware_model : NULL;
+}
+
+int config_hardware_io_count(const config_t *c)
+{
+	return c ? c->hardware_io_count : 0;
+}
+
+const char *config_hardware_io_entry(const config_t *c, int index)
+{
+	if (!c || !c->hardware_io || index < 0 || index >= c->hardware_io_count)
+		return NULL;
+	return c->hardware_io[index];
+}
+
+int config_hardware_has_i2c_bus(const config_t *c)
+{
+	return c ? c->hardware_has_i2c_bus : 0;
+}
+
+int config_hardware_i2c_bus(const config_t *c)
+{
+	return c ? c->hardware_i2c_bus : 0;
+}
+
+const char *config_hardware_camera_type(const config_t *c)
+{
+	if (!c || !c->hardware_camera_type || c->hardware_camera_type[0] == '\0')
+		return DEFAULT_CAMERA_TYPE;
+	return c->hardware_camera_type;
+}
+
+const char *config_hardware_camera_resolution(const config_t *c)
+{
+	if (!c || !c->hardware_camera_resolution || c->hardware_camera_resolution[0] == '\0')
+		return DEFAULT_CAMERA_RESOLUTION;
+	return c->hardware_camera_resolution;
+}
+
+int config_hardware_camera_quality(const config_t *c)
+{
+	if (!c || c->hardware_camera_quality <= 0)
+		return DEFAULT_CAMERA_QUALITY;
+	return c->hardware_camera_quality;
+}
+
+int config_hardware_has_gpio_test_pin(const config_t *c)
+{
+	return c ? c->hardware_has_gpio_test_pin : 0;
+}
+
+int config_hardware_gpio_test_pin(const config_t *c)
+{
+	return c ? c->hardware_gpio_test_pin : 0;
+}

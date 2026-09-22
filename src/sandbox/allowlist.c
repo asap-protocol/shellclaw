@@ -56,6 +56,12 @@ static const char *const BLOCK_SUBSTRINGS[] = {
     "auth_tokens.json",
     "shellclaw.pid",
     "shellclaw.log",
+    /* Jetson Tegra GPU device nodes (audit 7.1 — not bind-mounted, block direct open) */
+    "/dev/nvhost",
+    "/dev/nvgpu",
+    "/dev/nvmap",
+    /* Jetson Argus camera daemon socket (audit 7.3 — agent-only, not shell sandbox) */
+    "/tmp/argus_socket",
     NULL
 };
 

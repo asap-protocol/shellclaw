@@ -18,18 +18,151 @@
 #define ANTHROPIC_VERSION "2023-06-01"
 #define REQUEST_TIMEOUT_SEC 120
 #define CONNECT_TIMEOUT_SEC 30
+#define ANTHROPIC_TEXT_INIT_CAP 256
+#define ANTHROPIC_TOOL_INIT_CAP 4
 
 static char *s_anth_api_key;
 static const config_t *s_anth_cfg;
 
+#ifdef SHELLCLAW_TEST
+static int s_fail_next_reallocs;
+
+void anthropic_test_fail_next_reallocs(int n)
+{
+	s_fail_next_reallocs = n < 0 ? 0 : n;
+}
+#endif
+
+static void *anth_realloc(void *ptr, size_t size)
+{
+#ifdef SHELLCLAW_TEST
+	if (s_fail_next_reallocs > 0) {
+		s_fail_next_reallocs--;
+		return NULL;
+	}
+#endif
+	return realloc(ptr, size);
+}
+
+static int parse_fail(cJSON *root, char *text, provider_tool_call_t *tool_calls,
+                     size_t tool_count, provider_response_t *response, const char *msg)
+{
+	if (tool_calls) {
+		for (size_t i = 0; i < tool_count; i++) {
+			free(tool_calls[i].id);
+			free(tool_calls[i].name);
+			free(tool_calls[i].arguments);
+		}
+		free(tool_calls);
+	}
+	free(text);
+	cJSON_Delete(root);
+	provider_set_error(response, msg);
+	return -1;
+}
+
+/* Cap is published only after realloc succeeds. Publishing first made
+ * memcpy/index use a size the heap block did not have (#80). */
+static int ensure_text_cap(char **text, size_t *text_cap, size_t need)
+{
+	while (*text_cap < need) {
+		size_t new_cap = *text_cap ? *text_cap : ANTHROPIC_TEXT_INIT_CAP;
+		char *grown;
+		if (new_cap > SIZE_MAX / 2)
+			return -1;
+		new_cap *= 2;
+		grown = anth_realloc(*text, new_cap);
+		if (!grown)
+			return -1;
+		*text = grown;
+		*text_cap = new_cap;
+	}
+	return 0;
+}
+
+static int ensure_tool_cap(provider_tool_call_t **tool_calls, size_t *tool_cap,
+                           size_t tool_count)
+{
+	size_t new_cap;
+	provider_tool_call_t *grown;
+	if (tool_count < *tool_cap)
+		return 0;
+	new_cap = *tool_cap ? *tool_cap : ANTHROPIC_TOOL_INIT_CAP;
+	if (*tool_cap) {
+		if (new_cap > SIZE_MAX / (2u * sizeof(*grown)))
+			return -1;
+		new_cap *= 2;
+	}
+	if (new_cap > SIZE_MAX / sizeof(*grown))
+		return -1;
+	grown = anth_realloc(*tool_calls, new_cap * sizeof(*grown));
+	if (!grown)
+		return -1;
+	*tool_calls = grown;
+	*tool_cap = new_cap;
+	return 0;
+}
+
+static int append_text_block(char **text, size_t *text_len, size_t *text_cap, const char *t)
+{
+	size_t tlen;
+	size_t need;
+	if (!t)
+		return 0;
+	tlen = strlen(t);
+	if (tlen > SIZE_MAX - 1 || *text_len > SIZE_MAX - tlen - 1)
+		return -1;
+	need = *text_len + tlen + 1;
+	if (ensure_text_cap(text, text_cap, need) != 0)
+		return -1;
+	memcpy(*text + *text_len, t, tlen + 1);
+	*text_len += tlen;
+	return 0;
+}
+
+static int append_tool_use(provider_tool_call_t **tool_calls, size_t *tool_count,
+                           size_t *tool_cap, cJSON *block)
+{
+	provider_tool_call_t *tc;
+	cJSON *id_item;
+	cJSON *name_item;
+	cJSON *input_item;
+	if (ensure_tool_cap(tool_calls, tool_cap, *tool_count) != 0)
+		return -1;
+	tc = &(*tool_calls)[*tool_count];
+	tc->id = NULL;
+	tc->name = NULL;
+	tc->arguments = NULL;
+	id_item = cJSON_GetObjectItem(block, "id");
+	name_item = cJSON_GetObjectItem(block, "name");
+	input_item = cJSON_GetObjectItem(block, "input");
+	if (cJSON_IsString(id_item))
+		tc->id = provider_dup_str(id_item->valuestring);
+	if (cJSON_IsString(name_item))
+		tc->name = provider_dup_str(name_item->valuestring);
+	if (input_item)
+		tc->arguments = cJSON_PrintUnformatted(input_item);
+	(*tool_count)++;
+	return 0;
+}
+
 static int parse_response_body(const char *response_buf, provider_response_t *response)
 {
 	cJSON *root = cJSON_Parse(response_buf);
+	cJSON *err_obj;
+	cJSON *content;
+	cJSON *block;
+	size_t text_len = 0;
+	size_t text_cap = ANTHROPIC_TEXT_INIT_CAP;
+	size_t tool_cap = ANTHROPIC_TOOL_INIT_CAP;
+	size_t tool_count = 0;
+	char *text;
+	provider_tool_call_t *tool_calls;
 	if (!root) {
 		provider_set_error(response, "Failed to parse Anthropic response JSON");
 		return -1;
 	}
-	cJSON *err_obj = cJSON_GetObjectItem(root, "error");
+	err_obj = cJSON_GetObjectItem(root, "error");
 	if (cJSON_IsObject(err_obj)) {
 		cJSON *msg = cJSON_GetObjectItem(err_obj, "message");
 		const char *errmsg = cJSON_IsString(msg) ? msg->valuestring : "Anthropic API error";
@@ -37,60 +170,33 @@ static int parse_response_body(const char *response_buf, provider_response_t *re
 		cJSON_Delete(root);
 		return -1;
 	}
-	cJSON *content = cJSON_GetObjectItem(root, "content");
+	content = cJSON_GetObjectItem(root, "content");
 	if (!cJSON_IsArray(content)) {
 		cJSON_Delete(root);
 		return 0;
 	}
-	size_t text_len = 0;
-	size_t text_cap = 256;
-	char *text = malloc(text_cap);
-	if (text) text[0] = '\0';
-	size_t tool_cap = 4;
-	size_t tool_count = 0;
-	provider_tool_call_t *tool_calls = malloc(tool_cap * sizeof(provider_tool_call_t));
-	if (!tool_calls) tool_cap = 0;
-	cJSON *block;
+	text = malloc(text_cap);
+	if (!text)
+		return parse_fail(root, NULL, NULL, 0, response,
+		                   "Out of memory growing Anthropic text buffer");
+	text[0] = '\0';
+	tool_calls = malloc(tool_cap * sizeof(*tool_calls));
+	if (!tool_calls)
+		return parse_fail(root, text, NULL, 0, response,
+		                   "Out of memory growing Anthropic tool_use array");
 	cJSON_ArrayForEach(block, content) {
 		cJSON *type_item = cJSON_GetObjectItem(block, "type");
 		const char *type = cJSON_IsString(type_item) ? type_item->valuestring : NULL;
 		if (type && strcmp(type, "text") == 0) {
 			cJSON *text_item = cJSON_GetObjectItem(block, "text");
 			const char *t = cJSON_IsString(text_item) ? text_item->valuestring : "";
-			if (t) {
-				size_t tlen = strlen(t);
-				while (text_len + tlen + 1 >= text_cap) {
-					text_cap *= 2;
-					char *n = realloc(text, text_cap);
-					if (!n) break;
-					text = n;
-				}
-				if (text && text_len + tlen + 1 < text_cap) {
-					memcpy(text + text_len, t, tlen + 1);
-					text_len += tlen;
-				}
-			}
+			if (append_text_block(&text, &text_len, &text_cap, t) != 0)
+				return parse_fail(root, text, tool_calls, tool_count, response,
+				                 "Out of memory growing Anthropic text buffer");
 		} else if (type && strcmp(type, "tool_use") == 0) {
-			if (tool_count >= tool_cap) {
-				tool_cap *= 2;
-				provider_tool_call_t *n = realloc(tool_calls, tool_cap * sizeof(provider_tool_call_t));
-				if (!n) continue;
-				tool_calls = n;
-			}
-			provider_tool_call_t *tc = &tool_calls[tool_count];
-			tc->id = NULL;
-			tc->name = NULL;
-			tc->arguments = NULL;
-			cJSON *id_item = cJSON_GetObjectItem(block, "id");
-			cJSON *name_item = cJSON_GetObjectItem(block, "name");
-			cJSON *input_item = cJSON_GetObjectItem(block, "input");
-			if (cJSON_IsString(id_item)) tc->id = provider_dup_str(id_item->valuestring);
-			if (cJSON_IsString(name_item)) tc->name = provider_dup_str(name_item->valuestring);
-			if (input_item) {
-				char *printed = cJSON_PrintUnformatted(input_item);
-				tc->arguments = printed;
-			}
-			tool_count++;
+			if (append_tool_use(&tool_calls, &tool_count, &tool_cap, block) != 0)
+				return parse_fail(root, text, tool_calls, tool_count, response,
+				                 "Out of memory growing Anthropic tool_use array");
 		}
 	}
 	cJSON_Delete(root);

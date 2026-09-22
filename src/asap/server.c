@@ -17,6 +17,7 @@
 #include <pthread.h>
 
 enum { ASAP_SERVER_AGENT_RESPONSE_CAP = 256 * 1024 };
+enum { ASAP_TASK_SESSION_ID_CAP = 512 };
 
 static void set_err(char *buf, size_t sz, const char *msg)
 {
@@ -98,13 +99,13 @@ static int fill_response_envelope(asap_envelope_t *out, const asap_envelope_t *i
 	out->sender = in->recipient ? strdup(in->recipient) : NULL;
 	out->recipient = in->sender ? strdup(in->sender) : NULL;
 	out->payload_type = strdup(payload_type);
+	/* Ownership of payload moves to out; asap_envelope_clear frees it once. */
 	out->payload = payload;
 	if (in->correlation_id)
 		out->correlation_id = strdup(in->correlation_id);
 	if (in->trace_id)
 		out->trace_id = strdup(in->trace_id);
 	if (!out->id || !out->asap_version || !out->sender || !out->recipient || !out->payload_type) {
-		cJSON_Delete(payload);
 		asap_envelope_clear(out);
 		asap_envelope_init(out);
 		return -32603;
@@ -112,11 +113,29 @@ static int fill_response_envelope(asap_envelope_t *out, const asap_envelope_t *i
 	return 0;
 }
 
+const char *asap_resolve_task_session_id(const char *sender, char *buf, size_t buf_size)
+{
+	size_t need;
+	int n;
+	if (!sender || sender[0] == '\0')
+		return "asap:inbound";
+	if (!buf || buf_size == 0)
+		return NULL;
+	need = strlen("asap:") + strlen(sender) + 1;
+	if (need > buf_size)
+		return NULL;
+	n = snprintf(buf, buf_size, "asap:%s", sender);
+	if (n < 0 || (size_t)n >= buf_size)
+		return NULL;
+	return buf;
+}
+
 static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
 	asap_server_ctx_t *ctx, char *err_message, size_t err_message_size)
 {
 	char *prompt;
 	char *resp_buf;
+	char sid_buf[ASAP_TASK_SESSION_ID_CAP];
 	const char *sid;
 	int ar;
 	cJSON *pl;
@@ -134,7 +153,21 @@ static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
 		return -32603;
 	}
 	resp_buf[0] = '\0';
-	sid = ctx->session_id ? ctx->session_id : "asap:inbound";
+	/* Isolate SQLite history by sender URN; "asap:inbound" mixed clients (#64).
+	 * Ignore ctx->session_id so a later constant (including asap:inbound)
+	 * cannot restore a shared bucket. Authenticity is sender_is_trusted():
+	 * POST /asap is protocol-public; empty trusted_senders allows every URN. */
+	sid = asap_resolve_task_session_id(in->sender, sid_buf, sizeof sid_buf);
+	if (!sid) {
+		char too_long[128];
+		free(resp_buf);
+		free(prompt);
+		snprintf(too_long, sizeof too_long,
+			"task.request: sender URN length %zu exceeds session id cap %d",
+			in->sender ? strlen(in->sender) : 0, ASAP_TASK_SESSION_ID_CAP);
+		set_err(err_message, err_message_size, too_long);
+		return -32602;
+	}
 	if (ctx->task_request_hook)
 		ar = ctx->task_request_hook(ctx, in, resp_buf, (size_t)ASAP_SERVER_AGENT_RESPONSE_CAP);
 	else {
@@ -196,13 +229,24 @@ static int handle_state_query(const asap_envelope_t *in, asap_envelope_t *out,
 	int sess = 0;
 	int mem = 0;
 	int cron = 0;
+	int hook_rc = 0;
+	int counts_rc = 0;
+	/* Same mutex as mcp.tool_call / task.request: g_db is not safe from an
+	 * HTTP thread while another thread is in agent_run (#60). */
+	agent_lock();
 	if (ctx->state_query_hook) {
-		if (ctx->state_query_hook(ctx, &pl) != 0 || !pl) {
+		hook_rc = ctx->state_query_hook(ctx, &pl);
+	} else {
+		counts_rc = memory_get_row_counts(&sess, &mem, &cron);
+	}
+	agent_unlock();
+	if (ctx->state_query_hook) {
+		if (hook_rc != 0 || !pl) {
 			set_err(err_message, err_message_size, "state.query: hook failed");
 			return -32603;
 		}
 	} else {
-		if (memory_get_row_counts(&sess, &mem, &cron) != 0) {
+		if (counts_rc != 0) {
 			set_err(err_message, err_message_size, "state.query: memory store unavailable");
 			return -32603;
 		}
@@ -282,11 +326,16 @@ static int handle_mcp_tool_call(const asap_envelope_t *in, asap_envelope_t *out,
 		return -32603;
 	}
 	result_buf[0] = '\0';
+	/* Same mutex as task.request / handle_message: inbound tools may
+	 * touch session/memory while another thread is in agent_run (#60). */
+	agent_lock();
 	if (ctx->tool_call_hook) {
 		int hr = ctx->tool_call_hook(ctx, tool_name, args_json, result_buf, RESULT_CAP);
 		exec_rc = hr == 0 ? 0 : 2;
-	} else
+	} else {
 		exec_rc = dispatch_tool_by_name(ctx, tool_name, args_json, result_buf, RESULT_CAP);
+	}
+	agent_unlock();
 	free(args_json);
 	if (exec_rc == 1) {
 		free(result_buf);

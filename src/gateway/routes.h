@@ -7,6 +7,7 @@
 #define SHELLCLAW_GATEWAY_ROUTES_H
 
 #include "gateway/http_lws.h"
+#include "gateway/uri_match.h"
 #include "cJSON.h"
 #include <stddef.h>
 
@@ -16,7 +17,6 @@ extern "C" {
 
 void json_error(char *buf, size_t size, int *status, int code, const char *msg);
 
-/** Print @p obj to @p buf; returns 0 on success, -1 on OOM/print failure. */
 int json_print_to_buf(cJSON *obj, char *buf, size_t size, int *status);
 
 int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,

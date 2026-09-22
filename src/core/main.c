@@ -16,12 +16,16 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
+#include "asap/manifest_keys.h"
 #include "core/bootstrap.h"
 #include "core/config.h"
 #include "core/daemon.h"
+#include "core/agent.h"
 #include "core/dispatch.h"
 #include "core/reload.h"
+#include "core/version.h"
 #include "channels/channel.h"
+#include "hardware/board_detect.h"
 #include "providers/provider.h"
 #include <curl/curl.h>
 #include <signal.h>
@@ -30,7 +34,6 @@
 #include <string.h>
 #include <time.h>
 
-#define VERSION "0.2.0"
 #define DEFAULT_CONFIG_PATH "~/.shellclaw/config.toml"
 #define POLL_TIMEOUT_MS 1000
 
@@ -65,7 +68,9 @@ static void main_loop(int one_shot, config_t **pcfg)
 	while (!g_shutdown) {
 		if (g_reload_requested) {
 			g_reload_requested = 0;
+			agent_lock();
 			try_config_reload(pcfg);
+			agent_unlock();
 		}
 		provider_router_periodic_recovery_tick(time(NULL));
 		channel_incoming_msg_t msg;
@@ -97,7 +102,8 @@ static void main_loop(int one_shot, config_t **pcfg)
 
 static void print_usage(const char *prog)
 {
-	fprintf(stderr, "Usage: %s [--config <path>] [--verbose] [--daemon] [--version] [-m \"message\"]\n",
+	fprintf(stderr,
+	        "Usage: %s [--config <path>] [--verbose] [--daemon] [--detect-board] [--rotate-keys] [--version] [-m \"message\"]\n",
 	        prog);
 }
 
@@ -109,7 +115,21 @@ static int parse_args(int argc, char **argv, const char **config_path_out)
 	daemon_set_want(0);
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--version") == 0) {
-			printf("%s\n", VERSION);
+			printf("%s\n", SHELLCLAW_RELEASE_VERSION);
+			exit(0);
+		}
+		if (strcmp(argv[i], "--detect-board") == 0) {
+			printf("%s\n", board_name(board_detect()));
+			exit(0);
+		}
+		if (strcmp(argv[i], "--rotate-keys") == 0) {
+			char errbuf[256] = {0};
+			if (manifest_keys_rotate(errbuf, sizeof(errbuf)) != 0) {
+				fprintf(stderr, "Error: %s\n",
+				        errbuf[0] ? errbuf : "key rotation failed");
+				exit(1);
+			}
+			puts("rotation complete; refresh your marketplace listing");
 			exit(0);
 		}
 		if (strcmp(argv[i], "--verbose") == 0) {
@@ -180,10 +200,13 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	main_loop(g_cli_one_shot != NULL, &cfg);
-	cleanup_subsystems();
-	curl_global_cleanup();
-	daemon_pid_cleanup();
-	stale_free_all();
-	config_free(cfg);
+	{
+		config_t *live = bootstrap_get_cfg();
+		cleanup_subsystems();
+		curl_global_cleanup();
+		daemon_pid_cleanup();
+		stale_free_all();
+		config_free(live);
+	}
 	return 0;
 }

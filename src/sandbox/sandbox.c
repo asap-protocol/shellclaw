@@ -4,7 +4,9 @@
  *
  * Linux path: fork() + unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID) in the
  * child, giving the shell and its children mount, network, and PID namespace
- * isolation respectively.  cgroups v2 memory.max and cpu.max limits are applied
+ * isolation respectively.  Does not mount(2), bind-mount, or pivot_root(2); Jetson
+ * GPU nodes (/dev/nvhost-*, /dev/nvgpu, /dev/nvmap) are never injected into the
+ * namespace — see docs/SECURITY.md.  cgroups v2 memory.max and cpu.max limits are applied
  * via the host cgroup hierarchy when available; the function degrades gracefully
  * if the kernel does not expose writable cgroup controllers.
  *
