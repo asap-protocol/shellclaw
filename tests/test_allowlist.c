@@ -175,6 +175,22 @@ static int test_block_state_dir_config_and_memory(void)
 	return 0;
 }
 
+static int test_block_memory_sidecars_and_bare_names(void)
+{
+	allowlist_config_t acfg;
+
+	ASSERT(allowlist_path_is_runtime_state_file("/tmp/x/.shellclaw/memory.db-wal") == 1);
+	ASSERT(allowlist_path_is_runtime_state_file("/tmp/x/.shellclaw/memory.db-shm") == 1);
+	ASSERT(allowlist_path_is_runtime_state_file("/tmp/proj/memory.db-wal") == 0);
+	acfg.workspace_path = "/tmp/x/.shellclaw";
+	acfg.workspace_only = 1;
+	ASSERT(allowlist_check_shell_command("cat config.toml", &acfg, NULL, 0) == 1);
+	ASSERT(allowlist_check_shell_command("cat memory.db", &acfg, NULL, 0) == 1);
+	ASSERT(allowlist_check_shell_command("cat memory.db-wal", &acfg, NULL, 0) == 1);
+	ASSERT(allowlist_check_shell_command("cat notes.txt", &acfg, NULL, 0) == 0);
+	return 0;
+}
+
 static int test_allow_project_config_toml(void)
 {
 	ASSERT(allowlist_path_is_runtime_state_file("/tmp/project/config.toml") == 0);
@@ -297,6 +313,7 @@ int main(void)
 	RUN(test_null_command_blocked());
 	RUN(test_block_auth_tokens_json());
 	RUN(test_block_state_dir_config_and_memory());
+	RUN(test_block_memory_sidecars_and_bare_names());
 	RUN(test_allow_project_config_toml());
 	RUN(test_path_inside_workspace());
 	RUN(test_path_outside_workspace());

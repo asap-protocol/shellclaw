@@ -224,12 +224,9 @@ static void test_runtime_state_files_rejected_inside_workspace(void)
 	int r;
 
 	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_state_%d", (int)getpid());
-	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST) return;
+	MU_ASSERT(mkdir(tmpdir, 0755) == 0 || errno == EEXIST, "mkdir state tmpdir");
 	snprintf(state_dir, sizeof(state_dir), "%s/.shellclaw", tmpdir);
-	if (mkdir(state_dir, 0755) != 0 && errno != EEXIST) {
-		rmdir(tmpdir);
-		return;
-	}
+	MU_ASSERT(mkdir(state_dir, 0755) == 0 || errno == EEXIST, "mkdir .shellclaw");
 	snprintf(token_path, sizeof(token_path), "%s/auth_tokens.json", state_dir);
 	snprintf(config_toml, sizeof(config_toml), "%s/config.toml", state_dir);
 	snprintf(memory_db, sizeof(memory_db), "%s/memory.db", state_dir);

@@ -112,7 +112,8 @@ static int test_defaults(void)
 		ASSERT(ws != NULL);
 		n = strlen(ws);
 		ASSERT(n >= 10);
-		ASSERT(strcmp(ws + n - 10, "/workspace") == 0);
+		ASSERT(n >= 21);
+		ASSERT(strcmp(ws + n - 21, "/.shellclaw/workspace") == 0);
 	}
 	config_free(cfg);
 	remove(path);

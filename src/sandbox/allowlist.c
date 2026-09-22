@@ -141,7 +141,8 @@ int allowlist_path_is_runtime_state_file(const char *path)
         strcmp(base, "shellclaw.pid") == 0 ||
         strcmp(base, "shellclaw.log") == 0)
         return 1;
-    if (strcmp(base, "config.toml") != 0 && strcmp(base, "memory.db") != 0)
+    if (strcmp(base, "config.toml") != 0 && strcmp(base, "memory.db") != 0 &&
+        strncmp(base, "memory.db-", 10) != 0)
         return 0;
     slash = strrchr(use, '/');
     if (!slash || slash == use)
@@ -154,6 +155,66 @@ int allowlist_path_is_runtime_state_file(const char *path)
     slash = strrchr(parent, '/');
     slash = slash ? slash + 1 : parent;
     return strcmp(slash, ".shellclaw") == 0;
+}
+
+/** Copy @p rel under @p root, collapsing "." and "..". Absolute @p rel is copied as-is. */
+static int join_under_root(const char *root, const char *rel, char *out, size_t cap)
+{
+    char tmp[PATH_MAX];
+    char *dup;
+    char *save = NULL;
+    char *tok;
+    char *stack[48] = {0};
+    int nstack = 0;
+    int i;
+    size_t used;
+
+    if (!rel || !rel[0] || !out || cap == 0)
+        return -1;
+    if (rel[0] == '/') {
+        if (strlen(rel) + 1 > cap)
+            return -1;
+        memcpy(out, rel, strlen(rel) + 1);
+        return 0;
+    }
+    if (!root || !root[0])
+        return -1;
+    if (snprintf(tmp, sizeof(tmp), "%s/%s", root, rel) >= (int)sizeof(tmp))
+        return -1;
+    dup = strdup(tmp);
+    if (!dup)
+        return -1;
+    for (tok = strtok_r(dup, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+        if (strcmp(tok, ".") == 0)
+            continue;
+        if (strcmp(tok, "..") == 0) {
+            if (nstack > 0)
+                nstack--;
+            continue;
+        }
+        if (nstack >= (int)(sizeof(stack) / sizeof(stack[0]))) {
+            free(dup);
+            return -1;
+        }
+        stack[nstack++] = tok;
+    }
+    used = 0;
+    out[0] = '\0';
+    for (i = 0; i < nstack; i++) {
+        size_t part = strlen(stack[i]);
+        if (used + 1 + part + 1 > cap) {
+            free(dup);
+            return -1;
+        }
+        out[used++] = '/';
+        memcpy(out + used, stack[i], part);
+        used += part;
+        out[used] = '\0';
+    }
+    free(dup);
+    if (used == 0)
+        return -1;
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -190,20 +251,20 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
             return 1;
         }
     }
-    /* Phase 2: workspace path containment */
-    if (!cfg || !cfg->workspace_only || !cfg->workspace_path || !cfg->workspace_path[0])
-        return 0;
-    workspace_only = cfg->workspace_only;
-    (void)workspace_only;
-    /* Resolve workspace root once */
-    if (!realpath(cfg->workspace_path, ws_resolved)) {
-        /* Workspace path does not exist; use as-is. */
-        size_t n = strlen(cfg->workspace_path);
-        if (n >= PATH_MAX) n = PATH_MAX - 1;
-        memcpy(ws_resolved, cfg->workspace_path, n);
-        ws_resolved[n] = '\0';
+    /* Phase 2: runtime-state paths, then optional workspace containment.
+     * State files are rejected even when workspace_only is off, so an
+     * unsandboxed `cat ~/.shellclaw/config.toml` cannot skip the check. */
+    workspace_only = cfg && cfg->workspace_only && cfg->workspace_path &&
+                     cfg->workspace_path[0];
+    if (cfg && cfg->workspace_path && cfg->workspace_path[0]) {
+        if (!realpath(cfg->workspace_path, ws_resolved)) {
+            size_t n = strlen(cfg->workspace_path);
+            if (n >= PATH_MAX) n = PATH_MAX - 1;
+            memcpy(ws_resolved, cfg->workspace_path, n);
+            ws_resolved[n] = '\0';
+        }
+        workspace_root = ws_resolved;
     }
-    workspace_root = ws_resolved;
     /* Tokenize the command and check each path-like token. */
     cmd_copy = strdup(cmd);
     if (!cmd_copy) return 0; /* fail-open on OOM */
@@ -226,7 +287,19 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
             free(cmd_copy);
             return 1;
         }
-        if (has_path_chars(tok)) {
+        /* sandbox_exec chdirs into the workspace, so a bare name is that file. */
+        if (workspace_root && check[0] != '/') {
+            char joined[PATH_MAX];
+            if (join_under_root(workspace_root, check, joined, sizeof(joined)) == 0 &&
+                allowlist_path_is_runtime_state_file(joined)) {
+                set_reason(reason_buf, reason_cap,
+                           "command blocked: runtime state file: ", joined);
+                fprintf(stderr, "allowlist: blocked runtime state file: %s\n", joined);
+                free(cmd_copy);
+                return 1;
+            }
+        }
+        if (workspace_only && has_path_chars(tok)) {
             if (!allowlist_path_is_under_workspace(check, workspace_root)) {
                 set_reason(reason_buf, reason_cap,
                            "command blocked: path escapes workspace: ", check);

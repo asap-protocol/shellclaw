@@ -237,11 +237,30 @@ static void channels_cleanup(void)
 	g_cfg = NULL;
 }
 
-static void ensure_workspace_directory(const char *workspace)
+static int workspace_is_real_dir(const char *workspace)
+{
+	struct stat st;
+
+	if (lstat(workspace, &st) != 0) {
+		fprintf(stderr, "shellclaw: workspace %s: %s\n", workspace, strerror(errno));
+		return 0;
+	}
+	if (S_ISLNK(st.st_mode)) {
+		fprintf(stderr, "shellclaw: workspace %s is a symlink\n", workspace);
+		return 0;
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "shellclaw: workspace %s is not a directory\n", workspace);
+		return 0;
+	}
+	return 1;
+}
+
+static int ensure_workspace_directory(const char *workspace)
 {
 	const char *slash;
 
-	if (!workspace || !workspace[0]) return;
+	if (!workspace || !workspace[0]) return 0;
 	slash = strrchr(workspace, '/');
 	if (slash && slash != workspace) {
 		char parent[PATH_MAX];
@@ -257,11 +276,15 @@ static void ensure_workspace_directory(const char *workspace)
 	if (mkdir(workspace, 0700) != 0 && errno != EEXIST)
 		fprintf(stderr, "shellclaw: mkdir workspace %s: %s\n",
 		        workspace, strerror(errno));
+	if (!workspace_is_real_dir(workspace))
+		return -1;
+	return 0;
 }
 
 int tools_init(const config_t *cfg)
 {
-	ensure_workspace_directory(config_workspace_path(cfg));
+	if (ensure_workspace_directory(config_workspace_path(cfg)) != 0)
+		return -1;
 	tool_set_config(cfg);
 	g_tool_count = tool_get_all(g_tools, SHELLCLAW_MAX_TOOLS);
 	return 0;
