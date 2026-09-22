@@ -160,6 +160,7 @@
         '<div class="form-row"><label>Temperature</label><input type="number" step="0.1" name="temperature" value="' + escapeHtml(String(d.temperature ?? 0.7)) + '"></div>' +
         '<div class="form-row"><label>Gateway host</label><input name="gateway_host" value="' + escapeHtml(d.gateway_host || '') + '"></div>' +
         '<div class="form-row"><label>Gateway port</label><input type="number" name="gateway_port" value="' + escapeHtml(String(d.gateway_port ?? 18789)) + '"></div>' +
+        '<p>Gateway host and port are saved now. The process keeps the current listen address until restart.</p>' +
         '<button type="submit">Save</button></form>');
       document.getElementById('config-form').onsubmit = function (e) {
         e.preventDefault();

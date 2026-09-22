@@ -157,7 +157,7 @@ static int test_try_config_reload_keeps_old_on_invalid_file(void)
 		fprintf(f, "[memory]\ndb_path = \"/tmp/db\"\n");
 		fclose(f);
 	}
-	try_config_reload(&cfg);
+	ASSERT(try_config_reload(&cfg) != 0);
 	ASSERT(cfg != NULL);
 	ASSERT(strcmp(config_agent_model(cfg), "still-valid") == 0);
 	stale_free_all();
@@ -174,6 +174,44 @@ static int test_try_config_reload_null_args_noop(void)
 	return 0;
 }
 
+static int test_try_config_reload_ignores_stale_caller_pointer(void)
+{
+	char path[128];
+	config_t *main_ptr = NULL;
+	config_t *http_ptr = NULL;
+	ASSERT(test_runner_mkstemp_path("shellclaw_test_reload", path, sizeof(path)) == 0);
+	main_ptr = load_minimal_config(path, "gen0");
+	ASSERT(main_ptr != NULL);
+	bootstrap_set_config_path(path);
+	bootstrap_set_cfg(main_ptr);
+	http_ptr = bootstrap_get_cfg();
+	{
+		FILE *f = fopen(path, "w");
+		ASSERT(f);
+		fprintf(f, "[agent]\nmodel = \"gen1\"\n");
+		fclose(f);
+	}
+	try_config_reload(&http_ptr);
+	ASSERT(http_ptr != NULL);
+	ASSERT(strcmp(config_agent_model(http_ptr), "gen1") == 0);
+	ASSERT(main_ptr != http_ptr);
+	{
+		FILE *f = fopen(path, "w");
+		ASSERT(f);
+		fprintf(f, "[agent]\nmodel = \"gen2\"\n");
+		fclose(f);
+	}
+	try_config_reload(&main_ptr);
+	ASSERT(main_ptr != NULL);
+	ASSERT(strcmp(config_agent_model(main_ptr), "gen2") == 0);
+	ASSERT(main_ptr == bootstrap_get_cfg());
+	stale_free_all();
+	config_free(main_ptr);
+	bootstrap_set_cfg(NULL);
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_on_hup_sets_reload_flag());
@@ -183,6 +221,7 @@ int main(void)
 	RUN(test_try_config_reload_swaps_live_config());
 	RUN(test_try_config_reload_keeps_old_on_invalid_file());
 	RUN(test_try_config_reload_null_args_noop());
+	RUN(test_try_config_reload_ignores_stale_caller_pointer());
 	printf("test_reload: all tests passed\n");
 	return 0;
 }

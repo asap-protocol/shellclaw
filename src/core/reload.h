@@ -27,9 +27,11 @@ void stale_free_all(void);
 
 /**
  * Re-parse config and swap live pointers. Old config is queued via stale_enqueue().
+ * Callers on different threads must hold agent_lock() around this call.
  * @param pcfg In/out active config pointer (updated on success).
+ * @return 0 on success, -1 if reload did not swap the live config.
  */
-void try_config_reload(config_t **pcfg);
+int try_config_reload(config_t **pcfg);
 
 #ifdef __cplusplus
 }

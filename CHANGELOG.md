@@ -5,6 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Dashboard `PUT /api/config` merges JSON fields into `config.toml` and reloads live settings. Indented keys and `[section] # comment` headers are updated in place; a present field with the wrong JSON type returns 400; a saved file whose live reload fails returns 500. Gateway host and port still need a process restart to rebind.
 - Unsandboxed `shell` no longer blocks forever in `waitpid` after the output cap fills; leftover children (including background grandchildren) are SIGKILL'd via the command process group, and truncated capture is NUL-terminated (#69).
 - `write_file` maps to the intended path instead of the first existing ancestor, so a nested path cannot truncate a workspace file treated as a directory or overwrite a same-named file in a parent (#67). Leaf workspace symlinks (dangling or an in-workspace alias) are rejected (`lstat` + `O_NOFOLLOW`) instead of creating host files outside the workspace (#90).
 - `write_file` persists via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe an existing workspace file and a sibling `path.tmp` is not truncated (#78).
