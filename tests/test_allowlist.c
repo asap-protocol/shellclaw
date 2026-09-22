@@ -12,6 +12,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/allowlist.h"
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -122,13 +123,13 @@ static int test_block_auth_tokens_json(void)
 static int test_block_state_dir_config_and_memory(void)
 {
 	char dir[] = "/tmp/sc_al_state_XXXXXX";
-	char state[256];
-	char cfg_path[256];
-	char db_path[256];
+	char state[PATH_MAX - 32];
+	char cfg_path[PATH_MAX];
+	char db_path[PATH_MAX];
 	char *tmp;
 	FILE *f;
 	allowlist_config_t acfg;
-	char cmd[512];
+	char cmd[PATH_MAX + 16];
 
 	tmp = mkdtemp(dir);
 	if (!tmp) {
