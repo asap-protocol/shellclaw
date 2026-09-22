@@ -2,10 +2,11 @@
  * @file test_sandbox.c
  * @brief Unit tests for sandbox_exec.
  *
- * Linux-specific namespace and cgroup tests are guarded by
+ * Linux-specific namespace, Landlock, and cgroup tests are guarded by
  * #ifdef __linux__. GitHub-hosted runners often cannot apply user namespaces
- * (sandbox_exec fail-closes; success-path tests skip). Do not weaken
- * sandbox.c for CI.
+ * (sandbox_exec fail-closes; success-path tests skip). The Landlock
+ * builder is exercised in-process via prepare(); restrict_self runs in a
+ * child so gcov can still write. Do not weaken sandbox.c for CI.
  *
  * 5.7 Benchmark: run sandbox_exec("true") 200 times and report median.
  * The benchmark is informational only — it does not gate the test suite.
@@ -15,6 +16,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/sandbox.h"
+#include "sandbox/sandbox_landlock.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -361,6 +363,166 @@ static int test_proc_is_namespaced(void)
 	return 0;
 }
 
+static int test_landlock_probe_without_restrict(void)
+{
+	char workspace[] = "/tmp/sc_ll_prep_XXXXXX";
+	char *ws;
+	ASSERT(sandbox_landlock_restrict_to_workspace(NULL) == 0);
+	ASSERT(sandbox_landlock_restrict_to_workspace("") == 0);
+	ASSERT(sandbox_landlock_restrict_to_workspace("/no/such/sc_ll_ws") == -1);
+	ASSERT(sandbox_landlock_prepare(NULL) == 0);
+	ASSERT(sandbox_landlock_prepare("") == 0);
+	ASSERT(sandbox_landlock_prepare("/no/such/sc_ll_ws") == -1);
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_landlock_probe_without_restrict: mkdtemp failed\n");
+		return 1;
+	}
+	ASSERT(sandbox_landlock_prepare(ws) == 0);
+	rmdir(ws);
+	return 0;
+}
+
+static int test_landlock_restrict_denies_etc_passwd(void)
+{
+	char workspace[] = "/tmp/sc_ll_XXXXXX";
+	char *ws;
+	pid_t pid;
+	int st;
+	int status;
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_landlock_restrict_denies_etc_passwd: mkdtemp failed\n");
+		return 1;
+	}
+	pid = fork();
+	if (pid < 0) {
+		rmdir(ws);
+		return 1;
+	}
+	if (pid == 0) {
+		FILE *f;
+		int pfd;
+		if (chdir(ws) != 0)
+			_exit(5);
+		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+			_exit(3);
+		if (sandbox_landlock_restrict_to_workspace(ws) != 0)
+			_exit(2);
+		f = fopen("ok", "w");
+		if (!f)
+			_exit(4);
+		fclose(f);
+		unlink("ok");
+		pfd = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
+		if (pfd >= 0) {
+			close(pfd);
+			_exit(1);
+		}
+		_exit(0);
+	}
+	if (waitpid(pid, &st, 0) < 0) {
+		rmdir(ws);
+		return 1;
+	}
+	rmdir(ws);
+	if (!WIFEXITED(st)) {
+		fprintf(stderr, "FAIL: tests/test_sandbox.c: landlock child did not exit (st=%d)\n",
+			st);
+		return 1;
+	}
+	status = WEXITSTATUS(st);
+	if (status == 2 || status == 3) {
+		fprintf(stderr, "test_sandbox: skip test_landlock_restrict_denies_etc_passwd (WEXITSTATUS=%d)\n",
+			status);
+		return 0;
+	}
+	if (status != 0) {
+		fprintf(stderr, "FAIL: tests/test_sandbox.c: test_landlock_restrict_denies_etc_passwd WEXITSTATUS=%d (0=denied 1=passwd_open 4=ws_write 5=chdir)\n",
+			status);
+		return 1;
+	}
+	return 0;
+}
+
+static int test_landlock_denies_etc_ssl_outside_certs(void)
+{
+	char workspace[] = "/tmp/sc_ll_ssl_XXXXXX";
+	char *ws;
+	pid_t pid;
+	int st;
+	int status;
+	int host_cnf;
+	int host_private;
+
+	host_cnf = access("/etc/ssl/openssl.cnf", R_OK) == 0;
+	host_private = access("/etc/ssl/private", R_OK) == 0;
+	if (!host_cnf && !host_private) {
+		fprintf(stderr,
+			"test_sandbox: skip test_landlock_denies_etc_ssl_outside_certs (no readable /etc/ssl targets)\n");
+		return 0;
+	}
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_landlock_denies_etc_ssl_outside_certs: mkdtemp failed\n");
+		return 1;
+	}
+	pid = fork();
+	if (pid < 0) {
+		rmdir(ws);
+		return 1;
+	}
+	if (pid == 0) {
+		int pfd;
+		int saw_cnf = access("/etc/ssl/openssl.cnf", R_OK) == 0;
+		int saw_private = access("/etc/ssl/private", R_OK) == 0;
+		if (chdir(ws) != 0)
+			_exit(5);
+		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+			_exit(3);
+		if (sandbox_landlock_restrict_to_workspace(ws) != 0)
+			_exit(2);
+		if (saw_cnf) {
+			pfd = open("/etc/ssl/openssl.cnf", O_RDONLY | O_CLOEXEC);
+			if (pfd >= 0) {
+				close(pfd);
+				_exit(1);
+			}
+		}
+		if (saw_private) {
+			pfd = open("/etc/ssl/private", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+			if (pfd >= 0) {
+				close(pfd);
+				_exit(7);
+			}
+		}
+		_exit(0);
+	}
+	if (waitpid(pid, &st, 0) < 0) {
+		rmdir(ws);
+		return 1;
+	}
+	rmdir(ws);
+	if (!WIFEXITED(st)) {
+		fprintf(stderr,
+			"FAIL: tests/test_sandbox.c: ssl landlock child did not exit (st=%d)\n", st);
+		return 1;
+	}
+	status = WEXITSTATUS(st);
+	if (status == 2 || status == 3) {
+		fprintf(stderr,
+			"test_sandbox: skip test_landlock_denies_etc_ssl_outside_certs (WEXITSTATUS=%d)\n",
+			status);
+		return 0;
+	}
+	if (status != 0) {
+		fprintf(stderr,
+			"FAIL: tests/test_sandbox.c: test_landlock_denies_etc_ssl_outside_certs WEXITSTATUS=%d (0=denied 1=cnf_open 7=private_open)\n",
+			status);
+		return 1;
+	}
+	return 0;
+}
 #endif
 
 #ifdef __linux__
@@ -375,6 +537,137 @@ static int test_shadow_not_accessible(void)
 	ASSERT(rc == 0);
 	ASSERT(strlen(out) > 0);
 	ASSERT(strstr(out, "root:") == NULL);
+	return 0;
+}
+
+static int test_workspace_landlock_blocks_symlink_escape(void)
+{
+	char workspace[] = "/tmp/sc_sb_ws_XXXXXX";
+	char leak_path[256];
+	char out[4096];
+	sandbox_config_t cfg;
+	char *ws;
+	int rc;
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_workspace_landlock_blocks_symlink_escape: mkdtemp failed\n");
+		return 1;
+	}
+	snprintf(leak_path, sizeof(leak_path), "%s/leak", ws);
+	if (symlink("/etc/passwd", leak_path) != 0) {
+		rmdir(ws);
+		fprintf(stderr, "test_workspace_landlock_blocks_symlink_escape: symlink failed\n");
+		return 1;
+	}
+	memset(&cfg, 0, sizeof cfg);
+	cfg.workspace_path = ws;
+	rc = sandbox_exec("cat leak 2>&1; echo EXIT:$?", out, sizeof(out), 5000, &cfg);
+	unlink(leak_path);
+	rmdir(ws);
+	ASSERT(strstr(out, "root:x:") == NULL);
+	if (isolation_was_denied(rc, out))
+		return 0;
+	ASSERT(rc == 0);
+	ASSERT(strstr(out, "Permission denied") != NULL ||
+	       strstr(out, "No such file") != NULL ||
+	       strstr(out, "EXIT:1") != NULL ||
+	       strstr(out, "EXIT:2") != NULL);
+	return 0;
+}
+
+static int test_workspace_landlock_blocks_abs_etc(void)
+{
+	char workspace[] = "/tmp/sc_sb_ws2_XXXXXX";
+	char out[4096];
+	char outp[256];
+	sandbox_config_t cfg;
+	char *ws;
+	int rc;
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_workspace_landlock_blocks_abs_etc: mkdtemp failed\n");
+		return 1;
+	}
+	memset(&cfg, 0, sizeof cfg);
+	cfg.workspace_path = ws;
+	rc = sandbox_exec("cat /etc/passwd 2>&1; echo EXIT:$?", out, sizeof(out), 5000, &cfg);
+	ASSERT(strstr(out, "root:x:") == NULL);
+	if (isolation_was_denied(rc, out)) {
+		rmdir(ws);
+		return 0;
+	}
+	ASSERT(rc == 0);
+	ASSERT(strstr(out, "EXIT:0") == NULL);
+	if (access("/usr/bin/python3", X_OK) == 0 || access("/bin/python3", X_OK) == 0) {
+		FILE *wrote;
+		char buf[64];
+		size_t nread;
+		rc = sandbox_exec(
+			"python3 -c 'open(\"out\",\"w\").write(open(chr(47)+\"etc\"+chr(47)+\"passwd\").read())' 2>&1; "
+			"echo EXIT:$?",
+			out, sizeof(out), 8000, &cfg);
+		snprintf(outp, sizeof(outp), "%s/out", ws);
+		wrote = fopen(outp, "r");
+		if (wrote) {
+			nread = fread(buf, 1, sizeof buf - 1, wrote);
+			fclose(wrote);
+			buf[nread] = '\0';
+			ASSERT(strstr(buf, "root:") == NULL);
+		}
+		unlink(outp);
+		ASSERT(strstr(out, "root:x:") == NULL);
+		if (!isolation_was_denied(rc, out)) {
+			ASSERT(rc == 0);
+			ASSERT(strstr(out, "EXIT:0") == NULL);
+		}
+	}
+	rmdir(ws);
+	return 0;
+}
+
+static int test_workspace_landlock_allows_workspace_write(void)
+{
+	char workspace[] = "/tmp/sc_sb_wr_XXXXXX";
+	char out[4096];
+	char wrote[256];
+	char buf[64];
+	sandbox_config_t cfg;
+	char *ws;
+	FILE *f;
+	int rc;
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_workspace_landlock_allows_workspace_write: mkdtemp failed\n");
+		return 1;
+	}
+	memset(&cfg, 0, sizeof cfg);
+	cfg.workspace_path = ws;
+	rc = sandbox_exec("echo landlock_ok > wrote.txt", out, sizeof(out), 5000, &cfg);
+	snprintf(wrote, sizeof(wrote), "%s/wrote.txt", ws);
+	if (isolation_was_denied(rc, out)) {
+		unlink(wrote);
+		rmdir(ws);
+		fprintf(stderr, "test_sandbox: skip test_workspace_landlock_allows_workspace_write (%s)\n",
+			out);
+		return 0;
+	}
+	ASSERT(rc == 0);
+	f = fopen(wrote, "r");
+	ASSERT(f != NULL);
+	if (fgets(buf, sizeof(buf), f) == NULL) {
+		fclose(f);
+		unlink(wrote);
+		rmdir(ws);
+		fprintf(stderr, "FAIL: %s:%d  fgets wrote.txt\n", __FILE__, __LINE__);
+		return 1;
+	}
+	fclose(f);
+	ASSERT(strstr(buf, "landlock_ok") != NULL);
+	unlink(wrote);
+	rmdir(ws);
 	return 0;
 }
 
@@ -541,15 +834,23 @@ int main(void)
 	RUN(test_missing_workspace_fail_closed());
 	RUN(test_timeout_kills_process());
 #ifdef __linux__
+	RUN(test_landlock_probe_without_restrict());
 	RUN(test_command_inherits_cgroup());
 	RUN(test_inherited_fd_is_closed());
 	RUN(test_proc_is_namespaced());
 	RUN(test_shadow_not_accessible());
+	RUN(test_workspace_landlock_blocks_symlink_escape());
+	RUN(test_workspace_landlock_blocks_abs_etc());
+	RUN(test_workspace_landlock_allows_workspace_write());
 	RUN(test_network_namespace_blocks_host_loopback());
 #else
 	fprintf(stderr, "test_sandbox: Linux-only namespace tests skipped on this platform\n");
 #endif
 	RUN(benchmark_sandbox_exec());
+#ifdef __linux__
+	RUN(test_landlock_restrict_denies_etc_passwd());
+	RUN(test_landlock_denies_etc_ssl_outside_certs());
+#endif
 	printf("test_sandbox: all tests passed\n");
 	return 0;
 }

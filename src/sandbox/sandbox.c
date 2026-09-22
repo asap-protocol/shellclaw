@@ -1,6 +1,6 @@
 /**
  * @file sandbox.c
- * @brief Process sandbox: Linux namespaces, cgroups v2, timeout.
+ * @brief Process sandbox: Linux namespaces, Landlock FS bound, cgroups v2.
  *
  * Linux path: fork the isolator, then unshare mount/network/PID (user ns
  * first when unprivileged). Isolation failure is reported on a control pipe,
@@ -8,7 +8,8 @@
  * setup failures write that byte before exiting; a 0-byte read is success.
  * After CLONE_NEWPID, fork so the command
  * is PID 1 (unshare does not move the caller). That child fchdir's the
- * workspace, remounts procfs, sets PR_SET_PDEATHSIG, and closes fds >= 3
+ * workspace (Landlock cannot walk `/tmp` after restrict_self), remounts
+ * procfs, applies Landlock, sets PR_SET_PDEATHSIG, and closes fds >= 3
  * so a timeout SIGKILL of the isolator cannot leave the command under
  * host init. The isolator joins its cgroup before the command fork so
  * memory.max and cpu.max apply to sh -c. Limits degrade if unavailable.
@@ -19,6 +20,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/sandbox.h"
+#include "sandbox/sandbox_landlock.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -223,6 +225,9 @@ static unsigned char setup_command_process(const char *workspace)
         return SANDBOX_ISO_NS;
     if (remount_procfs() != 0)
         return SANDBOX_ISO_NS;
+    if (workspace && workspace[0] &&
+        sandbox_landlock_restrict_to_workspace(workspace) != 0)
+        return SANDBOX_ISO_LL;
     return 0;
 }
 
