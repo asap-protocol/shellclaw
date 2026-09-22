@@ -5,8 +5,10 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Unsandboxed `shell` no longer blocks forever in `waitpid` after the output cap fills; leftover children (including background grandchildren) are SIGKILL'd via the command process group, and truncated capture is NUL-terminated (#69).
 - `write_file` maps to the intended path instead of the first existing ancestor, so a nested path cannot truncate a workspace file treated as a directory or overwrite a same-named file in a parent (#67). Leaf workspace symlinks (dangling or an in-workspace alias) are rejected (`lstat` + `O_NOFOLLOW`) instead of creating host files outside the workspace (#90).
 - `write_file` persists via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe an existing workspace file and a sibling `path.tmp` is not truncated (#78).
+- Skill create/update persist via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe an existing skill file (#77).
 - Camera capture fails closed when `workspace_only` is on with an empty `workspace_path`, and rejects leaf symlink outputs (#91, #90).
 - Cron job `schedule` and `message` are delivered as full SQLite TEXT instead of truncating to 127/511 bytes (#73).
 - Cron jobs are committed (delete/advance) only after successful agent delivery, so a failed `agent_run` cannot drop a reminder (#57).
@@ -23,6 +25,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - `memory_init` no longer deletes an existing SQLite DB when `sqlite3_open` fails (permissions or transient I/O).
 - Anthropic `content` parse fails closed when growing the text buffer or `tool_use` array cannot `realloc`, instead of copying against an inflated cap.
 - HTTP 200 JSON-RPC results with a malformed ASAP envelope no longer double-free the duplicated request id.
+- `POST /asap` honors the 1 MiB dynamic body cap instead of 413'ing envelopes above the 64 KiB static `PUT /api/config` buffer.
 - Inbound ASAP `mcp.tool_call` and `state.query` now hold `agent_lock()` around tool execute and SQLite `g_db` reads, matching `task.request`.
 - Inbound `POST /asap` now wires the process provider and tool table into `asap_ctx`, so `task.request` and `mcp.tool_call` dispatch instead of failing with `server missing cfg or provider`.
 - `POST /asap` rejects serialized JSON-RPC larger than the 64 KiB gateway HTTP buffer (HTTP 500 / JSON-RPC `-32603`) instead of truncating the body.
@@ -39,6 +42,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Gateway `/health` `version` matches `SHELLCLAW_RELEASE_VERSION`.
 
 ### Security
+- Inbound ASAP response builder no longer double-frees the payload cJSON when a required envelope field cannot be allocated (unauthenticated `POST /asap` `state.query` / `task.cancel`).
+- `auth_pair` persists tokens via unique temp (`mkstemp`)+fsync+rename so a failed write cannot wipe `auth_tokens.json` (#71).
+- `auth_pair` fails closed when bearer RNG fails (no uninitialized token, no tokens-file write, pairing code kept) (#92).
 - Gateway shutdown joins the HTTP thread before `auth_cleanup`, so in-flight `/api/*`, `/pair`, and WebSocket upgrades cannot call `auth_validate_token` / `auth_pair` on a freed `auth_ctx`.
 - Gateway listen bind now uses `gateway.host` (`lws` `info.iface`). `host = "127.0.0.1"` is loopback-only. Bind-all forms (`0.0.0.0`, `*`, `::`, `[::]`, empty) require `allow_bind_all`.
 - Camera auto-output keeps the exclusive `mkstemp` inode (no unlink + `${tmpl}.jpg` sibling).

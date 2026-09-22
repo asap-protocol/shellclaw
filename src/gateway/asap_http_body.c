@@ -44,6 +44,15 @@ int asap_http_body_parse_content_length(const char *cl_buf, long *cl_out)
 	return 0;
 }
 
+int asap_http_body_exceeds_static_cap(const asap_http_body_t *body, long content_length)
+{
+	if (!body)
+		return 1;
+	if (body->use_dyn_body)
+		return 0;
+	return content_length > (long)BODY_BUF_SIZE;
+}
+
 int asap_http_body_init_from_request(struct lws *wsi, asap_http_body_t *body)
 {
 	char cl_buf[32] = {0};

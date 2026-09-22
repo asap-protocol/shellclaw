@@ -2,6 +2,9 @@
  * @file auth.c
  * @brief Pairing code generation, bearer token store, and /pair brute-force lockout.
  */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/auth.h"
@@ -10,6 +13,7 @@
 #include "cJSON.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <libgen.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <stdio.h>
@@ -166,6 +170,73 @@ static int ensure_tokens_dir(const char *path)
 	return 0;
 }
 
+static void discard_tokens_tmp(int fd, const char *tmp_path)
+{
+	if (fd >= 0)
+		(void)close(fd);
+	if (tmp_path && tmp_path[0] != '\0')
+		(void)unlink(tmp_path);
+}
+
+static int auth_write_all(int fd, const char *buf, size_t len)
+{
+	size_t off = 0;
+
+	while (off < len) {
+		ssize_t n = write(fd, buf + off, len - off);
+		if (n <= 0)
+			return -1;
+		off += (size_t)n;
+	}
+	return 0;
+}
+
+/*
+ * Unique temp+rename so O_TRUNC cannot wipe auth_tokens.json before the new
+ * JSON is fully on disk (ENOSPC / crash / fdopen failure). mkstemp uses O_EXCL
+ * so a planted path.tmp symlink is not followed (the #90 shape).
+ */
+static int write_tokens_atomic(const char *path, const char *json)
+{
+	char path_copy[PATH_MAX];
+	char tmp_path[PATH_MAX];
+	char *dir;
+	int fd;
+	int n;
+
+	if (!path || !json)
+		return -1;
+	if (snprintf(path_copy, sizeof(path_copy), "%s", path) >= (int)sizeof(path_copy))
+		return -1;
+	dir = dirname(path_copy);
+	if (!dir || dir[0] == '\0')
+		return -1;
+	n = snprintf(tmp_path, sizeof(tmp_path), "%s/.sc-auth-XXXXXX", dir);
+	if (n < 0 || (size_t)n >= sizeof(tmp_path))
+		return -1;
+	fd = mkstemp(tmp_path);
+	if (fd < 0)
+		return -1;
+	(void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+	if (auth_write_all(fd, json, strlen(json)) != 0) {
+		discard_tokens_tmp(fd, tmp_path);
+		return -1;
+	}
+	if (fsync(fd) != 0) {
+		discard_tokens_tmp(fd, tmp_path);
+		return -1;
+	}
+	if (close(fd) != 0) {
+		discard_tokens_tmp(-1, tmp_path);
+		return -1;
+	}
+	if (rename(tmp_path, path) != 0) {
+		discard_tokens_tmp(-1, tmp_path);
+		return -1;
+	}
+	return 0;
+}
+
 int auth_pair(auth_ctx_t *ctx, const char *code, char *token_out, size_t token_size)
 {
 	if (!ctx || !ctx->tokens_path || !code || !token_out || token_size == 0) return -1;
@@ -174,7 +245,9 @@ int auth_pair(auth_ctx_t *ctx, const char *code, char *token_out, size_t token_s
 	    !constant_time_cmp(code, ctx->pending_pairing_code, PAIRING_CODE_LEN))
 		return -1;
 	char new_token[TOKEN_LEN + 1];
-	generate_random_hex(new_token, TOKEN_LEN);
+	/* Fail closed: never persist or return an uninitialized bearer on RNG/OOM. */
+	if (generate_random_hex(new_token, TOKEN_LEN) != 0)
+		return -1;
 	/* Read existing tokens and append (multi-device support). */
 	cJSON *arr = NULL;
 	{
@@ -204,19 +277,10 @@ int auth_pair(auth_ctx_t *ctx, const char *code, char *token_out, size_t token_s
 		free(json);
 		return -1;
 	}
-	int fd = open(ctx->tokens_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-	if (fd < 0) {
+	if (write_tokens_atomic(ctx->tokens_path, json) != 0) {
 		free(json);
 		return -1;
 	}
-	FILE *out = fdopen(fd, "w");
-	if (!out) {
-		close(fd);
-		free(json);
-		return -1;
-	}
-	fprintf(out, "%s", json);
-	fclose(out);
 	free(json);
 	size_t copy_len = (size_t)TOKEN_LEN < token_size - 1 ? (size_t)TOKEN_LEN : token_size - 1;
 	memcpy(token_out, new_token, copy_len);
