@@ -15,6 +15,7 @@
 #include "asap/envelope.h"
 #include "asap/server.h"
 #include "asap/log.h"
+#include "core/agent.h"
 #include "core/bootstrap.h"
 #include "core/config.h"
 #include "core/config_patch.h"
@@ -295,12 +296,23 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 	free(tmp_path);
 	free(patched_body);
 	/* Dashboard/TOML save: swap live cfg now instead of waiting for SIGHUP.
-	 * Call http_set_live_config here: test_reload rebuilds reload.o with
-	 * GATEWAY=0, so try_config_reload may omit the gateway pointer swap. */
+	 * agent_lock matches the SIGHUP path in main_loop so the two threads cannot
+	 * enqueue the same pointer. http_set_live_config stays here because
+	 * test_reload rebuilds reload.o with GATEWAY=0. */
 	{
 		config_t *live_cfg = bootstrap_get_cfg();
-		if (live_cfg)
-			try_config_reload(&live_cfg);
+		int reload_rc;
+		if (!live_cfg) {
+			json_error(buf, size, status, 500, "Config saved but live reload failed");
+			return;
+		}
+		agent_lock();
+		reload_rc = try_config_reload(&live_cfg);
+		agent_unlock();
+		if (reload_rc != 0) {
+			json_error(buf, size, status, 500, "Config saved but live reload failed");
+			return;
+		}
 		http_set_live_config(bootstrap_get_cfg());
 	}
 	*status = 200;

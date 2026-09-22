@@ -189,7 +189,7 @@ shellclaw: $(SHELLCLAW_OBJS)
 $(CONFIG_O): src/core/config.c src/core/config.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
 
-$(MAIN_O): src/core/main.c src/asap/manifest.h src/core/config.h src/core/bootstrap.h src/core/daemon.h src/core/dispatch.h src/core/reload.h src/channels/channel.h src/hardware/board_detect.h src/providers/provider.h
+$(MAIN_O): src/core/main.c src/asap/manifest.h src/core/agent.h src/core/config.h src/core/bootstrap.h src/core/daemon.h src/core/dispatch.h src/core/reload.h src/channels/channel.h src/hardware/board_detect.h src/providers/provider.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/core/main.c
 
 $(DAEMON_O): src/core/daemon.c src/core/daemon.h src/core/config.h

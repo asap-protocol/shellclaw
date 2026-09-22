@@ -157,7 +157,7 @@ static int test_try_config_reload_keeps_old_on_invalid_file(void)
 		fprintf(f, "[memory]\ndb_path = \"/tmp/db\"\n");
 		fclose(f);
 	}
-	try_config_reload(&cfg);
+	ASSERT(try_config_reload(&cfg) != 0);
 	ASSERT(cfg != NULL);
 	ASSERT(strcmp(config_agent_model(cfg), "still-valid") == 0);
 	stale_free_all();

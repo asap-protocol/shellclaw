@@ -20,6 +20,7 @@
 #include "core/bootstrap.h"
 #include "core/config.h"
 #include "core/daemon.h"
+#include "core/agent.h"
 #include "core/dispatch.h"
 #include "core/reload.h"
 #include "core/version.h"
@@ -67,7 +68,9 @@ static void main_loop(int one_shot, config_t **pcfg)
 	while (!g_shutdown) {
 		if (g_reload_requested) {
 			g_reload_requested = 0;
+			agent_lock();
 			try_config_reload(pcfg);
+			agent_unlock();
 		}
 		provider_router_periodic_recovery_tick(time(NULL));
 		channel_incoming_msg_t msg;

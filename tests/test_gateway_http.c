@@ -1144,6 +1144,10 @@ static int test_api_config_put_json(const char *token, int port)
 	ASSERT(strstr(body, "\"patched-model\"") != NULL);
 	ASSERT(strstr(body, "\"max_tokens\":2048") != NULL ||
 	       strstr(body, "\"max_tokens\": 2048") != NULL);
+	ASSERT(strstr(body, "\"temperature\":0.5") != NULL ||
+	       strstr(body, "\"temperature\": 0.5") != NULL);
+	ASSERT(strstr(body, "\"gateway_host\":\"127.0.0.1\"") != NULL ||
+	       strstr(body, "\"gateway_host\": \"127.0.0.1\"") != NULL);
 	free(body);
 	return 0;
 }
