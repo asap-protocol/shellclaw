@@ -53,6 +53,8 @@ memory_limit_mb = 64
 cpu_limit_percent = 50
 network = false
 workspace_only = true
+# Separate from ~/.shellclaw so file/shell tools cannot read pairing tokens or memory.db.
+workspace_path = "~/.shellclaw/workspace"
 
 [heartbeat]
 enabled = true

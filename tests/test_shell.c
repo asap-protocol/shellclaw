@@ -9,8 +9,10 @@
 #include "core/config.h"
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +68,47 @@ static void test_shell_invalid_json(void)
 	int r = t->execute("invalid", buf, sizeof(buf));
 	MU_ASSERT(r == -1, "invalid JSON returns -1");
 	MU_ASSERT(strstr(buf, "error") != NULL, "error in output");
+}
+
+static void test_shell_blocked_auth_tokens(void)
+{
+	const tool_t *t = tool_shell_get();
+	char buf[512];
+	char home[64];
+	char state[128];
+	char cfg_path[160];
+	char cmd[256];
+	char *old_home;
+	FILE *f;
+	buf[0] = '\0';
+	tool_shell_set_config(NULL);
+	(void)t->execute("{\"command\":\"cat ~/.shellclaw/auth_tokens.json\"}", buf, sizeof(buf));
+	MU_ASSERT(strstr(buf, "blocked") != NULL, "cat auth_tokens.json blocked");
+
+	snprintf(home, sizeof(home), "/tmp/sc_shell_home_%d", (int)getpid());
+	snprintf(state, sizeof(state), "%s/.shellclaw", home);
+	snprintf(cfg_path, sizeof(cfg_path), "%s/config.toml", state);
+	MU_ASSERT(mkdir(home, 0755) == 0 || errno == EEXIST, "mkdir shell home");
+	MU_ASSERT(mkdir(state, 0755) == 0 || errno == EEXIST, "mkdir shell state");
+	f = fopen(cfg_path, "w");
+	MU_ASSERT(f != NULL, "write state config.toml");
+	fputs("secret-config\n", f);
+	fclose(f);
+	old_home = getenv("HOME");
+	setenv("HOME", home, 1);
+	snprintf(cmd, sizeof(cmd),
+		 "{\"command\":\"cat %s/.shellclaw/config.toml\"}", home);
+	buf[0] = '\0';
+	(void)t->execute(cmd, buf, sizeof(buf));
+	MU_ASSERT(strstr(buf, "blocked") != NULL, "unsandboxed cat state config.toml blocked");
+	MU_ASSERT(strstr(buf, "secret-config") == NULL, "state config.toml not returned");
+	if (old_home)
+		setenv("HOME", old_home, 1);
+	else
+		unsetenv("HOME");
+	unlink(cfg_path);
+	rmdir(state);
+	rmdir(home);
 }
 
 static void test_shell_missing_command(void)
@@ -269,6 +312,7 @@ int main(void)
 {
 	MU_RUN(test_shell_blocked_rm_rf);
 	MU_RUN(test_shell_blocked_mkfs);
+	MU_RUN(test_shell_blocked_auth_tokens);
 	MU_RUN(test_shell_ls_succeeds);
 	MU_RUN(test_shell_invalid_json);
 	MU_RUN(test_shell_missing_command);

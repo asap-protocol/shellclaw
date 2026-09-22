@@ -929,7 +929,9 @@ int config_load(const char *path, config_t **out, char *errbuf, size_t errbufsz)
 	cfg->workspace_only = 1;
 	cfg->gateway_port = DEFAULT_GATEWAY_PORT;
 	set_string(&cfg->gateway_host, "127.0.0.1");
-	set_string(&cfg->workspace_path, "~/.shellclaw");
+	/* Keep tool workspace off the state dir (~/.shellclaw) so pairing tokens,
+	 * memory.db, and config.toml are outside workspace_only by default. */
+	set_string(&cfg->workspace_path, "~/.shellclaw/workspace");
 	set_string(&cfg->asap_agent_urn, "urn:asap:agent:shellclaw");
 	set_string(&cfg->asap_agent_name, "ShellClaw");
 	set_string(&cfg->asap_description, DEFAULT_ASAP_DESCRIPTION);

@@ -597,9 +597,9 @@ test_shell: tests/test_shell.c $(SHELL_O) $(SANDBOX_O) $(ALLOWLIST_O) $(CONFIG_O
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_shell.c $(SHELL_O) $(SANDBOX_O) $(ALLOWLIST_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(LDLIBS)
 	$(DSYM_SCRIPT)
 
-test_file: tests/test_file.c $(FILE_O) $(REGISTRY_O) $(CONFIG_O) $(TOML_O) $(CJSON_O)
+test_file: tests/test_file.c $(FILE_O) $(REGISTRY_O) $(ALLOWLIST_O) $(CONFIG_O) $(TOML_O) $(CJSON_O)
 	@mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_file.c $(FILE_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_file.c $(FILE_O) $(ALLOWLIST_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(LDLIBS)
 	$(DSYM_SCRIPT)
 
 $(CHANNEL_TG_TEST_O): src/channels/telegram.c src/channels/channel.h src/core/config.h

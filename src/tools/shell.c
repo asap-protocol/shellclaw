@@ -43,6 +43,7 @@ static const char *const FALLBACK_BLOCKLIST[] = {
 	"rm -rf /", "rm -rf / ", "rm -rf /$", "rm -rf /*",
 	"mkfs", "dd if=", "dd of=", "shutdown", "reboot",
 	":(){ :|:& };:", "fork()", "> /dev/sd",
+	"auth_tokens.json", "shellclaw.pid", "shellclaw.log",
 	NULL
 };
 
@@ -232,13 +233,20 @@ static int shell_execute(const char *args_json, char *result_buf, size_t max_len
 		free(command);
 		return rc;
 	}
-	/* Fallback path: best-effort blocklist + plain fork */
+	/* Fallback path: same runtime-state predicate as the allowlist, then
+	 * the substring blocklist. workspace_only stays off so a bare filename
+	 * in the process cwd is not treated as ~/.shellclaw. */
 	fprintf(stderr,
 	        "shell: sandbox disabled — running command with reduced isolation\n");
-	if (fallback_is_blocked(command)) {
-		free(command);
-		snprintf(result_buf, max_len, "{\"error\":\"command blocked for safety\"}");
-		return -1;
+	{
+		char reason[256];
+		reason[0] = '\0';
+		if (allowlist_check_shell_command(command, NULL, reason, sizeof(reason)) ||
+		    fallback_is_blocked(command)) {
+			free(command);
+			snprintf(result_buf, max_len, "{\"error\":\"command blocked for safety\"}");
+			return -1;
+		}
 	}
 	{
 		int rc = run_unsandboxed(command, timeout_sec, result_buf, max_len);

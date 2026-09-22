@@ -16,8 +16,12 @@
 #include "gateway/ws.h"
 #include "asap/manifest_keys.h"
 #endif
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
 
 #define SKILLS_BUF_SIZE (256 * 1024)
 #define SYSTEM_PROMPT_BUF_SIZE (256 * 1024)
@@ -233,8 +237,54 @@ static void channels_cleanup(void)
 	g_cfg = NULL;
 }
 
+static int workspace_is_real_dir(const char *workspace)
+{
+	struct stat st;
+
+	if (lstat(workspace, &st) != 0) {
+		fprintf(stderr, "shellclaw: workspace %s: %s\n", workspace, strerror(errno));
+		return 0;
+	}
+	if (S_ISLNK(st.st_mode)) {
+		fprintf(stderr, "shellclaw: workspace %s is a symlink\n", workspace);
+		return 0;
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "shellclaw: workspace %s is not a directory\n", workspace);
+		return 0;
+	}
+	return 1;
+}
+
+static int ensure_workspace_directory(const char *workspace)
+{
+	const char *slash;
+
+	if (!workspace || !workspace[0]) return 0;
+	slash = strrchr(workspace, '/');
+	if (slash && slash != workspace) {
+		char parent[PATH_MAX];
+		size_t parent_len = (size_t)(slash - workspace);
+		if (parent_len < sizeof(parent)) {
+			memcpy(parent, workspace, parent_len);
+			parent[parent_len] = '\0';
+			if (mkdir(parent, 0700) != 0 && errno != EEXIST)
+				fprintf(stderr, "shellclaw: mkdir %s: %s\n",
+				        parent, strerror(errno));
+		}
+	}
+	if (mkdir(workspace, 0700) != 0 && errno != EEXIST)
+		fprintf(stderr, "shellclaw: mkdir workspace %s: %s\n",
+		        workspace, strerror(errno));
+	if (!workspace_is_real_dir(workspace))
+		return -1;
+	return 0;
+}
+
 int tools_init(const config_t *cfg)
 {
+	if (ensure_workspace_directory(config_workspace_path(cfg)) != 0)
+		return -1;
 	tool_set_config(cfg);
 	g_tool_count = tool_get_all(g_tools, SHELLCLAW_MAX_TOOLS);
 	return 0;

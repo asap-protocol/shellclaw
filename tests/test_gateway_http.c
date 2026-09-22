@@ -730,7 +730,10 @@ static int write_asap_oversize_file(char *path, size_t path_sz)
 	FILE *f;
 	char *block;
 	size_t nw;
-	snprintf(path, path_sz, "%s/.shellclaw/asap_oversize.txt", g_test_home);
+	snprintf(path, path_sz, "%s/.shellclaw/workspace", g_test_home);
+	if (mkdir(path, 0755) != 0 && errno != EEXIST)
+		return -1;
+	snprintf(path, path_sz, "%s/.shellclaw/workspace/asap_oversize.txt", g_test_home);
 	block = malloc(ASAP_OVERSIZE_FILE_BYTES);
 	if (!block)
 		return -1;

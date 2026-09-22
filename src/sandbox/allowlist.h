@@ -66,6 +66,20 @@ int allowlist_check_shell_command(const char *cmd, const allowlist_config_t *cfg
  */
 int allowlist_path_is_under_workspace(const char *path, const char *workspace_root);
 
+/**
+ * Return 1 if @p path is a ShellClaw runtime state file that tools must not touch.
+ *
+ * Always reserved by basename: auth_tokens.json, shellclaw.pid, shellclaw.log.
+ * Also reserved when the parent directory is named `.shellclaw`: config.toml,
+ * memory.db, and memory.db-* sidecars (WAL, shm, journal).
+ *
+ * @param path Absolute, relative, or unresolved path (realpath used when the file exists).
+ * @return     1 if reserved, 0 otherwise.
+ *
+ * Example: allowlist_path_is_runtime_state_file("/home/me/.shellclaw/auth_tokens.json") == 1
+ */
+int allowlist_path_is_runtime_state_file(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

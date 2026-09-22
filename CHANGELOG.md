@@ -5,6 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Default `workspace_path` is `~/.shellclaw/workspace`, and file/shell tools still refuse `auth_tokens.json`, `shellclaw.pid`, `shellclaw.log`, and `.shellclaw` `config.toml` / `memory.db` (including `memory.db-*` sidecars) when a custom workspace contains them. A bare `cat config.toml` after the sandbox `chdir` is blocked, and a symlink at the workspace path is not accepted.
 - Dashboard `PUT /api/config` merges JSON fields into `config.toml` and reloads live settings. Indented keys and `[section] # comment` headers are updated in place; a present field with the wrong JSON type returns 400; a saved file whose live reload fails returns 500. Gateway host and port still need a process restart to rebind.
 - Unsandboxed `shell` no longer blocks forever in `waitpid` after the output cap fills; leftover children (including background grandchildren) are SIGKILL'd via the command process group, and truncated capture is NUL-terminated (#69).
 - `write_file` maps to the intended path instead of the first existing ancestor, so a nested path cannot truncate a workspace file treated as a directory or overwrite a same-named file in a parent (#67). Leaf workspace symlinks (dangling or an in-workspace alias) are rejected (`lstat` + `O_NOFOLLOW`) instead of creating host files outside the workspace (#90).
