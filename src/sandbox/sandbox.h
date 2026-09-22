@@ -1,10 +1,16 @@
 /**
  * @file sandbox.h
- * @brief Process sandbox API: isolated execution with namespaces, timeout, and cgroups v2.
+ * @brief Process sandbox API: namespaces, Landlock FS bound, timeout, cgroups v2.
  *
- * On Linux, sandbox_exec uses clone(2) with PID/mount/network namespace isolation,
- * optional cgroups v2 resource limits, and a hard timeout with SIGKILL.
- * On other platforms (macOS, BSDs) it falls back to a plain fork+exec and logs a warning.
+ * On Linux, sandbox_exec forks an isolator, unshares PID/mount/network
+ * namespaces (entering a user namespace when unprivileged), then forks again
+ * so the command is PID 1. Isolation failure is fail-closed via a control
+ * pipe (not sh exit 122/123). When a workspace path is set, a Landlock
+ * ruleset is the kernel filesystem bound. Optional cgroups v2 resource
+ * limits and a hard timeout with SIGKILL (the command child sets
+ * PR_SET_PDEATHSIG so the PID-1 process cannot outlive the isolator).
+ * On other platforms (macOS, BSDs) it falls back to a plain fork+exec
+ * and logs a warning.
  */
 #ifndef SHELLCLAW_SANDBOX_H
 #define SHELLCLAW_SANDBOX_H
@@ -42,9 +48,15 @@ typedef struct sandbox_config {
 /**
  * Execute @p cmd inside an isolated child process and capture output.
  *
- * On Linux, clones with CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET.
- * Applies cgroups v2 limits when available; degrades gracefully if not.
- * Kills the child with SIGKILL if @p timeout_ms elapses before exit.
+ * On Linux, enters a user namespace when needed, then unshares
+ * CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET and forks so the command is
+ * PID 1. If those namespaces cannot be applied, returns -1 (fail-closed).
+ * When @p cfg->workspace_path is set, applies a Landlock ruleset that denies
+ * host filesystem reads/writes outside the workspace (blocking symlink and
+ * interpreter path escapes such as `chr(47)+`); Landlock setup failure also
+ * returns -1. Applies cgroups v2 limits when available. On timeout the
+ * parent SIGKILLs the isolator; the command is PID 1 and dies via
+ * PR_SET_PDEATHSIG and process-group kill.
  *
  * On non-Linux platforms the function executes the command via fork()+exec()
  * without namespace isolation and emits a warning to stderr.
@@ -55,7 +67,9 @@ typedef struct sandbox_config {
  * @param timeout_ms Maximum wall-clock milliseconds before SIGKILL. 0 = default (10 000 ms).
  * @param cfg        Optional sandbox configuration. NULL = use built-in defaults.
  * @return           0 on success (command ran; check output for exit status text),
- *                   -1 on system error (pipe/fork/clone failure).
+ *                   -1 on system error (pipe/fork/clone/isolation failure).
+ *
+ * Example: sandbox_exec("echo hi", out, sizeof out, 5000, &cfg);
  */
 int sandbox_exec(const char *cmd, char *out, size_t out_cap,
                  int timeout_ms, const sandbox_config_t *cfg);
