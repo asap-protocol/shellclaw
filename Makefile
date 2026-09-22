@@ -126,7 +126,9 @@ ASAP_INVOKE_O  := src/tools/asap_invoke.o
 ASAP_INVOKE_TEST_O := $(BINDIR)/asap_invoke_test.o
 # Sandbox (Phase 3 §5)
 SANDBOX_O  := src/sandbox/sandbox.o
-ALLOWLIST_O := src/sandbox/allowlist.o
+ALLOWLIST_SCAN_O := src/sandbox/allowlist.o
+ALLOWLIST_PATH_O := src/sandbox/allowlist_path.o
+ALLOWLIST_O := $(ALLOWLIST_SCAN_O) $(ALLOWLIST_PATH_O)
 MANIFEST_O := src/asap/manifest.o
 MANIFEST_PROFILES_O := src/asap/manifest_profiles.o
 MANIFEST_BUILD_O := src/asap/manifest_build.o
@@ -384,8 +386,11 @@ $(SHELL_O): src/tools/shell.c src/tools/tool.h src/tools/shell.h src/core/config
 $(SANDBOX_O): src/sandbox/sandbox.c src/sandbox/sandbox.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/sandbox/sandbox.c
 
-$(ALLOWLIST_O): src/sandbox/allowlist.c src/sandbox/allowlist.h
+$(ALLOWLIST_SCAN_O): src/sandbox/allowlist.c src/sandbox/allowlist.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/sandbox/allowlist.c
+
+$(ALLOWLIST_PATH_O): src/sandbox/allowlist_path.c src/sandbox/allowlist.h
+	$(CC) $(CFLAGS) $(INC) -c -o $@ src/sandbox/allowlist_path.c
 
 $(WEBSEARCH_O): src/tools/web_search.c src/tools/tool.h src/tools/web_search.h src/core/config.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/tools/web_search.c
