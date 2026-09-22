@@ -124,7 +124,16 @@ static int escape_toml_string(const char *in, char **out)
 	(*out)[0] = '"';
 	len = 1;
 	for (i = 0; in[i]; i++) {
-		if (in[i] == '"' || in[i] == '\\') {
+		char extra = 0;
+		if (in[i] == '"' || in[i] == '\\')
+			extra = in[i];
+		else if (in[i] == '\n')
+			extra = 'n';
+		else if (in[i] == '\r')
+			extra = 'r';
+		else if (in[i] == '\t')
+			extra = 't';
+		if (extra != 0) {
 			if (len + 2 >= cap) {
 				char *grown;
 				cap *= 2;
@@ -137,6 +146,8 @@ static int escape_toml_string(const char *in, char **out)
 				*out = grown;
 			}
 			(*out)[len++] = '\\';
+			(*out)[len++] = extra;
+			continue;
 		}
 		if (len + 1 >= cap) {
 			char *grown;
@@ -156,6 +167,17 @@ static int escape_toml_string(const char *in, char **out)
 	return 0;
 }
 
+static int section_header_closed(const char *after)
+{
+	if (!after)
+		return 0;
+	while (*after == ' ' || *after == '\t')
+		after++;
+	if (*after == '#' || *after == '\0' || *after == '\r' || *after == '\n')
+		return 1;
+	return 0;
+}
+
 static const char *find_section(const char *content, const char *section)
 {
 	char marker[128];
@@ -170,7 +192,7 @@ static const char *find_section(const char *content, const char *section)
 			continue;
 		if (p != content && p[-1] != '\n')
 			continue;
-		if (p[marker_len] != '\0' && p[marker_len] != '\r' && p[marker_len] != '\n')
+		if (!section_header_closed(p + marker_len))
 			continue;
 		return p;
 	}
@@ -202,24 +224,29 @@ static const char *find_key_line(const char *sec_start, const char *sec_end,
 	key_len = strlen(key);
 	for (p = sec_start; p < sec_end; p++) {
 		const char *line_end = strchr(p, '\n');
-		size_t span;
 		if (!line_end || line_end > sec_end)
 			line_end = sec_end;
-		span = (size_t)(line_end - p);
-		while (span > 0 && isspace((unsigned char)p[span - 1]))
-			span--;
+		{
+			const char *key_at = p;
+			size_t span;
+			while (key_at < line_end && (*key_at == ' ' || *key_at == '\t'))
+				key_at++;
+			span = (size_t)(line_end - key_at);
+			while (span > 0 && isspace((unsigned char)key_at[span - 1]))
+				span--;
 		if (span > key_len) {
-			const char *after_key = p + key_len;
+			const char *after_key = key_at + key_len;
 			while (after_key < line_end &&
 			       (*after_key == ' ' || *after_key == '\t'))
 				after_key++;
-			if (strncmp(p, key, key_len) == 0 && after_key < line_end &&
+			if (strncmp(key_at, key, key_len) == 0 && after_key < line_end &&
 			    *after_key == '=') {
 				*line_len = (size_t)(line_end - p);
 				if (*line_end == '\n')
 					(*line_len)++;
 				return p;
 			}
+		}
 		}
 		if (!*line_end)
 			break;
@@ -309,28 +336,50 @@ static int patch_double_field(char **content, size_t *len, size_t *cap, const ch
 	return patch_key_line(content, len, cap, section, key, buf);
 }
 
-static int apply_dashboard_fields(cJSON *root, char **content, size_t *len, size_t *cap)
+static int reject_wrong_type(const cJSON *item, int expect_string, const char *field,
+                             char *errbuf, size_t errbufsz)
+{
+	int ok;
+	if (!item)
+		return 0;
+	ok = expect_string ? cJSON_IsString(item) : cJSON_IsNumber(item);
+	if (ok)
+		return 0;
+	if (errbuf && errbufsz > 0)
+		snprintf(errbuf, errbufsz, "field \"%s\" must be a JSON %s", field,
+		         expect_string ? "string" : "number");
+	return -1;
+}
+
+static int apply_dashboard_fields(cJSON *root, char **content, size_t *len, size_t *cap,
+                                  char *errbuf, size_t errbufsz)
 {
 	cJSON *model = cJSON_GetObjectItem(root, "model");
 	cJSON *max_tokens = cJSON_GetObjectItem(root, "max_tokens");
 	cJSON *temperature = cJSON_GetObjectItem(root, "temperature");
 	cJSON *gateway_host = cJSON_GetObjectItem(root, "gateway_host");
 	cJSON *gateway_port = cJSON_GetObjectItem(root, "gateway_port");
-	if (model && cJSON_IsString(model) &&
+	if (reject_wrong_type(model, 1, "model", errbuf, errbufsz) != 0 ||
+	    reject_wrong_type(max_tokens, 0, "max_tokens", errbuf, errbufsz) != 0 ||
+	    reject_wrong_type(temperature, 0, "temperature", errbuf, errbufsz) != 0 ||
+	    reject_wrong_type(gateway_host, 1, "gateway_host", errbuf, errbufsz) != 0 ||
+	    reject_wrong_type(gateway_port, 0, "gateway_port", errbuf, errbufsz) != 0)
+		return -1;
+	if (model &&
 	    patch_string_field(content, len, cap, "agent", "model", model->valuestring) != 0)
 		return -1;
-	if (max_tokens && cJSON_IsNumber(max_tokens) &&
+	if (max_tokens &&
 	    patch_int_field(content, len, cap, "agent", "max_tokens", max_tokens->valueint) != 0)
 		return -1;
-	if (temperature && cJSON_IsNumber(temperature) &&
+	if (temperature &&
 	    patch_double_field(content, len, cap, "agent", "temperature",
 	                       temperature->valuedouble) != 0)
 		return -1;
-	if (gateway_host && cJSON_IsString(gateway_host) &&
+	if (gateway_host &&
 	    patch_string_field(content, len, cap, "gateway", "host",
 	                       gateway_host->valuestring) != 0)
 		return -1;
-	if (gateway_port && cJSON_IsNumber(gateway_port) &&
+	if (gateway_port &&
 	    patch_int_field(content, len, cap, "gateway", "port", gateway_port->valueint) != 0)
 		return -1;
 	return 0;
@@ -400,8 +449,9 @@ int config_patch_dashboard_json(const char *config_path, const char *json_body, 
 		return -1;
 	}
 	cap = len + 1;
-	if (apply_dashboard_fields(root, &content, &len, &cap) != 0) {
-		PATCH_ERR(errbuf, errbufsz, "failed to patch config fields");
+	if (apply_dashboard_fields(root, &content, &len, &cap, errbuf, errbufsz) != 0) {
+		if (!errbuf || errbufsz == 0 || errbuf[0] == '\0')
+			PATCH_ERR(errbuf, errbufsz, "failed to patch config fields");
 		free(content);
 		cJSON_Delete(root);
 		return -1;
