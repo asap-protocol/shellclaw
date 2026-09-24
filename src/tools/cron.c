@@ -178,37 +178,143 @@ static int cron_init(const config_t *cfg)
 	return 0;
 }
 
-static char s_offered_id[128];
-static struct timespec s_offered_mono;
+#define CRON_OFFER_TRACK 16
+#define CRON_DUE_SCAN_MAX 64
 
-static void cron_wait_if_reoffer(const char *job_id, int timeout_ms)
+typedef struct cron_offer_slot {
+	char id[128];
+	struct timespec mono;
+	int timeout_ms;
+} cron_offer_slot_t;
+
+static cron_offer_slot_t s_offers[CRON_OFFER_TRACK];
+
+static long cron_elapsed_ms(const struct timespec *then, const struct timespec *now)
+{
+	return (now->tv_sec - then->tv_sec) * 1000L
+		+ (now->tv_nsec - then->tv_nsec) / 1000000L;
+}
+
+static int cron_offer_age_ms(const char *job_id, const struct timespec *now, long *age_out)
+{
+	int i;
+	for (i = 0; i < CRON_OFFER_TRACK; i++) {
+		if (s_offers[i].id[0] == '\0' || strcmp(s_offers[i].id, job_id) != 0)
+			continue;
+		*age_out = cron_elapsed_ms(&s_offers[i].mono, now);
+		return 1;
+	}
+	return 0;
+}
+
+static int cron_slot_reusable(const cron_offer_slot_t *slot, const struct timespec *now)
+{
+	long age;
+	if (slot->id[0] == '\0')
+		return 1;
+	if (slot->timeout_ms <= 0)
+		return 0;
+	age = cron_elapsed_ms(&slot->mono, now);
+	return age >= (long)slot->timeout_ms;
+}
+
+static int cron_offer_has_room(const struct timespec *now)
+{
+	int i;
+	for (i = 0; i < CRON_OFFER_TRACK; i++) {
+		if (cron_slot_reusable(&s_offers[i], now))
+			return 1;
+	}
+	return 0;
+}
+
+static int cron_offer_is_hot(const char *job_id, int timeout_ms, const struct timespec *now)
+{
+	long age = 0;
+	if (timeout_ms <= 0 || !job_id)
+		return 0;
+	if (!cron_offer_age_ms(job_id, now, &age))
+		return 0;
+	return age < (long)timeout_ms;
+}
+
+/** A missing id is deliverable only when a cold slot can remember the offer. */
+static int cron_due_is_returnable(const char *job_id, int timeout_ms, const struct timespec *now)
+{
+	long age = 0;
+	if (cron_offer_is_hot(job_id, timeout_ms, now))
+		return 0;
+	if (!cron_offer_age_ms(job_id, now, &age) && !cron_offer_has_room(now))
+		return 0;
+	return 1;
+}
+
+static void cron_wait_remaining(const char *job_id, int timeout_ms)
 {
 	struct timespec now;
 	struct timespec remain;
-	long elapsed_ms;
+	long age = 0;
 	long wait_ms;
-	if (timeout_ms <= 0 || !job_id || job_id[0] == '\0')
-		return;
-	if (s_offered_id[0] == '\0' || strcmp(s_offered_id, job_id) != 0)
+	if (timeout_ms <= 0 || !job_id)
 		return;
 	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
 		return;
-	elapsed_ms = (now.tv_sec - s_offered_mono.tv_sec) * 1000L
-		+ (now.tv_nsec - s_offered_mono.tv_nsec) / 1000000L;
-	if (elapsed_ms >= timeout_ms)
+	if (!cron_offer_age_ms(job_id, &now, &age) || age >= (long)timeout_ms)
 		return;
-	wait_ms = timeout_ms - elapsed_ms;
+	wait_ms = (long)timeout_ms - age;
 	remain.tv_sec = wait_ms / 1000;
 	remain.tv_nsec = (wait_ms % 1000) * 1000000L;
 	nanosleep(&remain, NULL);
 }
 
-static void cron_mark_offered(const char *job_id)
+static void cron_mark_offered(const char *job_id, int timeout_ms)
 {
-	if (!job_id)
+	struct timespec now;
+	int i;
+	int slot = -1;
+	if (!job_id || job_id[0] == '\0')
 		return;
-	snprintf(s_offered_id, sizeof(s_offered_id), "%s", job_id);
-	clock_gettime(CLOCK_MONOTONIC, &s_offered_mono);
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return;
+	for (i = 0; i < CRON_OFFER_TRACK; i++) {
+		if (strcmp(s_offers[i].id, job_id) == 0) {
+			s_offers[i].mono = now;
+			s_offers[i].timeout_ms = timeout_ms;
+			return;
+		}
+		if (slot < 0 && cron_slot_reusable(&s_offers[i], &now))
+			slot = i;
+	}
+	if (slot < 0)
+		return;
+	snprintf(s_offers[slot].id, sizeof(s_offers[slot].id), "%s", job_id);
+	s_offers[slot].mono = now;
+	s_offers[slot].timeout_ms = timeout_ms;
+}
+
+/** Prefer a due job outside its re-offer window so one stuck job cannot hide the rest. */
+static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
+{
+	cron_due_key_t keys[CRON_DUE_SCAN_MAX];
+	struct timespec mono;
+	int n;
+	int i;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &mono) != 0)
+		memset(&mono, 0, sizeof(mono));
+	n = cron_job_list_due(now, keys, CRON_DUE_SCAN_MAX);
+	if (n <= 0)
+		return 0;
+	for (i = 0; i < n; i++) {
+		if (!cron_due_is_returnable(keys[i].id, timeout_ms, &mono))
+			continue;
+		if (cron_job_get_by_id(keys[i].id, row) == 1)
+			return 1;
+	}
+	if (cron_job_get_by_id(keys[0].id, row) != 1)
+		return 0;
+	cron_wait_remaining(row->id, timeout_ms);
+	return 1;
 }
 
 static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
@@ -219,8 +325,8 @@ static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 	if (!out) return -1;
 	now = (long long)time(NULL);
 	memset(&row, 0, sizeof(row));
-	if (cron_job_get_next_due(now, &row) != 1) return 0;
-	cron_wait_if_reoffer(row.id, timeout_ms);
+	if (!cron_pick_due_row(now, timeout_ms, &row))
+		return 0;
 	memset(out, 0, sizeof(*out));
 	snprintf(session_id, sizeof(session_id), "%s:%s",
 		row.channel[0] ? row.channel : "cli",
@@ -230,7 +336,7 @@ static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 	out->text = strdup(row.message ? row.message : "");
 	out->attachments = NULL;
 	out->attachments_count = 0;
-	cron_mark_offered(row.id);
+	cron_mark_offered(row.id, timeout_ms);
 	cron_job_row_free(&row);
 	if (!out->session_id || !out->user_id || !out->text) {
 		channel_incoming_msg_clear(out);
@@ -280,6 +386,7 @@ static int cron_send(const char *recipient, const char *text,
 
 static void cron_cleanup(void)
 {
+	memset(s_offers, 0, sizeof(s_offers));
 }
 
 static const channel_t cron_channel = {
