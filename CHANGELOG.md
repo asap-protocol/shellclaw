@@ -5,6 +5,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
+- Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
+- Dashboard config save and JSON patch validation use a unique temp plus `fsync`, and the live gateway config pointer is published once under `agent_lock`.
 - Shell `workspace_only` walks the first existing ancestor, collapses `..` lexically (without cancelling across a symlink), and scans quoted/embedded paths, `file:` URLs, `$HOME`/`$PWD` (including glued `$IFS`), and bare relative names such as `cat leak`. `strdup` OOM is fail-closed. Encoded-slash cat-and-mouse is frozen; Landlock is the kernel host-FS bound.
 - Shell `sandbox_exec` applies a Landlock ruleset to the configured workspace (fail-closed) as the kernel host-FS bound, so symlink and `chr(47)+` host reads cannot skip the string scanner. Mount/network/PID namespaces fail closed (user namespace first when unprivileged). After `CLONE_NEWPID` the isolator forks so the command is PID 1. Isolation failure uses a control pipe, not `sh` exit 122/123. `/dev/null` stays writable under Landlock.
 - Default `workspace_path` is `~/.shellclaw/workspace`, and file/shell tools still refuse `auth_tokens.json`, `shellclaw.pid`, `shellclaw.log`, and `.shellclaw` `config.toml` / `memory.db` (including `memory.db-*` sidecars) when a custom workspace contains them. A bare `cat config.toml` after the sandbox `chdir` is blocked, and a symlink at the workspace path is not accepted.

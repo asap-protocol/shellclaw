@@ -8,6 +8,9 @@
 #include "core/config.h"
 #include "cJSON.h"
 #include <ctype.h>
+#include <fcntl.h>
+#include <libgen.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -385,42 +388,65 @@ static int apply_dashboard_fields(cJSON *root, char **content, size_t *len, size
 	return 0;
 }
 
+static int write_all_fd(int fd, const char *buf, size_t len)
+{
+	size_t off = 0;
+	while (off < len) {
+		ssize_t n = write(fd, buf + off, len - off);
+		if (n <= 0)
+			return -1;
+		off += (size_t)n;
+	}
+	return 0;
+}
+
 static int validate_patched_toml(const char *config_path, const char *content, size_t len,
                                  char *errbuf, size_t errbufsz)
 {
-	size_t path_len;
-	char *tmp_path;
-	FILE *f;
+	char path_copy[PATH_MAX];
+	char tmp_path[PATH_MAX];
+	char *dir;
 	config_t *cfg = NULL;
-	path_len = strlen(config_path);
-	tmp_path = malloc(path_len + 16);
-	if (!tmp_path) {
-		PATCH_ERR(errbuf, errbufsz, "out of memory");
-		return -1;
-	}
-	snprintf(tmp_path, path_len + 16, "%s.patch-test", config_path);
-	f = fopen(tmp_path, "w");
-	if (!f) {
+	int fd;
+	int n;
+
+	if (snprintf(path_copy, sizeof(path_copy), "%s", config_path) >= (int)sizeof(path_copy)) {
 		PATCH_ERR(errbuf, errbufsz, "failed to validate patched config");
-		free(tmp_path);
 		return -1;
 	}
-	if (fwrite(content, 1, len, f) != len) {
-		fclose(f);
+	dir = dirname(path_copy);
+	if (!dir || dir[0] == '\0') {
+		PATCH_ERR(errbuf, errbufsz, "failed to validate patched config");
+		return -1;
+	}
+	n = snprintf(tmp_path, sizeof(tmp_path), "%s/.sc-patch-XXXXXX", dir);
+	if (n < 0 || (size_t)n >= sizeof(tmp_path)) {
+		PATCH_ERR(errbuf, errbufsz, "failed to validate patched config");
+		return -1;
+	}
+	fd = mkstemp(tmp_path);
+	if (fd < 0) {
+		PATCH_ERR(errbuf, errbufsz, "failed to validate patched config");
+		return -1;
+	}
+	(void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+	if (write_all_fd(fd, content, len) != 0 || fsync(fd) != 0) {
+		close(fd);
 		unlink(tmp_path);
-		free(tmp_path);
 		PATCH_ERR(errbuf, errbufsz, "failed to validate patched config");
 		return -1;
 	}
-	fclose(f);
+	if (close(fd) != 0) {
+		unlink(tmp_path);
+		PATCH_ERR(errbuf, errbufsz, "failed to validate patched config");
+		return -1;
+	}
 	if (config_load(tmp_path, &cfg, errbuf, errbufsz) != 0) {
 		unlink(tmp_path);
-		free(tmp_path);
 		return -1;
 	}
 	config_free(cfg);
 	unlink(tmp_path);
-	free(tmp_path);
 	return 0;
 }
 

@@ -27,6 +27,10 @@
 #include "tools/cron.h"
 #include "cJSON.h"
 #include <libwebsockets.h>
+#include <fcntl.h>
+#include <libgen.h>
+#include <limits.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -226,6 +230,60 @@ static int config_put_patch_json(http_server_ctx_t *ctx, const char *body, size_
 	return 0;
 }
 
+static int write_all_fd(int fd, const char *buf, size_t len)
+{
+	size_t off = 0;
+	while (off < len) {
+		ssize_t n = write(fd, buf + off, len - off);
+		if (n <= 0)
+			return -1;
+		off += (size_t)n;
+	}
+	return 0;
+}
+
+static void discard_cfg_tmp(int fd, const char *path)
+{
+	if (fd >= 0)
+		close(fd);
+	if (path)
+		unlink(path);
+}
+
+/* Unique temp so a planted config.toml.tmp symlink is not the sidecar. Caller renames. */
+static int write_config_temp(const char *path, const char *content, size_t len,
+                             char *tmp_out, size_t tmp_cap)
+{
+	char path_copy[PATH_MAX];
+	char *dir;
+	int fd;
+	int n;
+
+	if (!path || !content || !tmp_out || tmp_cap == 0)
+		return -1;
+	if (snprintf(path_copy, sizeof(path_copy), "%s", path) >= (int)sizeof(path_copy))
+		return -1;
+	dir = dirname(path_copy);
+	if (!dir || dir[0] == '\0')
+		return -1;
+	n = snprintf(tmp_out, tmp_cap, "%s/.sc-cfg-XXXXXX", dir);
+	if (n < 0 || (size_t)n >= tmp_cap)
+		return -1;
+	fd = mkstemp(tmp_out);
+	if (fd < 0)
+		return -1;
+	(void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+	if (fchmod(fd, 0600) != 0 || write_all_fd(fd, content, len) != 0 || fsync(fd) != 0) {
+		discard_cfg_tmp(fd, tmp_out);
+		return -1;
+	}
+	if (close(fd) != 0) {
+		discard_cfg_tmp(-1, tmp_out);
+		return -1;
+	}
+	return 0;
+}
+
 static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t body_len,
                               char *buf, size_t size, int *status)
 {
@@ -234,10 +292,7 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 	char errbuf[256] = {0};
 	const char *write_body = body;
 	size_t write_len = body_len;
-	size_t path_len;
-	char *tmp_path;
-	FILE *f;
-	size_t written;
+	char tmp_path[PATH_MAX];
 	config_t *cfg = NULL;
 	if (!ctx->config_path || !body || body_len == 0) {
 		json_error(buf, size, status, 400, "Bad request");
@@ -254,33 +309,13 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 		write_body = patched_body;
 		write_len = patched_len;
 	}
-	path_len = strlen(ctx->config_path);
-	tmp_path = malloc(path_len + 8);
-	if (!tmp_path) {
-		free(patched_body);
-		json_error(buf, size, status, 500, "Out of memory");
-		return;
-	}
-	snprintf(tmp_path, path_len + 8, "%s.tmp", ctx->config_path);
-	f = fopen(tmp_path, "w");
-	if (!f) {
-		free(tmp_path);
-		free(patched_body);
-		json_error(buf, size, status, 500, "Failed to write config");
-		return;
-	}
-	written = fwrite(write_body, 1, write_len, f);
-	fclose(f);
-	if (written != write_len) {
-		unlink(tmp_path);
-		free(tmp_path);
+	if (write_config_temp(ctx->config_path, write_body, write_len, tmp_path, sizeof(tmp_path)) != 0) {
 		free(patched_body);
 		json_error(buf, size, status, 500, "Failed to write config");
 		return;
 	}
 	if (config_load(tmp_path, &cfg, errbuf, sizeof(errbuf)) != 0) {
 		unlink(tmp_path);
-		free(tmp_path);
 		free(patched_body);
 		json_error(buf, size, status, 400, errbuf[0] ? errbuf : "Invalid TOML");
 		return;
@@ -288,17 +323,15 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 	config_free(cfg);
 	if (rename(tmp_path, ctx->config_path) != 0) {
 		unlink(tmp_path);
-		free(tmp_path);
 		free(patched_body);
 		json_error(buf, size, status, 500, "Failed to save config");
 		return;
 	}
-	free(tmp_path);
 	free(patched_body);
 	/* Dashboard/TOML save: swap live cfg now instead of waiting for SIGHUP.
 	 * agent_lock matches the SIGHUP path in main_loop so the two threads cannot
-	 * enqueue the same pointer. http_set_live_config stays here because
-	 * test_reload rebuilds reload.o with GATEWAY=0. */
+	 * enqueue the same pointer. try_config_reload publishes the gateway pointer
+	 * while that lock is held. */
 	{
 		config_t *live_cfg = bootstrap_get_cfg();
 		int reload_rc;
@@ -313,7 +346,6 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 			json_error(buf, size, status, 500, "Config saved but live reload failed");
 			return;
 		}
-		http_set_live_config(bootstrap_get_cfg());
 	}
 	*status = 200;
 	json_response(buf, size, status, "{\"ok\":true}");

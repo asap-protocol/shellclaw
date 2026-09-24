@@ -179,6 +179,35 @@ static int test_patch_creates_missing_section(void)
 	return 0;
 }
 
+static int test_patch_leaves_predictable_sidecar(void)
+{
+	char path[128];
+	char side[160];
+	char kept[32];
+	char *patched = NULL;
+	size_t patched_len = 0;
+	char errbuf[256];
+	FILE *f;
+
+	ASSERT(test_runner_mkstemp_path("shellclaw_test_config_patch", path, sizeof(path)) == 0);
+	ASSERT(write_toml(path,
+	                  "[agent]\nmodel = \"old-model\"\nmax_tokens = 1024\ntemperature = 0.2\n"
+	                  "[gateway]\nhost = \"127.0.0.1\"\nport = 18789\n") == 0);
+	snprintf(side, sizeof(side), "%s.patch-test", path);
+	ASSERT(write_toml(side, "KEEP") == 0);
+	ASSERT(config_patch_dashboard_json(path, "{\"model\":\"new-model\"}", &patched, &patched_len,
+	                                   errbuf, sizeof(errbuf)) == 0);
+	free(patched);
+	f = fopen(side, "r");
+	ASSERT(f != NULL);
+	ASSERT(fgets(kept, sizeof(kept), f) != NULL);
+	fclose(f);
+	ASSERT(strcmp(kept, "KEEP") == 0);
+	remove(side);
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	int failed = 0;
@@ -208,6 +237,10 @@ int main(void)
 	}
 	if (test_patch_rejects_wrong_json_types() != 0) {
 		fprintf(stderr, "test_patch_rejects_wrong_json_types failed\n");
+		failed++;
+	}
+	if (test_patch_leaves_predictable_sidecar() != 0) {
+		fprintf(stderr, "test_patch_leaves_predictable_sidecar failed\n");
 		failed++;
 	}
 	if (failed == 0)
