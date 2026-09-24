@@ -398,6 +398,8 @@ int cron_job_create(const char *id, const char *schedule, const char *message,
                     const char *channel, const char *recipient, long long next_run, int enabled)
 {
 	if (!g_db || !id || !schedule || !message) return -1;
+	/* fill_cron_job_row truncates id[128]; a longer id breaks the due cursor. */
+	if (strlen(id) >= sizeof(((cron_job_row_t *)0)->id)) return -1;
 	if (strlen(schedule) > (size_t)CRON_JOB_TEXT_MAX) return -1;
 	if (strlen(message) > (size_t)CRON_JOB_TEXT_MAX) return -1;
 	const char *ch = channel ? channel : "";
@@ -458,7 +460,8 @@ int cron_job_update_next_run(const char *id, long long next_run)
 int cron_job_list(cron_job_row_t *out, int max_count)
 {
 	if (!g_db || !out || max_count <= 0) return -1;
-	const char *sql = "SELECT id, schedule, message, channel, recipient, next_run, enabled FROM cron_jobs ORDER BY next_run ASC";
+	const char *sql = "SELECT id, schedule, message, channel, recipient, next_run, enabled "
+		"FROM cron_jobs ORDER BY next_run ASC, id ASC";
 	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
 	int count = 0;
@@ -469,6 +472,27 @@ int cron_job_list(cron_job_row_t *out, int max_count)
 			sqlite3_finalize(stmt);
 			return -1;
 		}
+		count++;
+	}
+	sqlite3_finalize(stmt);
+	return count;
+}
+
+int cron_job_list_due(long long now, cron_due_key_t *out, int max_count)
+{
+	const char *sql;
+	sqlite3_stmt *stmt = NULL;
+	int count = 0;
+
+	if (!g_db || !out || max_count <= 0) return -1;
+	sql = "SELECT id, next_run FROM cron_jobs WHERE next_run <= ?1 AND enabled = 1 "
+		"ORDER BY next_run ASC, id ASC";
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+	sqlite3_bind_int64(stmt, 1, now);
+	while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
+		copy_str_bounded(out[count].id, sizeof(out[count].id),
+				 (const char *)sqlite3_column_text(stmt, 0));
+		out[count].next_run = sqlite3_column_int64(stmt, 1);
 		count++;
 	}
 	sqlite3_finalize(stmt);

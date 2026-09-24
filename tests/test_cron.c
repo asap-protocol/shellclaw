@@ -15,6 +15,13 @@
 #define ASSERT(c) do { if (!(c)) { fprintf(stderr, "FAIL: %s:%d %s\n", __FILE__, __LINE__, #c); return 1; } } while (0)
 #define RUN(t) do { int r = (t); if (r) return r; } while (0)
 
+static void cron_test_reset_offers(void)
+{
+	const channel_t *cron_ch = channel_cron_get();
+	if (cron_ch && cron_ch->cleanup)
+		cron_ch->cleanup();
+}
+
 static int test_interval_next_run(void)
 {
 	long long now = 1700000000;
@@ -205,6 +212,7 @@ static int test_one_shot_detection(void)
 
 static int test_due_job_delivers_full_message(void)
 {
+	cron_test_reset_offers();
 	const char *path = "/tmp/shellclaw_test_cron_long_message.db";
 	remove(path);
 	ASSERT(memory_init(path) == 0);
@@ -235,6 +243,7 @@ static int test_due_job_delivers_full_message(void)
 
 static int test_long_interval_schedule_roundtrips(void)
 {
+	cron_test_reset_offers();
 	const char *path = "/tmp/shellclaw_test_cron_long_schedule.db";
 	const channel_t *ch;
 	channel_incoming_msg_t msg;
@@ -314,6 +323,7 @@ static int test_cron_ack_delivery_deferred(void)
 
 static int test_cron_poll_keeps_job_until_ack(void)
 {
+	cron_test_reset_offers();
 	const channel_t *cron_ch = channel_cron_get();
 	ASSERT(cron_ch != NULL);
 	const char *path = "/tmp/shellclaw_test_cron_poll.db";
@@ -340,6 +350,7 @@ static int test_cron_poll_keeps_job_until_ack(void)
 
 static int test_cron_ack_advances_recurring_past_due_minute(void)
 {
+	cron_test_reset_offers();
 	const char *path = "/tmp/shellclaw_test_cron_ack_advance.db";
 	const channel_t *cron_ch;
 	channel_incoming_msg_t msg;
@@ -404,6 +415,7 @@ static int test_cron_ack_fail_closed_on_parse_error(void)
 
 static int test_cron_poll_waits_before_reoffer(void)
 {
+	cron_test_reset_offers();
 	const char *path = "/tmp/shellclaw_test_cron_reoffer.db";
 	const channel_t *cron_ch;
 	channel_incoming_msg_t msg;
@@ -443,6 +455,11 @@ static int test_cron_job_rejects_oversized_text(void)
 	too_big[CRON_JOB_TEXT_MAX + 1] = '\0';
 	ASSERT(cron_job_create("bigmsg", "interval:60", too_big, "cli", "default", 1, 1) != 0);
 	ASSERT(cron_job_create("bigsched", too_big, "tick", "cli", "default", 1, 1) != 0);
+	memset(too_big, 'i', 128);
+	too_big[128] = '\0';
+	ASSERT(cron_job_create(too_big, "interval:60", "tick", "cli", "default", 1, 1) != 0);
+	too_big[127] = '\0';
+	ASSERT(cron_job_create(too_big, "interval:60", "tick", "cli", "default", 1, 1) == 0);
 	free(too_big);
 	memory_cleanup();
 	remove(path);
@@ -461,6 +478,7 @@ static int test_cron_poll_offers_sibling_while_earlier_unacked(void)
 	long elapsed_ms;
 	long long now;
 
+	cron_test_reset_offers();
 	remove(path);
 	ASSERT(memory_init(path) == 0);
 	now = (long long)time(NULL);
@@ -491,6 +509,88 @@ static int test_cron_poll_offers_sibling_while_earlier_unacked(void)
 	ASSERT(cron_job_get_by_id("job_b", &row) == 1);
 	ASSERT(row.next_run == now - 5);
 	cron_job_row_free(&row);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+	ASSERT(cron_ch->poll(&msg, 2000) == 1);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	ASSERT(msg.user_id != NULL);
+	ASSERT(strcmp(msg.user_id, "job_a") == 0);
+	ASSERT(elapsed_ms >= 400);
+	channel_incoming_msg_clear(&msg);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
+/* A full offer table must wait instead of re-offering an evicted id immediately. */
+static int test_cron_poll_waits_when_offer_table_is_full(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_offer_full.db";
+	const channel_t *cron_ch;
+	channel_incoming_msg_t msg;
+	struct timespec t0;
+	struct timespec t1;
+	char id[8];
+	long elapsed_ms;
+	long long now;
+	int i;
+
+	cron_test_reset_offers();
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	for (i = 0; i < 17; i++) {
+		snprintf(id, sizeof(id), "j%02d", i);
+		ASSERT(cron_job_create(id, "interval:60", id, "cli", "default", now - (20 - i), 1) == 0);
+	}
+	cron_ch = channel_cron_get();
+	for (i = 0; i < 16; i++) {
+		memset(&msg, 0, sizeof(msg));
+		ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+		ASSERT(cron_ch->poll(&msg, 400) == 1);
+		ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+		elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+			+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+		snprintf(id, sizeof(id), "j%02d", i);
+		ASSERT(msg.user_id != NULL);
+		ASSERT(strcmp(msg.user_id, id) == 0);
+		ASSERT(elapsed_ms < 150);
+		channel_incoming_msg_clear(&msg);
+	}
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+	ASSERT(cron_ch->poll(&msg, 400) == 1);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	ASSERT(msg.user_id != NULL);
+	ASSERT(strcmp(msg.user_id, "j00") == 0);
+	ASSERT(elapsed_ms >= 200);
+	channel_incoming_msg_clear(&msg);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
+static int test_cron_list_orders_ties_by_id(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_list_order.db";
+	cron_job_row_t rows[4];
+	long long now;
+
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("b_job", "interval:60", "B", "cli", "default", now, 1) == 0);
+	ASSERT(cron_job_create("a_job", "interval:60", "A", "cli", "default", now, 1) == 0);
+	memset(rows, 0, sizeof(rows));
+	ASSERT(cron_job_list(rows, 4) == 2);
+	ASSERT(strcmp(rows[0].id, "a_job") == 0);
+	ASSERT(strcmp(rows[1].id, "b_job") == 0);
+	cron_job_row_free(&rows[0]);
+	cron_job_row_free(&rows[1]);
 	memory_cleanup();
 	remove(path);
 	return 0;
@@ -517,6 +617,8 @@ int main(void)
 	RUN(test_cron_poll_waits_before_reoffer());
 	RUN(test_cron_job_rejects_oversized_text());
 	RUN(test_cron_poll_offers_sibling_while_earlier_unacked());
+	RUN(test_cron_poll_waits_when_offer_table_is_full());
+	RUN(test_cron_list_orders_ties_by_id());
 	printf("test_cron: all tests passed\n");
 	return 0;
 }
