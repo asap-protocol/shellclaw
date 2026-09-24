@@ -292,11 +292,35 @@ static void cron_mark_offered(const char *job_id, int timeout_ms)
 	s_offers[slot].timeout_ms = timeout_ms;
 }
 
+static void cron_offer_release(const char *job_id)
+{
+	int i;
+	if (!job_id || job_id[0] == '\0')
+		return;
+	for (i = 0; i < CRON_OFFER_TRACK; i++) {
+		if (strcmp(s_offers[i].id, job_id) != 0)
+			continue;
+		memset(&s_offers[i], 0, sizeof(s_offers[i]));
+		return;
+	}
+}
+
+static void cron_sleep_ms(long wait_ms)
+{
+	struct timespec remain;
+	if (wait_ms <= 0)
+		return;
+	remain.tv_sec = wait_ms / 1000;
+	remain.tv_nsec = (wait_ms % 1000) * 1000000L;
+	nanosleep(&remain, NULL);
+}
+
 /** Prefer a due job outside its re-offer window so one stuck job cannot hide the rest. */
 static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 {
 	cron_due_key_t keys[CRON_DUE_SCAN_MAX];
 	struct timespec mono;
+	long age = 0;
 	int n;
 	int i;
 
@@ -313,7 +337,11 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 	}
 	if (cron_job_get_by_id(keys[0].id, row) != 1)
 		return 0;
-	cron_wait_remaining(row->id, timeout_ms);
+	/* An id that never fit in the table has no age, so wait_remaining would return immediately. */
+	if (cron_offer_age_ms(row->id, &mono, &age))
+		cron_wait_remaining(row->id, timeout_ms);
+	else
+		cron_sleep_ms((long)timeout_ms);
 	return 1;
 }
 
@@ -358,6 +386,8 @@ int cron_ack_delivery(const char *job_id)
 	if (cron_is_one_shot(row.schedule)) {
 		rc = cron_job_delete(row.id);
 		cron_job_row_free(&row);
+		if (rc == 0)
+			cron_offer_release(job_id);
 		return rc;
 	}
 	now = (long long)time(NULL);
@@ -365,7 +395,10 @@ int cron_ack_delivery(const char *job_id)
 	cron_job_row_free(&row);
 	if (rc != 0)
 		next = now + 365LL * 24 * 3600;
-	return cron_job_update_next_run(job_id, next);
+	rc = cron_job_update_next_run(job_id, next);
+	if (rc == 0)
+		cron_offer_release(job_id);
+	return rc;
 }
 
 static int cron_send(const char *recipient, const char *text,

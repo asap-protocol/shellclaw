@@ -596,6 +596,60 @@ static int test_cron_list_orders_ties_by_id(void)
 	return 0;
 }
 
+/* After the tracked jobs are acked, the freed slot must deliver the 17th id and then wait. */
+static int test_cron_poll_delivers_17th_after_ack(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_offer_17th.db";
+	const channel_t *cron_ch;
+	channel_incoming_msg_t msg;
+	struct timespec t0;
+	struct timespec t1;
+	char id[8];
+	long elapsed_ms;
+	long long now;
+	int i;
+
+	cron_test_reset_offers();
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	for (i = 0; i < 17; i++) {
+		snprintf(id, sizeof(id), "k%02d", i);
+		ASSERT(cron_job_create(id, "interval:60", id, "cli", "default", now - (20 - i), 1) == 0);
+	}
+	cron_ch = channel_cron_get();
+	for (i = 0; i < 16; i++) {
+		memset(&msg, 0, sizeof(msg));
+		ASSERT(cron_ch->poll(&msg, 300) == 1);
+		channel_incoming_msg_clear(&msg);
+		snprintf(id, sizeof(id), "k%02d", i);
+		ASSERT(cron_ack_delivery(id) == 0);
+	}
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+	ASSERT(cron_ch->poll(&msg, 300) == 1);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	ASSERT(msg.user_id != NULL);
+	ASSERT(strcmp(msg.user_id, "k16") == 0);
+	ASSERT(elapsed_ms < 150);
+	channel_incoming_msg_clear(&msg);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+	ASSERT(cron_ch->poll(&msg, 300) == 1);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	ASSERT(msg.user_id != NULL);
+	ASSERT(strcmp(msg.user_id, "k16") == 0);
+	ASSERT(elapsed_ms >= 150);
+	channel_incoming_msg_clear(&msg);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_interval_next_run());
@@ -618,6 +672,7 @@ int main(void)
 	RUN(test_cron_job_rejects_oversized_text());
 	RUN(test_cron_poll_offers_sibling_while_earlier_unacked());
 	RUN(test_cron_poll_waits_when_offer_table_is_full());
+	RUN(test_cron_poll_delivers_17th_after_ack());
 	RUN(test_cron_list_orders_ties_by_id());
 	printf("test_cron: all tests passed\n");
 	return 0;
