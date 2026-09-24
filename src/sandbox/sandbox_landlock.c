@@ -102,8 +102,7 @@ static int landlock_add_path(int ruleset_fd, const char *path, __u64 dir_access,
     rc = syscall(__NR_landlock_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
                  &pb, 0);
     close(pfd);
-    (void)rc;
-    return 0;
+    return (rc == 0) ? 0 : -1;
 }
 
 static int landlock_add_workspace(int ruleset_fd, const char *workspace, __u64 access)
@@ -189,7 +188,6 @@ static int landlock_make_ruleset(const char *workspace)
 #ifdef LANDLOCK_ACCESS_FS_TRUNCATE
     rw_file |= (LANDLOCK_ACCESS_FS_TRUNCATE & handled);
 #endif
-    rw_file |= (LANDLOCK_ACCESS_FS_IOCTL_DEV & handled);
     memset(&attr, 0, sizeof(attr));
     attr.handled_access_fs = handled;
     ruleset_fd = (int)syscall(__NR_landlock_create_ruleset, &attr,
@@ -207,10 +205,18 @@ static int landlock_make_ruleset(const char *workspace)
         close(ruleset_fd);
         return -1;
     }
-    for (i = 0; RO_PATHS[i]; i++)
-        (void)landlock_add_path(ruleset_fd, RO_PATHS[i], ro_dir, ro_file);
-    for (i = 0; RW_DEV[i]; i++)
-        (void)landlock_add_path(ruleset_fd, RW_DEV[i], ro_dir, rw_file);
+    for (i = 0; RO_PATHS[i]; i++) {
+        if (landlock_add_path(ruleset_fd, RO_PATHS[i], ro_dir, ro_file) != 0) {
+            close(ruleset_fd);
+            return -1;
+        }
+    }
+    for (i = 0; RW_DEV[i]; i++) {
+        if (landlock_add_path(ruleset_fd, RW_DEV[i], ro_dir, rw_file) != 0) {
+            close(ruleset_fd);
+            return -1;
+        }
+    }
     return ruleset_fd;
 }
 
