@@ -330,8 +330,7 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 	free(patched_body);
 	/* Dashboard/TOML save: swap live cfg now instead of waiting for SIGHUP.
 	 * agent_lock matches the SIGHUP path in main_loop so the two threads cannot
-	 * enqueue the same pointer. try_config_reload publishes the gateway pointer
-	 * while that lock is held. */
+	 * enqueue the same pointer. The gateway pointer is published before unlock. */
 	{
 		config_t *live_cfg = bootstrap_get_cfg();
 		int reload_rc;
@@ -341,6 +340,10 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 		}
 		agent_lock();
 		reload_rc = try_config_reload(&live_cfg);
+		/* test_reload rebuilds reload.o without SHELLCLAW_GATEWAY, so the
+		 * publish inside try_config_reload may be compiled out of this binary. */
+		if (reload_rc == 0)
+			http_set_live_config(bootstrap_get_cfg());
 		agent_unlock();
 		if (reload_rc != 0) {
 			json_error(buf, size, status, 500, "Config saved but live reload failed");
