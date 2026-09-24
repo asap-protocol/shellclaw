@@ -6,6 +6,7 @@
 #include "channels/discord_helpers.h"
 #include "channels/channel.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 const char *discord_lifecycle_str(discord_lifecycle_t lc)
@@ -138,4 +139,39 @@ int discord_helpers_send_backoff_ms(int attempt, double retry_after_sec, int jit
 	if (sleep_ms > cap_ms)
 		sleep_ms = cap_ms;
 	return sleep_ms;
+}
+
+int discord_helpers_rx_append(char **buf, size_t *len, size_t *cap, const void *in,
+                              size_t chunk_len, size_t max_cap)
+{
+	size_t need;
+
+	if (!buf || !len || !cap || (!in && chunk_len != 0) || max_cap < 1)
+		return -1;
+	if (chunk_len > max_cap || *len > max_cap - chunk_len)
+		return -1;
+	need = *len + chunk_len + 1;
+	if (need > max_cap)
+		return -1;
+	if (*cap < need) {
+		size_t ncap = *cap ? *cap * 2 : 4096;
+		char *p;
+
+		while (ncap < need)
+			ncap *= 2;
+		if (ncap > max_cap)
+			ncap = max_cap;
+		if (ncap < need)
+			return -1;
+		p = realloc(*buf, ncap);
+		if (!p)
+			return -1;
+		*buf = p;
+		*cap = ncap;
+	}
+	if (chunk_len > 0)
+		memcpy(*buf + *len, in, chunk_len);
+	*len += chunk_len;
+	(*buf)[*len] = '\0';
+	return 0;
 }

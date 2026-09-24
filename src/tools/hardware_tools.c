@@ -100,10 +100,14 @@ static const size_t HARDWARE_TOOL_COUNT =
 void tool_hardware_set_config(const config_t *cfg)
 {
 	g_hw_cfg = cfg;
-	if (cfg && config_workspace_only(cfg))
-		hardware_camera_set_workspace(config_workspace_path(cfg));
-	else
+	if (cfg && config_workspace_only(cfg)) {
+		const char *ws = config_workspace_path(cfg);
+
+		/* Pass "" when path is missing so camera fails closed like write_file. */
+		hardware_camera_set_workspace(ws ? ws : "");
+	} else {
 		hardware_camera_set_workspace(NULL);
+	}
 }
 
 size_t tool_hardware_get_all(const tool_t **out, size_t max_count)

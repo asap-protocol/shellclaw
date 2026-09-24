@@ -313,6 +313,25 @@ static int test_to_jsonrpc_string_alloc(void)
 	return 0;
 }
 
+static int test_from_object_early_reject_keeps_rpc_id(void)
+{
+	cJSON *rpc_id;
+	cJSON *not_obj;
+	asap_envelope_t out;
+	rpc_id = cJSON_CreateString("keep-me");
+	not_obj = cJSON_CreateString("not-an-object");
+	ASSERT(rpc_id != NULL);
+	ASSERT(not_obj != NULL);
+	asap_envelope_init(&out);
+	ASSERT(asap_envelope_from_object(not_obj, rpc_id, &out, NULL) == -1);
+	ASSERT(cJSON_IsString(rpc_id) && rpc_id->valuestring &&
+	       strcmp(rpc_id->valuestring, "keep-me") == 0);
+	cJSON_Delete(rpc_id);
+	cJSON_Delete(not_obj);
+	asap_envelope_clear(&out);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	(void)argc;
@@ -335,6 +354,7 @@ int main(int argc, char **argv)
 	if (test_to_jsonrpc_id_override() != 0) { fprintf(stderr, "test_to_jsonrpc_id_override failed\n"); failed++; }
 	if (test_to_jsonrpc_invalid_envelope() != 0) { fprintf(stderr, "test_to_jsonrpc_invalid_envelope failed\n"); failed++; }
 	if (test_to_jsonrpc_string_alloc() != 0) { fprintf(stderr, "test_to_jsonrpc_string_alloc failed\n"); failed++; }
+	if (test_from_object_early_reject_keeps_rpc_id() != 0) { fprintf(stderr, "test_from_object_early_reject_keeps_rpc_id failed\n"); failed++; }
 	if (failed == 0)
 		printf("test_asap_envelope: all tests passed\n");
 	return failed;

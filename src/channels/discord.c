@@ -143,6 +143,7 @@ struct discord_ctx {
 	char *rx_buf;
 	size_t rx_len;
 	size_t rx_cap;
+	int rx_skip;
 	int heartbeat_interval_ms;
 	uint64_t last_seq;
 	char *session_id;
@@ -176,30 +177,14 @@ static uint64_t discord_now_ms(void)
 static void discord_rx_reset(struct discord_ctx *dc)
 {
 	dc->rx_len = 0;
+	dc->rx_skip = 0;
 }
 
 /** Appends one RX fragment; returns 0 ok, -1 overflow. */
 static int discord_rx_append(struct discord_ctx *dc, const void *in, size_t len)
 {
-	if (len > RX_MAX || dc->rx_len > RX_MAX - len)
-		return -1;
-	if (dc->rx_cap < dc->rx_len + len) {
-		size_t need = dc->rx_len + len + 1;
-		size_t ncap = dc->rx_cap ? dc->rx_cap * 2 : 4096;
-		while (ncap < need && ncap < RX_MAX)
-			ncap *= 2;
-		if (need > RX_MAX)
-			return -1;
-		char *p = realloc(dc->rx_buf, ncap);
-		if (!p)
-			return -1;
-		dc->rx_buf = p;
-		dc->rx_cap = ncap;
-	}
-	memcpy(dc->rx_buf + dc->rx_len, in, len);
-	dc->rx_len += len;
-	dc->rx_buf[dc->rx_len] = '\0';
-	return 0;
+	return discord_helpers_rx_append(&dc->rx_buf, &dc->rx_len, &dc->rx_cap, in, len,
+	                                 RX_MAX);
 }
 
 static int discord_send_json(struct lws *wsi, const char *json)
@@ -294,16 +279,33 @@ static char *discord_build_heartbeat_seq(uint64_t seq)
 	return out;
 }
 
-static int discord_is_user_allowed(const config_t *cfg, const char *author_id)
+static int discord_try_route_message(struct discord_ctx *dc, cJSON *d,
+                                     char *sess_buf, size_t sess_sz)
 {
-	int n = config_discord_allowed_user_ids_count(cfg);
-	int i;
-	for (i = 0; i < n; i++) {
-		const char *allow = config_discord_allowed_user_id(cfg, i);
-		if (discord_helpers_allow_entry_equals(allow, author_id))
-			return 1;
+	int n;
+	int route;
+	const char **allowed;
+	char *bid;
+
+	n = config_discord_allowed_user_ids_count(dc->cfg);
+	allowed = NULL;
+	if (n > 0) {
+		int i;
+
+		allowed = malloc(sizeof(*allowed) * (size_t)n);
+		if (!allowed)
+			return 0;
+		for (i = 0; i < n; i++)
+			allowed[i] = config_discord_allowed_user_id(dc->cfg, i);
 	}
-	return 0;
+	pthread_mutex_lock(&dc->lock);
+	bid = dc->bot_user_id ? strdup(dc->bot_user_id) : NULL;
+	pthread_mutex_unlock(&dc->lock);
+	route = discord_helpers_route_message_create(d, (const char *const *)allowed, n, bid,
+	                                               sess_buf, sess_sz);
+	free(allowed);
+	free(bid);
+	return route == 1;
 }
 
 static void discord_queue_enqueue(struct discord_ctx *dc, channel_incoming_msg_t *msg)
@@ -340,68 +342,30 @@ static void discord_abs_timeout_ms(int timeout_ms, struct timespec *out)
 static void discord_on_message_create(struct discord_ctx *dc, cJSON *d)
 {
 	cJSON *author;
-	cJSON *bot_flag;
 	cJSON *aid_item;
-	char *author_id = NULL;
-	cJSON *guild_id;
-	int is_guild;
-	char *bid = NULL;
-	cJSON *ch;
+	char *author_id;
 	cJSON *content;
 	const char *txt;
 	char sess_buf[128];
 	channel_incoming_msg_t m = { 0 };
+
 	if (!dc || !dc->cfg || !d || !cJSON_IsObject(d))
 		return;
-	author = cJSON_GetObjectItem(d, "author");
-	if (!cJSON_IsObject(author))
+	if (!discord_try_route_message(dc, d, sess_buf, sizeof(sess_buf)))
 		return;
-	bot_flag = cJSON_GetObjectItem(author, "bot");
-	if (cJSON_IsTrue(bot_flag))
-		return;
-	aid_item = cJSON_GetObjectItem(author, "id");
-	if (cJSON_IsString(aid_item) && aid_item->valuestring)
-		author_id = strdup(aid_item->valuestring);
-	if (!author_id)
-		return;
-	if (!discord_is_user_allowed(dc->cfg, author_id)) {
-		free(author_id);
-		return;
-	}
-	guild_id = cJSON_GetObjectItem(d, "guild_id");
-	is_guild = cJSON_IsString(guild_id) && guild_id->valuestring && guild_id->valuestring[0] != '\0';
-	if (is_guild) {
-		cJSON *mentions;
-		int mention_ok;
-		pthread_mutex_lock(&dc->lock);
-		bid = dc->bot_user_id ? strdup(dc->bot_user_id) : NULL;
-		pthread_mutex_unlock(&dc->lock);
-		mentions = cJSON_GetObjectItem(d, "mentions");
-		mention_ok = bid != NULL &&
-		             discord_helpers_mentions_include_bot(mentions, bid);
-		free(bid);
-		if (!mention_ok) {
-			free(author_id);
-			return;
-		}
-	}
-	ch = cJSON_GetObjectItem(d, "channel_id");
-	if (!cJSON_IsString(ch) || !ch->valuestring || ch->valuestring[0] == '\0') {
-		free(author_id);
-		return;
-	}
 	content = cJSON_GetObjectItem(d, "content");
 	txt = "";
 	if (cJSON_IsString(content) && content->valuestring)
 		txt = content->valuestring;
-	if (!txt[0]) {
-		free(author_id);
+	if (!txt[0])
 		return;
-	}
-	if (discord_helpers_session_id_from_channel(ch->valuestring, sess_buf, sizeof(sess_buf)) != 0) {
-		free(author_id);
+	author = cJSON_GetObjectItem(d, "author");
+	aid_item = cJSON_IsObject(author) ? cJSON_GetObjectItem(author, "id") : NULL;
+	if (!cJSON_IsString(aid_item) || !aid_item->valuestring)
 		return;
-	}
+	author_id = strdup(aid_item->valuestring);
+	if (!author_id)
+		return;
 	m.session_id = strdup(sess_buf);
 	if (!m.session_id) {
 		free(author_id);
@@ -559,9 +523,15 @@ static int callback_discord(struct lws *wsi, enum lws_callback_reasons reason,
 		}
 		break;
 	case LWS_CALLBACK_CLIENT_RECEIVE:
+		if (dc->rx_skip) {
+			if (lws_is_final_fragment(wsi))
+				dc->rx_skip = 0;
+			break;
+		}
 		if (discord_rx_append(dc, in, len) != 0) {
 			fprintf(stderr, "shellclaw: discord: gateway payload too large\n");
 			discord_rx_reset(dc);
+			dc->rx_skip = !lws_is_final_fragment(wsi);
 			break;
 		}
 		if (lws_is_final_fragment(wsi)) {

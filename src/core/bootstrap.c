@@ -16,8 +16,12 @@
 #include "gateway/ws.h"
 #include "asap/manifest_keys.h"
 #endif
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
 
 #define SKILLS_BUF_SIZE (256 * 1024)
 #define SYSTEM_PROMPT_BUF_SIZE (256 * 1024)
@@ -93,6 +97,28 @@ const tool_t *bootstrap_tool_at(size_t index)
 	if (index >= g_tool_count)
 		return NULL;
 	return g_tools[index];
+}
+
+size_t bootstrap_fill_agent_tools(agent_tool_t *out, size_t cap)
+{
+	size_t tool_count = g_tool_count;
+	size_t i;
+	if (!out || cap == 0)
+		return 0;
+	if (tool_count > cap)
+		tool_count = cap;
+	for (i = 0; i < tool_count; i++) {
+		const tool_t *t = g_tools[i];
+		if (!t) {
+			tool_count = i;
+			break;
+		}
+		out[i].name = t->name;
+		out[i].description = t->description;
+		out[i].parameters_json = t->parameters_json;
+		out[i].execute = t->execute;
+	}
+	return tool_count;
 }
 
 static int memory_init_from_config(const config_t *cfg)
@@ -211,8 +237,54 @@ static void channels_cleanup(void)
 	g_cfg = NULL;
 }
 
+static int workspace_is_real_dir(const char *workspace)
+{
+	struct stat st;
+
+	if (lstat(workspace, &st) != 0) {
+		fprintf(stderr, "shellclaw: workspace %s: %s\n", workspace, strerror(errno));
+		return 0;
+	}
+	if (S_ISLNK(st.st_mode)) {
+		fprintf(stderr, "shellclaw: workspace %s is a symlink\n", workspace);
+		return 0;
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "shellclaw: workspace %s is not a directory\n", workspace);
+		return 0;
+	}
+	return 1;
+}
+
+static int ensure_workspace_directory(const char *workspace)
+{
+	const char *slash;
+
+	if (!workspace || !workspace[0]) return 0;
+	slash = strrchr(workspace, '/');
+	if (slash && slash != workspace) {
+		char parent[PATH_MAX];
+		size_t parent_len = (size_t)(slash - workspace);
+		if (parent_len < sizeof(parent)) {
+			memcpy(parent, workspace, parent_len);
+			parent[parent_len] = '\0';
+			if (mkdir(parent, 0700) != 0 && errno != EEXIST)
+				fprintf(stderr, "shellclaw: mkdir %s: %s\n",
+				        parent, strerror(errno));
+		}
+	}
+	if (mkdir(workspace, 0700) != 0 && errno != EEXIST)
+		fprintf(stderr, "shellclaw: mkdir workspace %s: %s\n",
+		        workspace, strerror(errno));
+	if (!workspace_is_real_dir(workspace))
+		return -1;
+	return 0;
+}
+
 int tools_init(const config_t *cfg)
 {
+	if (ensure_workspace_directory(config_workspace_path(cfg)) != 0)
+		return -1;
 	tool_set_config(cfg);
 	g_tool_count = tool_get_all(g_tools, SHELLCLAW_MAX_TOOLS);
 	return 0;
@@ -313,12 +385,14 @@ int init_subsystems(config_t *cfg)
 void cleanup_subsystems(void)
 {
 #ifdef SHELLCLAW_GATEWAY
+	/* HTTP/WS callbacks still call auth_validate_token(ctx->auth). Join the
+	 * lws thread before freeing auth_ctx (same order as tools_init failure). */
 	ws_shutdown_signal();
+	http_stop();
 	if (g_auth_ctx) {
 		auth_cleanup(g_auth_ctx);
 		g_auth_ctx = NULL;
 	}
-	http_stop();
 	ws_cleanup();
 #endif
 	tools_cleanup();

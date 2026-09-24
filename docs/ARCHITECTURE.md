@@ -62,7 +62,7 @@ Shell commands run in a **Linux sandbox** (namespaces + cgroups v2). Hardware to
 | `channels/` | Inbound/outbound I/O | CLI, Telegram, Discord, WebChat, heartbeat |
 | `gateway/` | Embedded HTTP/WebSocket server, pairing auth, rate limits, static Web UI | `http_lws`, `routes.c`, `routes_hardware.c` |
 | `asap/` | Protocol client/server, envelope, ULID, registry cache, signed manifest | `manifest_build_signed_json()`, `POST /asap` |
-| `sandbox/` | Process isolation for shell tool | `sandbox_run()` — `unshare(CLONE_NEWNS\|NEWNET\|NEWPID)`, no `pivot_root` |
+| `sandbox/` | Process isolation for shell tool | `sandbox_exec()` — user ns + `unshare(CLONE_NEWNS\|NEWNET\|NEWPID)` then fork for PID 1, Landlock workspace bound, no `pivot_root` |
 | `hardware/` | Board abstraction: GPIO (libgpiod), I2C (`/dev/i2c-N`), camera (fixed-argv CLI spawn) | `hardware_init()`, `board_detect()` |
 | `crypto/` | Ed25519 signing + JCS canonicalization for manifests | `manifest_keys_ensure_loaded()` (lazy on manifest GET), `jcs.c` |
 
@@ -78,7 +78,7 @@ Convention: one primary `.c` + `.h` per module; new tools go in `src/tools/<name
 4. **Router** walks `providers.fallback_chain` (e.g. `anthropic` → `local` → `stub`) on transport/5xx errors; 4xx stops the chain.
 5. **Tools** execute when the model returns tool calls; results feed the next iteration until a final reply or `max_tool_iterations`.
 
-**Thread safety:** the main loop is single-threaded. Gateway worker threads (WebSocket chat, `POST /asap`) must hold `agent_lock()` around `agent_run()`. See README § Thread Safety.
+**Thread safety:** the main loop is single-threaded. Gateway worker threads (WebSocket chat, `POST /asap`) must hold `agent_lock()` around `agent_run()`, inbound `mcp.tool_call` execute, and `state.query` memory-store reads. See README § Thread Safety.
 
 ---
 
@@ -137,9 +137,11 @@ v1.0 ships static manifest discovery; live cross-agent HTTP and full compliance 
 
 Linux path (`src/sandbox/sandbox.c`):
 
-- Child: `unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID)` then `exec` shell command.
-- **No** `mount()`, bind-mount, or `pivot_root()` — GPU device nodes and Argus socket are not injected.
-- Allowlist in `src/sandbox/allowlist.c` blocks dangerous paths and Jetson GPU `/dev` literals.
+- Isolator: user namespace when unprivileged, then `unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID)`, then **fork** so the command is PID 1.
+- Isolation failure is fail-closed via a control pipe (not `sh` exit 122/123).
+- Landlock workspace bound when `workspace_path` is set (RW workspace, RO `/bin` `/usr` `/lib*`, RW `/dev/null`).
+- **No** `pivot_root()` — GPU device nodes are not granted by Landlock; the allowlist still blocks `/dev/nv*` literals.
+- Allowlist in `src/sandbox/allowlist.c` is defense-in-depth (quoted paths, `$HOME`/`$PWD`, `file:` URLs).
 - cgroups v2: `memory.max`, `cpu.max` when writable under `/sys/fs/cgroup`.
 
 Non-Linux: plain `fork`/`exec` with a stderr warning.

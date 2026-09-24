@@ -10,6 +10,7 @@
 void bootstrap_set_provider_for_test(const provider_t *provider);
 void bootstrap_reset_tools_for_test(void);
 void bootstrap_add_tool_for_test(const tool_t *tool);
+#include "core/agent.h"
 #include "core/config.h"
 #include "core/dispatch.h"
 #include "core/memory.h"
@@ -18,6 +19,7 @@ void bootstrap_add_tool_for_test(const tool_t *tool);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ASSERT(c)                                                                              \
@@ -40,6 +42,8 @@ static char g_last_session[SEND_BUF_SIZE];
 static char g_last_text[SEND_BUF_SIZE];
 static int g_send_calls;
 static size_t g_last_provider_tool_count;
+static int g_agent_mutex_held_during_chat;
+static int g_agent_mutex_held_during_reset;
 
 static int mock_send(const char *session_id, const char *text,
 		     const channel_attachment_t *attachments, size_t attachments_count)
@@ -56,6 +60,14 @@ static int mock_send(const char *session_id, const char *text,
 
 static const channel_t mock_channel = {
 	.name = "mock",
+	.init = NULL,
+	.poll = NULL,
+	.send = mock_send,
+	.cleanup = NULL,
+};
+
+static const channel_t cron_mock_channel = {
+	.name = "cron",
 	.init = NULL,
 	.poll = NULL,
 	.send = mock_send,
@@ -113,6 +125,35 @@ static const provider_t fail_provider = {
 	.chat = fail_chat,
 	.cleanup = spy_cleanup,
 };
+
+static int lockcheck_chat(const provider_message_t *messages, size_t message_count,
+			  const provider_tool_def_t *tools, size_t tool_count,
+			  provider_response_t *response)
+{
+	(void)messages;
+	(void)message_count;
+	(void)tools;
+	(void)tool_count;
+	g_agent_mutex_held_during_chat = agent_mutex_is_locked_for_test();
+	response->error = 0;
+	response->content = strdup("agent-ok");
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	return 0;
+}
+
+static const provider_t lockcheck_provider = {
+	.name = "lockcheck",
+	.init = spy_init,
+	.chat = lockcheck_chat,
+	.cleanup = spy_cleanup,
+};
+
+static void reset_lock_probe(const char *session_id)
+{
+	(void)session_id;
+	g_agent_mutex_held_during_reset = agent_mutex_is_locked_for_test();
+}
 
 static config_t *load_minimal_cfg(const char *path)
 {
@@ -174,9 +215,14 @@ static int test_reset_clears_session(void)
 
 	msg.session_id = "ws:test";
 	msg.text = "/reset";
+	g_agent_mutex_held_during_reset = 0;
+	session_delete_set_hook_for_test(reset_lock_probe);
 	ASSERT(handle_message(&mock_channel, &msg) == 0);
+	session_delete_set_hook_for_test(NULL);
 	ASSERT(g_send_calls == 1);
 	ASSERT(strstr(g_last_text, "Session cleared") != NULL);
+	ASSERT(g_agent_mutex_held_during_reset == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
 	ASSERT(session_load("ws:test", history, sizeof(history)) != 0);
 
 	config_free(cfg);
@@ -303,6 +349,125 @@ static int test_dispatch_forwards_full_hardware_tool_table(void)
 	return 0;
 }
 
+static int test_cron_slash_commands_ack_jobs(void)
+{
+	const char *db_path = "build/test_dispatch_cron_slash.db";
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_cron_slash_XXXXXX";
+	channel_incoming_msg_t msg = {0};
+	config_t *cfg = NULL;
+	cron_job_row_t row;
+	long long now;
+	int fd;
+	reset_send_spy();
+	memory_cleanup();
+	remove(db_path);
+	ASSERT(memory_init(db_path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("cron_reset", "at:9999999999", "/reset", "cli", "default",
+			       now - 1, 1) == 0);
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	bootstrap_set_cfg(cfg);
+	bootstrap_reset_tools_for_test();
+	msg.session_id = "cli:default";
+	msg.user_id = "cron_reset";
+	msg.text = "/reset";
+	ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+	ASSERT(strstr(g_last_text, "Session cleared") != NULL);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("cron_reset", &row) == 0);
+	ASSERT(cron_job_create("cron_status", "interval:3600", "/status", "cli", "default",
+			       now - 1, 1) == 0);
+	msg.user_id = "cron_status";
+	msg.text = "/status";
+	ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("cron_status", &row) == 1);
+	ASSERT(row.next_run > now - 1);
+	cron_job_row_free(&row);
+	msg.user_id = "missing_cron_job";
+	ASSERT(handle_message(&cron_mock_channel, &msg) != 0);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	config_free(cfg);
+	unlink(tmpl);
+	memory_cleanup();
+	remove(db_path);
+	return 0;
+}
+
+static int test_cron_agent_failure_does_not_ack(void)
+{
+	const char *db_path = "build/test_dispatch_cron_fail.db";
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_cron_fail_XXXXXX";
+	channel_incoming_msg_t msg = {0};
+	config_t *cfg = NULL;
+	cron_job_row_t row;
+	long long due_at;
+	int fd;
+	reset_send_spy();
+	memory_cleanup();
+	remove(db_path);
+	ASSERT(memory_init(db_path) == 0);
+	due_at = (long long)time(NULL) - 1;
+	ASSERT(cron_job_create("cron_fail", "interval:60", "hello", "cli", "default",
+			       due_at, 1) == 0);
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	bootstrap_set_cfg(cfg);
+	bootstrap_set_provider_for_test(&fail_provider);
+	bootstrap_reset_tools_for_test();
+	msg.session_id = "cli:default";
+	msg.user_id = "cron_fail";
+	msg.text = "hello";
+	ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("cron_fail", &row) == 1);
+	ASSERT(row.next_run == due_at);
+	cron_job_row_free(&row);
+	config_free(cfg);
+	unlink(tmpl);
+	memory_cleanup();
+	remove(db_path);
+	return 0;
+}
+
+static int test_handle_message_holds_agent_mutex(void)
+{
+	channel_incoming_msg_t msg = {0};
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_lock_XXXXXX";
+	config_t *cfg = NULL;
+	int fd;
+
+	reset_send_spy();
+	g_agent_mutex_held_during_chat = 0;
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	bootstrap_set_cfg(cfg);
+	bootstrap_set_provider_for_test(&lockcheck_provider);
+	bootstrap_reset_tools_for_test();
+	msg.session_id = "cli:lock";
+	msg.text = "ping";
+	ASSERT(handle_message(&mock_channel, &msg) == 0);
+	ASSERT(g_send_calls == 1);
+	ASSERT(g_agent_mutex_held_during_chat == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	config_free(cfg);
+	unlink(tmpl);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_reset_clears_session());
@@ -310,6 +475,9 @@ int main(void)
 	RUN(test_agent_failure_fallback_message());
 	RUN(test_normal_message_uses_provider());
 	RUN(test_dispatch_forwards_full_hardware_tool_table());
+	RUN(test_handle_message_holds_agent_mutex());
+	RUN(test_cron_slash_commands_ack_jobs());
+	RUN(test_cron_agent_failure_does_not_ack());
 	puts("test_dispatch OK");
 	return 0;
 }

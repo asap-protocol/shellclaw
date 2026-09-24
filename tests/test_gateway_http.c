@@ -1,11 +1,12 @@
 /**
  * @file test_gateway_http.c
- * @brief Integration tests for gateway HTTP: health, pair, auth, manifest, config, skills, memory, cron.
+ * @brief Integration tests for gateway HTTP: health, pair, auth, listen bind, manifest, config, skills, memory, cron.
  * Requires libwebsockets and SHELLCLAW_GATEWAY. Starts server in subprocess.
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/auth.h"
+#include "gateway/http.h"
 #include "gateway/rate_limit.h"
 #include "core/config.h"
 #include "core/version.h"
@@ -13,10 +14,12 @@
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -63,6 +66,168 @@ static int pick_ephemeral_port(void)
 	}
 	close(fd);
 	return (int)ntohs(addr.sin_port);
+}
+
+enum listen_bind_kind {
+	LISTEN_BIND_NONE = 0,
+	LISTEN_BIND_ANY = 1,
+	LISTEN_BIND_LOOPBACK = 2,
+	LISTEN_BIND_OTHER = 3
+};
+
+static int hex_port_matches(const char *port_hex, int port)
+{
+	unsigned long parsed;
+	char *end = NULL;
+
+	if (!port_hex || !port_hex[0])
+		return 0;
+	parsed = strtoul(port_hex, &end, 16);
+	if (!end || end == port_hex)
+		return 0;
+	return parsed == (unsigned long)port;
+}
+
+static int ipv4_hex_kind(const char *hex8)
+{
+	if (!hex8 || strlen(hex8) < 8)
+		return LISTEN_BIND_OTHER;
+	if (strncasecmp(hex8, "00000000", 8) == 0)
+		return LISTEN_BIND_ANY;
+	if (strncasecmp(hex8, "0100007F", 8) == 0)
+		return LISTEN_BIND_LOOPBACK;
+	return LISTEN_BIND_OTHER;
+}
+
+static int ipv6_hex_kind(const char *hex32)
+{
+	static const char z32[] = "00000000000000000000000000000000";
+	static const char lo[] = "00000000000000000000000001000000";
+	static const char v4map[] = "0000000000000000FFFF00000100007F";
+	static const char v4any[] = "0000000000000000FFFF000000000000";
+
+	if (!hex32 || strlen(hex32) < 32)
+		return LISTEN_BIND_OTHER;
+	if (strncasecmp(hex32, z32, 32) == 0)
+		return LISTEN_BIND_ANY;
+	if (strncasecmp(hex32, v4any, 32) == 0)
+		return LISTEN_BIND_ANY;
+	if (strncasecmp(hex32, lo, 32) == 0)
+		return LISTEN_BIND_LOOPBACK;
+	if (strncasecmp(hex32, v4map, 32) == 0)
+		return LISTEN_BIND_LOOPBACK;
+	return LISTEN_BIND_OTHER;
+}
+
+static int test_ipv6_hex_kind_v4mapped_any(void)
+{
+	/* ::ffff:0.0.0.0 is IPv4-mapped INADDR_ANY in /proc/net/tcp6. */
+	ASSERT(ipv6_hex_kind("0000000000000000FFFF000000000000") == LISTEN_BIND_ANY);
+	ASSERT(ipv6_hex_kind("0000000000000000FFFF00000100007F") == LISTEN_BIND_LOOPBACK);
+	ASSERT(ipv6_hex_kind("00000000000000000000000000000000") == LISTEN_BIND_ANY);
+	return 0;
+}
+
+static int test_http_listen_iface(void)
+{
+	const char *iface;
+
+	ASSERT(http_listen_iface("0.0.0.0", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("*", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("::", 0, &iface) != 0);
+	ASSERT(http_listen_iface("[::]", 0, &iface) != 0);
+	ASSERT(http_listen_iface("", 0, &iface) != 0);
+	ASSERT(http_listen_iface("::", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("[::]", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("", 1, &iface) == 0);
+	ASSERT(iface == NULL);
+	ASSERT(http_listen_iface("127.0.0.1", 0, &iface) == 0);
+	ASSERT(iface != NULL && strcmp(iface, "127.0.0.1") == 0);
+	ASSERT(http_listen_iface("::1", 0, &iface) == 0);
+	ASSERT(iface != NULL && strcmp(iface, "::1") == 0);
+	ASSERT(http_listen_iface("0.0.0.0", 0, &iface) != 0);
+	ASSERT(http_listen_iface("127.0.0.1", 0, NULL) != 0);
+	return 0;
+}
+
+static int parse_proc_listen_kind(const char *line, int port, int ipv6)
+{
+	unsigned int sl;
+	unsigned int st;
+	char local[40];
+	char rem[40];
+	char *colon;
+
+	if (sscanf(line, "%u: %39s %39s %X", &sl, local, rem, &st) != 4)
+		return LISTEN_BIND_NONE;
+	(void)sl;
+	(void)rem;
+	if (st != 0x0A)
+		return LISTEN_BIND_NONE;
+	colon = strrchr(local, ':');
+	if (!colon)
+		return LISTEN_BIND_NONE;
+	*colon = '\0';
+	if (!hex_port_matches(colon + 1, port))
+		return LISTEN_BIND_NONE;
+	return ipv6 ? ipv6_hex_kind(local) : ipv4_hex_kind(local);
+}
+
+static int scan_proc_tcp(const char *path, int port, int ipv6, int *saw_any,
+			 int *saw_loop)
+{
+	FILE *fp;
+	char line[512];
+
+	if (!path || !saw_any || !saw_loop)
+		return -1;
+	fp = fopen(path, "r");
+	if (!fp)
+		return 0;
+	if (!fgets(line, sizeof(line), fp)) {
+		fclose(fp);
+		return -1;
+	}
+	while (fgets(line, sizeof(line), fp)) {
+		int kind = parse_proc_listen_kind(line, port, ipv6);
+
+		if (kind == LISTEN_BIND_ANY)
+			*saw_any = 1;
+		if (kind == LISTEN_BIND_LOOPBACK)
+			*saw_loop = 1;
+	}
+	fclose(fp);
+	return 0;
+}
+
+static int test_listen_bound_to_loopback(int port)
+{
+	int saw_any = 0;
+	int saw_loop = 0;
+
+	/* /health can succeed on 127.0.0.1 even when LWS bound INADDR_ANY. */
+	if (access("/proc/net/tcp", R_OK) != 0 &&
+	    access("/proc/net/tcp6", R_OK) != 0) {
+		fprintf(stderr,
+			"test_listen_bound_to_loopback: skip (/proc/net/tcp{,6} missing)\n");
+		return 0;
+	}
+
+	ASSERT(scan_proc_tcp("/proc/net/tcp", port, 0, &saw_any, &saw_loop) == 0);
+	(void)scan_proc_tcp("/proc/net/tcp6", port, 1, &saw_any, &saw_loop);
+	if (saw_any) {
+		fprintf(stderr,
+			"FAIL: gateway LISTEN on 0.0.0.0/:: port %d "
+			"(config host is 127.0.0.1)\n",
+			port);
+		return 1;
+	}
+	ASSERT(saw_loop);
+	return 0;
 }
 
 static int http_get(const char *url, long *code_out, char **body_out);
@@ -420,6 +585,250 @@ static int test_asap_missing_fields(void)
 	return 0;
 }
 
+static int post_asap(const char *payload_type, const char *payload_json,
+	const char *env_id, long *code, char **body)
+{
+	char req[1536];
+	int n;
+	n = snprintf(req, sizeof req,
+		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\","
+		"\"params\":{"
+		"\"id\":\"%s\","
+		"\"asap_version\":\"2.1\","
+		"\"sender\":\"urn:asap:agent:a\","
+		"\"recipient\":\"urn:asap:agent:b\","
+		"\"payload_type\":\"%s\","
+		"\"payload\":%s,"
+		"\"correlation_id\":\"c1\","
+		"\"trace_id\":\"t1\","
+		"\"timestamp\":\"2026-01-01T00:00:00Z\""
+		"},\"id\":42}",
+		env_id, payload_type, payload_json);
+	if (n < 0 || (size_t)n >= sizeof req)
+		return -1;
+	return http_post(gw_url("/asap"), req, code, body);
+}
+
+static int asap_http_is(long code, long want, const char *body)
+{
+	if (code == want)
+		return 1;
+	fprintf(stderr, "FAIL: HTTP %ld want %ld body=%s\n",
+		code, want, body ? body : "(null)");
+	return 0;
+}
+
+static int asap_result_payload_type_is(const char *body, const char *want)
+{
+	cJSON *root = cJSON_Parse(body);
+	cJSON *result;
+	cJSON *ptype;
+	int ok = 0;
+	if (!root)
+		return 0;
+	result = cJSON_GetObjectItemCaseSensitive(root, "result");
+	ptype = result ? cJSON_GetObjectItemCaseSensitive(result, "payload_type") : NULL;
+	if (ptype && cJSON_IsString(ptype) && ptype->valuestring &&
+	    strcmp(ptype->valuestring, want) == 0)
+		ok = 1;
+	cJSON_Delete(root);
+	return ok;
+}
+
+static int asap_error_code_is(const char *body, int want)
+{
+	cJSON *root = cJSON_Parse(body);
+	cJSON *err;
+	cJSON *code;
+	int ok = 0;
+	if (!root)
+		return 0;
+	err = cJSON_GetObjectItemCaseSensitive(root, "error");
+	code = err ? cJSON_GetObjectItemCaseSensitive(err, "code") : NULL;
+	if (code && cJSON_IsNumber(code) && (int)code->valuedouble == want)
+		ok = 1;
+	cJSON_Delete(root);
+	return ok;
+}
+
+static int asap_mcp_result_is_json_array(const char *body)
+{
+	cJSON *root = cJSON_Parse(body);
+	cJSON *result;
+	cJSON *payload;
+	cJSON *result_str;
+	cJSON *inner = NULL;
+	int ok = 0;
+	if (!root)
+		return 0;
+	result = cJSON_GetObjectItemCaseSensitive(root, "result");
+	payload = result ? cJSON_GetObjectItemCaseSensitive(result, "payload") : NULL;
+	result_str = payload ? cJSON_GetObjectItemCaseSensitive(payload, "result") : NULL;
+	if (result_str && cJSON_IsString(result_str) && result_str->valuestring) {
+		inner = cJSON_Parse(result_str->valuestring);
+		ok = (inner && cJSON_IsArray(inner)) ? 1 : 0;
+		cJSON_Delete(inner);
+	}
+	cJSON_Delete(root);
+	return ok;
+}
+
+static int test_asap_task_request(void)
+{
+	long code;
+	char *body = NULL;
+	int r = post_asap("task.request", "{\"input\":\"hello\"}", "01HZABC123",
+		&code, &body);
+	ASSERT(r == 0);
+	ASSERT(asap_http_is(code, 200, body));
+	ASSERT(body != NULL);
+	ASSERT(asap_result_payload_type_is(body, "task.response"));
+	free(body);
+	return 0;
+}
+
+static int test_asap_mcp_tool_call(void)
+{
+	long code;
+	char *body = NULL;
+	int r = post_asap("mcp.tool_call",
+		"{\"name\":\"cron\",\"arguments\":{\"operation\":\"list\"}}",
+		"01HZABC124", &code, &body);
+	ASSERT(r == 0);
+	ASSERT(asap_http_is(code, 200, body));
+	ASSERT(body != NULL);
+	ASSERT(asap_result_payload_type_is(body, "mcp.tool_result"));
+	ASSERT(asap_mcp_result_is_json_array(body));
+	free(body);
+	return 0;
+}
+
+static int test_asap_mcp_unknown_tool(void)
+{
+	long code;
+	char *body = NULL;
+	int r = post_asap("mcp.tool_call",
+		"{\"name\":\"no-such-tool\",\"arguments\":{}}",
+		"01HZABC125", &code, &body);
+	ASSERT(r == 0);
+	if (code != 400)
+		fprintf(stderr, "FAIL: HTTP %ld want 400 body=%s\n",
+			code, body ? body : "(null)");
+	ASSERT(code == 400);
+	ASSERT(body != NULL);
+	ASSERT(asap_error_code_is(body, -32001));
+	free(body);
+	return 0;
+}
+
+/* Gateway HTTP buffer is RESP_BUF_SIZE (65536). A (64 KiB - 1) file
+ * read wraps into JSON-RPC larger than that; truncation was #61. */
+enum { ASAP_OVERSIZE_FILE_BYTES = 65535 };
+
+static int write_asap_oversize_file(char *path, size_t path_sz)
+{
+	FILE *f;
+	char *block;
+	size_t nw;
+	snprintf(path, path_sz, "%s/.shellclaw/workspace", g_test_home);
+	if (mkdir(path, 0755) != 0 && errno != EEXIST)
+		return -1;
+	snprintf(path, path_sz, "%s/.shellclaw/workspace/asap_oversize.txt", g_test_home);
+	block = malloc(ASAP_OVERSIZE_FILE_BYTES);
+	if (!block)
+		return -1;
+	memset(block, 'A', ASAP_OVERSIZE_FILE_BYTES);
+	f = fopen(path, "wb");
+	if (!f) {
+		free(block);
+		return -1;
+	}
+	nw = fwrite(block, 1, ASAP_OVERSIZE_FILE_BYTES, f);
+	fclose(f);
+	free(block);
+	return nw == ASAP_OVERSIZE_FILE_BYTES ? 0 : -1;
+}
+
+static int asap_log_outbound_count(const char *token, int *count_out)
+{
+	long code;
+	char *body = NULL;
+	cJSON *root;
+	cJSON *ent;
+	int i;
+	int n;
+	int count = 0;
+	if (!token || !token[0] || !count_out)
+		return -1;
+	if (http_get_auth(gw_url("/api/asap/log"), token, &code, &body) != 0)
+		return -1;
+	if (code != 200 || !body) {
+		free(body);
+		return -1;
+	}
+	root = cJSON_Parse(body);
+	free(body);
+	if (!root)
+		return -1;
+	ent = cJSON_GetObjectItemCaseSensitive(root, "entries");
+	if (!ent || !cJSON_IsArray(ent)) {
+		cJSON_Delete(root);
+		return -1;
+	}
+	n = cJSON_GetArraySize(ent);
+	for (i = 0; i < n; i++) {
+		cJSON *e = cJSON_GetArrayItem(ent, i);
+		cJSON *dir = e ? cJSON_GetObjectItemCaseSensitive(e, "direction") : NULL;
+		if (dir && cJSON_IsString(dir) && dir->valuestring &&
+		    strcmp(dir->valuestring, "out") == 0)
+			count++;
+	}
+	cJSON_Delete(root);
+	*count_out = count;
+	return 0;
+}
+
+static int test_asap_rejects_oversized_response(const char *token)
+{
+	char path[256];
+	char payload[640];
+	long code;
+	char *body = NULL;
+	int n;
+	int r;
+	int out_before = 0;
+	int out_after = 0;
+	cJSON *parsed;
+	ASSERT(write_asap_oversize_file(path, sizeof path) == 0);
+	n = snprintf(payload, sizeof payload,
+		"{\"name\":\"file\",\"arguments\":{\"operation\":\"read_file\",\"path\":\"%s\"}}",
+		path);
+	ASSERT(n > 0 && (size_t)n < sizeof payload);
+	if (token && token[0])
+		ASSERT(asap_log_outbound_count(token, &out_before) == 0);
+	r = post_asap("mcp.tool_call", payload, "01HZABC126", &code, &body);
+	ASSERT(r == 0);
+	if (code != 500)
+		fprintf(stderr, "FAIL: HTTP %ld want 500 body_len=%zu\n",
+			code, body ? strlen(body) : 0);
+	ASSERT(code == 500);
+	ASSERT(body != NULL);
+	parsed = cJSON_Parse(body);
+	if (!parsed)
+		fprintf(stderr, "FAIL: oversized ASAP body is not JSON: %.200s\n",
+			body);
+	ASSERT(parsed != NULL);
+	cJSON_Delete(parsed);
+	ASSERT(asap_error_code_is(body, -32603));
+	ASSERT(strstr(body, "exceeds gateway buffer") != NULL);
+	free(body);
+	if (token && token[0]) {
+		ASSERT(asap_log_outbound_count(token, &out_after) == 0);
+		ASSERT(out_after == out_before);
+	}
+	return 0;
+}
+
 static int test_manifest(void)
 {
 	long code;
@@ -468,12 +877,53 @@ static int test_asap_body_over_max(void)
 	long code;
 	char *body = NULL;
 	const char payload[] = "{}";
-	int r = http_post_raw(gw_url("/asap"), payload, sizeof(payload) - 1, "1000001",
+	/* ASAP_BODY_MAX is 1 MiB (1048576). 1000001 is still under that cap. */
+	int r = http_post_raw(gw_url("/asap"), payload, sizeof(payload) - 1, "1048577",
 			      &code, &body);
 	ASSERT(r == 0);
 	ASSERT(code == 413);
 	if (body)
 		free(body);
+	return 0;
+}
+
+/*
+ * POST /asap allocates a 1 MiB dynamic buffer. A leftover Content-Length check
+ * still compared against the 64 KiB static cap used by PUT /api/config, so a
+ * valid state.query just over 64 KiB was 413'd before parse.
+ */
+static int test_asap_body_over_static_cap_accepted(void)
+{
+	enum { PAD = 70000 };
+	const char prefix[] =
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"asap.send\",\"params\":{"
+		"\"id\":\"e1\",\"asap_version\":\"2.1\","
+		"\"sender\":\"urn:from\",\"recipient\":\"urn:to\","
+		"\"payload_type\":\"state.query\",\"payload\":{\"pad\":\"";
+	const char suffix[] = "\"}}}";
+	size_t prefix_len = strlen(prefix);
+	size_t suffix_len = strlen(suffix);
+	size_t total = prefix_len + (size_t)PAD + suffix_len;
+	char *payload;
+	long code = 0;
+	char *body = NULL;
+	int r;
+
+	payload = malloc(total + 1U);
+	ASSERT(payload != NULL);
+	memcpy(payload, prefix, prefix_len);
+	memset(payload + prefix_len, 'A', (size_t)PAD);
+	memcpy(payload + prefix_len + (size_t)PAD, suffix, suffix_len + 1U);
+	ASSERT(total > 65536U);
+	ASSERT(total < (1024U * 1024U));
+	r = http_post(gw_url("/asap"), payload, &code, &body);
+	free(payload);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "\"result\"") != NULL);
+	ASSERT(strstr(body, "sessions") != NULL);
+	free(body);
 	return 0;
 }
 
@@ -623,6 +1073,27 @@ static int test_api_config_put_invalid_toml(const char *token)
 	return 0;
 }
 
+static int test_api_config_put_rejects_oversized_body(const char *token)
+{
+	long code;
+	char *body = NULL;
+	char *huge;
+	size_t n = 70000;
+	int r;
+	huge = malloc(n + 1);
+	ASSERT(huge != NULL);
+	memset(huge, 'a', n);
+	huge[n] = '\0';
+	r = http_put_auth(gw_url("/api/config"), token, huge, &code, &body);
+	free(huge);
+	ASSERT(r == 0);
+	ASSERT(code == 413);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "large") != NULL || strstr(body, "error") != NULL);
+	free(body);
+	return 0;
+}
+
 static int test_api_config_put_valid(const char *token, int port, const char *config_path)
 {
 	long code;
@@ -649,6 +1120,38 @@ static int test_api_config_put_valid(const char *token, int port, const char *co
 	disk_buf[sizeof(disk_buf) - 1] = '\0';
 	fclose(disk_fp);
 	ASSERT(strstr(disk_buf, "integration_updated") != NULL);
+	return 0;
+}
+
+static int test_api_config_put_json(const char *token, int port)
+{
+	long code;
+	char *body = NULL;
+	char json[256];
+	int r;
+	snprintf(json, sizeof(json),
+		 "{\"model\":\"patched-model\",\"max_tokens\":2048,\"temperature\":0.5,"
+		 "\"gateway_host\":\"127.0.0.1\",\"gateway_port\":%d}",
+		 port);
+	r = http_put_auth(gw_url("/api/config"), token, json, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "\"ok\":true") != NULL || strstr(body, "\"ok\": true") != NULL);
+	free(body);
+	body = NULL;
+	r = http_get_auth(gw_url("/api/config"), token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "\"patched-model\"") != NULL);
+	ASSERT(strstr(body, "\"max_tokens\":2048") != NULL ||
+	       strstr(body, "\"max_tokens\": 2048") != NULL);
+	ASSERT(strstr(body, "\"temperature\":0.5") != NULL ||
+	       strstr(body, "\"temperature\": 0.5") != NULL);
+	ASSERT(strstr(body, "\"gateway_host\":\"127.0.0.1\"") != NULL ||
+	       strstr(body, "\"gateway_host\": \"127.0.0.1\"") != NULL);
+	free(body);
 	return 0;
 }
 
@@ -806,6 +1309,105 @@ static int test_api_asap_log_401(void)
 	ASSERT(code == 401);
 	free(body);
 	return 0;
+}
+
+#define SHUTDOWN_LOAD_THREADS 4
+#define SHUTDOWN_LOAD_START_SPINS 50
+
+/* Bearer GETs that stay in-flight across SIGTERM so auth_validate_token
+ * still runs while cleanup_subsystems joins the lws thread. */
+struct shutdown_load {
+	char url[256];
+	const char *token;
+	volatile sig_atomic_t stop;
+	volatile sig_atomic_t started;
+};
+
+static void *shutdown_load_thread(void *arg)
+{
+	struct shutdown_load *load = (struct shutdown_load *)arg;
+	while (!load->stop) {
+		long code = 0;
+		char *body = NULL;
+		load->started = 1;
+		(void)http_get_auth(load->url, load->token, &code, &body);
+		free(body);
+	}
+	return NULL;
+}
+
+static int shutdown_load_spawn(struct shutdown_load *load, pthread_t *thds, int n)
+{
+	int i;
+	int ncreated = 0;
+	for (i = 0; i < n; i++) {
+		if (pthread_create(&thds[ncreated], NULL, shutdown_load_thread, load) != 0)
+			continue;
+		ncreated++;
+	}
+	return ncreated;
+}
+
+static void shutdown_load_wait_started(const struct shutdown_load *load)
+{
+	int i;
+	for (i = 0; i < SHUTDOWN_LOAD_START_SPINS; i++) {
+		struct timespec delay = { 0, 10000000L };
+		if (load->started)
+			return;
+		(void)nanosleep(&delay, NULL);
+	}
+}
+
+static void shutdown_load_join(struct shutdown_load *load, pthread_t *thds, int ncreated)
+{
+	int i;
+	load->stop = 1;
+	for (i = 0; i < ncreated; i++)
+		(void)pthread_join(thds[i], NULL);
+}
+
+static int shutdown_crash_status(int status)
+{
+	int sig;
+	if (!WIFSIGNALED(status))
+		return 0;
+	sig = WTERMSIG(status);
+	if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS || sig == SIGILL) {
+		fprintf(stderr, "FAIL: gateway crashed on shutdown with signal %d\n", sig);
+		return 1;
+	}
+	return 0;
+}
+
+static int test_shutdown_does_not_crash(pid_t pid, const char *token, int *reaped)
+{
+	struct shutdown_load load;
+	pthread_t thds[SHUTDOWN_LOAD_THREADS];
+	int ncreated = 0;
+	int status = 0;
+	if (reaped)
+		*reaped = 0;
+	memset(&load, 0, sizeof(load));
+	if (token && token[0]) {
+		(void)curl_global_init(CURL_GLOBAL_DEFAULT);
+		load.token = token;
+		snprintf(load.url, sizeof(load.url), "%s/api/status", g_base_url);
+		ncreated = shutdown_load_spawn(&load, thds, SHUTDOWN_LOAD_THREADS);
+		shutdown_load_wait_started(&load);
+	}
+	if (kill(pid, SIGTERM) != 0) {
+		shutdown_load_join(&load, thds, ncreated);
+		return 1;
+	}
+	if (waitpid(pid, &status, 0) != pid) {
+		shutdown_load_join(&load, thds, ncreated);
+		return 1;
+	}
+	if (reaped)
+		*reaped = 1;
+	shutdown_load_join(&load, thds, ncreated);
+	return shutdown_crash_status(status);
 }
 
 static int test_api_asap_log(const char *token)
@@ -1031,6 +1633,19 @@ int main(int argc, char **argv)
 	}
 	char token[128] = {0};
 	int failed = 0;
+	int shutdown_reaped = 0;
+	if (test_ipv6_hex_kind_v4mapped_any() != 0) {
+		fprintf(stderr, "test_ipv6_hex_kind_v4mapped_any failed\n");
+		failed++;
+	}
+	if (test_http_listen_iface() != 0) {
+		fprintf(stderr, "test_http_listen_iface failed\n");
+		failed++;
+	}
+	if (test_listen_bound_to_loopback(port) != 0) {
+		fprintf(stderr, "test_listen_bound_to_loopback failed\n");
+		failed++;
+	}
 	if (test_health() != 0) { fprintf(stderr, "test_health failed\n"); failed++; }
 	if (test_pair(pairing_code, token, sizeof(token)) != 0) {
 		fprintf(stderr, "test_pair failed\n");
@@ -1050,12 +1665,30 @@ int main(int argc, char **argv)
 		failed++;
 	}
 	if (test_health_wellknown() != 0) { fprintf(stderr, "test_health_wellknown failed\n"); failed++; }
+	/*
+	 * Per-IP /asap is ASAP_RATE_LIMIT_RPM (10) per 60s, counted in
+	 * handle_asap after dyn malloc. CL > 1 MiB 413s at LWS init and is
+	 * not counted. Seven POSTs reach handle_asap (invalid_body,
+	 * missing_fields, task_request, mcp_tool_call, mcp_unknown_tool,
+	 * oversized_response, body_over_static_cap_accepted). Headroom is 3.
+	 */
 	if (test_asap_body_over_max() != 0) {
 		fprintf(stderr, "test_asap_body_over_max failed\n");
 		failed++;
 	}
+	if (test_asap_body_over_static_cap_accepted() != 0) {
+		fprintf(stderr, "test_asap_body_over_static_cap_accepted failed\n");
+		failed++;
+	}
 	if (test_asap_invalid_body() != 0) { fprintf(stderr, "test_asap_invalid_body failed\n"); failed++; }
 	if (test_asap_missing_fields() != 0) { fprintf(stderr, "test_asap_missing_fields failed\n"); failed++; }
+	if (test_asap_task_request() != 0) { fprintf(stderr, "test_asap_task_request failed\n"); failed++; }
+	if (test_asap_mcp_tool_call() != 0) { fprintf(stderr, "test_asap_mcp_tool_call failed\n"); failed++; }
+	if (test_asap_mcp_unknown_tool() != 0) { fprintf(stderr, "test_asap_mcp_unknown_tool failed\n"); failed++; }
+	if (test_asap_rejects_oversized_response(token) != 0) {
+		fprintf(stderr, "test_asap_rejects_oversized_response failed\n");
+		failed++;
+	}
 	if (test_api_asap_log_401() != 0) { fprintf(stderr, "test_api_asap_log_401 failed\n"); failed++; }
 	if (test_api_hardware_board_401() != 0) {
 		fprintf(stderr, "test_api_hardware_board_401 failed\n");
@@ -1079,8 +1712,16 @@ int main(int argc, char **argv)
 			fprintf(stderr, "test_api_config_put_invalid_toml failed\n");
 			failed++;
 		}
+		if (test_api_config_put_rejects_oversized_body(token) != 0) {
+			fprintf(stderr, "test_api_config_put_rejects_oversized_body failed\n");
+			failed++;
+		}
 		if (test_api_config_put_valid(token, port, config_path) != 0) {
 			fprintf(stderr, "test_api_config_put_valid failed\n");
+			failed++;
+		}
+		if (test_api_config_put_json(token, port) != 0) {
+			fprintf(stderr, "test_api_config_put_json failed\n");
 			failed++;
 		}
 		if (test_api_status_get(token) != 0) { fprintf(stderr, "test_api_status_get failed\n"); failed++; }
@@ -1110,8 +1751,14 @@ int main(int argc, char **argv)
 			failed++;
 		}
 	}
-	kill(pid, SIGTERM);
-	waitpid(pid, NULL, 0);
+	if (test_shutdown_does_not_crash(pid, token, &shutdown_reaped) != 0) {
+		fprintf(stderr, "test_shutdown_does_not_crash failed\n");
+		failed++;
+		if (!shutdown_reaped) {
+			kill(pid, SIGKILL);
+			waitpid(pid, NULL, 0);
+		}
+	}
 	unlink(config_path);
 	unlink(tokens_path);
 	unlink(pairing_file);

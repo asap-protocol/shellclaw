@@ -53,6 +53,8 @@ memory_limit_mb = 64
 cpu_limit_percent = 50
 network = false
 workspace_only = true
+# Separate from ~/.shellclaw so file/shell tools cannot read pairing tokens or memory.db.
+workspace_path = "~/.shellclaw/workspace"
 
 [heartbeat]
 enabled = true
@@ -74,6 +76,13 @@ description = "C-native edge-AI ASAP agent on NVIDIA Jetson Orin Nano Super (CUD
 # Production: set to your HTTPS origin before marketplace registration (example.com is dev-only).
 public_base_url = "https://shellclaw.example.com"
 registry_url = "https://raw.githubusercontent.com/asap-protocol/asap-protocol/main/registry.json"
+# POST /asap is protocol-public (rate-limited, not Bearer). Empty trusted_senders
+# allows every sender URN. After inbound dispatch is wired, a trusted (or, with
+# an empty list, any) sender can run task.request (agent_run + tool table) and
+# mcp.tool_call (direct tool execute, no LLM). Default gateway bind is 127.0.0.1.
+# Set this in production before exposing the gateway so sessions keyed as
+# asap:<sender> cannot be spoofed and local tools are not open to any URN.
+# trusted_senders = ["urn:asap:agent:peer"]
 
 [asap.skill_descriptions]
 # assistant = "Override text for manifest capabilities.skills[].description"

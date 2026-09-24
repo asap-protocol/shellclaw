@@ -148,7 +148,7 @@ int asap_envelope_from_object(const cJSON *obj, cJSON *rpc_id, asap_envelope_t *
 	cJSON *rid_temp = NULL;
 
 	if (err_out) *err_out = NULL;
-	if (!obj || !cJSON_IsObject(r) || !out) return -1;
+	if (!obj || !cJSON_IsObject(r) || !out) return -1; /* caller still owns rpc_id */
 	if (!rpc_id) {
 		rid_temp = cJSON_CreateNull();
 		if (!rid_temp) return -1;
@@ -328,7 +328,7 @@ int asap_envelope_parse_jsonrpc_response(const char *json, asap_envelope_t *out,
 				if (errmsg && errlen && cJSON_IsString(m) && m->valuestring) (void)snprintf(errmsg, errlen, "%s", m->valuestring);
 				cJSON_Delete(tmp_err);
 			} else if (errmsg && errlen) (void)snprintf(errmsg, errlen, "Invalid result envelope");
-			cJSON_Delete(rpc_id);
+			/* parse_fail already owns rpc_id, same as asap_envelope_parse (Refs: #84). */
 			cJSON_Delete(root);
 			return -1;
 		}

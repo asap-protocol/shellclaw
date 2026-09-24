@@ -15,6 +15,7 @@
 
 #ifdef SHELLCLAW_TEST
 extern int anthropic_parse_response_for_test(const char *json, provider_response_t *response);
+extern void anthropic_test_fail_next_reallocs(int n);
 #endif
 
 static const char *TMP_CONFIG = "/tmp/shellclaw_test_anthropic_config.toml";
@@ -154,6 +155,102 @@ static int test_parse_null_json_returns_error(void)
 	provider_response_clear(&response);
 	return 0;
 }
+
+static int test_parse_text_past_initial_cap(void)
+{
+	char text[301];
+	char body[384];
+	provider_response_t response = {0};
+	memset(text, 'A', 300);
+	text[300] = '\0';
+	ASSERT(snprintf(body, sizeof(body),
+	                "{\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]}", text) < (int)sizeof(body));
+	ASSERT(anthropic_parse_response_for_test(body, &response) == 0);
+	ASSERT(response.error == 0);
+	ASSERT(response.content != NULL);
+	ASSERT(strlen(response.content) == 300);
+	ASSERT(response.content[0] == 'A' && response.content[299] == 'A');
+	provider_response_clear(&response);
+	return 0;
+}
+
+static int fill_tool_use_body(char *dst, size_t dst_sz, size_t n)
+{
+	size_t off = 0;
+	int w;
+	size_t i;
+	w = snprintf(dst, dst_sz, "{\"content\":[");
+	if (w < 0 || (size_t)w >= dst_sz)
+		return -1;
+	off = (size_t)w;
+	for (i = 0; i < n; i++) {
+		w = snprintf(dst + off, dst_sz - off,
+		             "%s{\"type\":\"tool_use\",\"id\":\"t%zu\",\"name\":\"shell\",\"input\":{}}",
+		             i ? "," : "", i);
+		if (w < 0 || (size_t)w >= dst_sz - off)
+			return -1;
+		off += (size_t)w;
+	}
+	w = snprintf(dst + off, dst_sz - off, "]}");
+	if (w < 0 || (size_t)w >= dst_sz - off)
+		return -1;
+	return 0;
+}
+
+static int test_parse_six_tool_use_blocks(void)
+{
+	char body[1024];
+	provider_response_t response = {0};
+	ASSERT(fill_tool_use_body(body, sizeof(body), 6) == 0);
+	ASSERT(anthropic_parse_response_for_test(body, &response) == 0);
+	ASSERT(response.error == 0);
+	ASSERT(response.tool_calls_count == 6);
+	ASSERT(response.tool_calls != NULL);
+	ASSERT(response.tool_calls[0].id != NULL && strcmp(response.tool_calls[0].id, "t0") == 0);
+	ASSERT(response.tool_calls[5].id != NULL && strcmp(response.tool_calls[5].id, "t5") == 0);
+	provider_response_clear(&response);
+	return 0;
+}
+
+static int test_parse_text_realloc_failure_is_error(void)
+{
+	char text[301];
+	char body[384];
+	provider_response_t response = {0};
+	int ret;
+	memset(text, 'B', 300);
+	text[300] = '\0';
+	ASSERT(snprintf(body, sizeof(body),
+	                "{\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]}", text) < (int)sizeof(body));
+	anthropic_test_fail_next_reallocs(1);
+	ret = anthropic_parse_response_for_test(body, &response);
+	anthropic_test_fail_next_reallocs(0);
+	ASSERT(ret == -1);
+	ASSERT(response.error != 0);
+	ASSERT(response.content != NULL);
+	ASSERT(strstr(response.content, "Out of memory") != NULL);
+	provider_response_clear(&response);
+	return 0;
+}
+
+static int test_parse_tool_realloc_failure_is_error(void)
+{
+	char body[1024];
+	provider_response_t response = {0};
+	int ret;
+	ASSERT(fill_tool_use_body(body, sizeof(body), 6) == 0);
+	anthropic_test_fail_next_reallocs(1);
+	ret = anthropic_parse_response_for_test(body, &response);
+	anthropic_test_fail_next_reallocs(0);
+	ASSERT(ret == -1);
+	ASSERT(response.error != 0);
+	ASSERT(response.content != NULL);
+	ASSERT(strstr(response.content, "Out of memory") != NULL);
+	ASSERT(response.tool_calls == NULL);
+	ASSERT(response.tool_calls_count == 0);
+	provider_response_clear(&response);
+	return 0;
+}
 #endif
 
 int main(void)
@@ -169,6 +266,10 @@ int main(void)
 	RUN(test_parse_empty_content_array_returns_zero());
 	RUN(test_parse_valid_text_block_returns_content());
 	RUN(test_parse_null_json_returns_error());
+	RUN(test_parse_text_past_initial_cap());
+	RUN(test_parse_six_tool_use_blocks());
+	RUN(test_parse_text_realloc_failure_is_error());
+	RUN(test_parse_tool_realloc_failure_is_error());
 #endif
 	printf("test_anthropic: all tests passed\n");
 	return 0;

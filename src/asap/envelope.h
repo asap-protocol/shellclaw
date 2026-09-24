@@ -72,7 +72,11 @@ int asap_envelope_parse(const char *json, asap_envelope_t *out, cJSON **err_out)
  * jsonrpc_request_id.
  *
  * @param obj     Object with ASAP envelope members (not NULL)
- * @param rpc_id  Request id for error echo (not consumed)
+ * @param rpc_id  Request id for error echo. Envelope-field validation
+ *                failures free this pointer. Early argument checks
+ *                (!obj, a non-object @p obj, or !out) return -1
+ *                without consuming it. On success it is not consumed;
+ *                the caller may assign it to out->jsonrpc_request_id.
  * @param out     Envelope; must be zeroed (#asap_envelope_init) or cleared first
  *                because the implementation clears the struct on entry.
  * @param err_out Optional error root

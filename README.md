@@ -86,7 +86,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR workflow, coding standards, and th
 
 The **main agent loop** is single-threaded: memory, providers, channels and tools keep much of their state in process-wide data initialized at startup. **Inbound HTTP/WebSocket paths** (for example ASAP `POST /asap` and the WebSocket chat dispatcher) may run on **libwebsockets worker threads**. 
 
-Those code paths must call `agent_lock()` before `agent_run()` and `agent_unlock()` afterward so only one `agent_run` uses shared session/memory state at a time. Do not call `agent_run`, provider `chat`, or memory functions from arbitrary new threads without the same discipline.
+Those code paths must call `agent_lock()` / `agent_unlock()` around `agent_run()`, inbound ASAP `mcp.tool_call` execute, and `state.query` memory-store reads so only one thread uses shared session/memory state at a time. Do not call `agent_run`, provider `chat`, or memory functions from arbitrary new threads without the same discipline.
 
 ## Architecture
 

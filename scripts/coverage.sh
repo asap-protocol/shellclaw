@@ -13,7 +13,7 @@ LCOV_RC="lcov_branch_coverage=0"
 mkdir -p "$COVERAGE_DIR"
 rm -f "$COVERAGE_DIR"/*.info
 
-TESTS="test_config test_memory test_skill test_provider test_anthropic test_openai test_local_provider test_router test_heartbeat test_agent test_reload test_channel test_cli test_shell test_file test_telegram test_discord_helpers test_web_search test_cron test_context test_dispatch test_crypto test_hardware_stub test_board_detect test_hardware_libgpiod test_hardware_i2c test_hardware_camera test_pin_tables test_hardware_init test_hardware_tools test_registry test_ws test_manifest_build test_manifest_keys test_jcs test_asap_envelope test_asap_ulid test_asap_client test_asap_registry test_asap_server test_asap_invoke test_asap_log test_sandbox test_allowlist test_rate_limit test_auth test_static"
+TESTS="test_config test_config_patch test_memory test_skill test_provider test_anthropic test_openai test_local_provider test_router test_heartbeat test_agent test_reload test_channel test_cli test_shell test_file test_telegram test_discord_helpers test_web_search test_cron test_context test_dispatch test_crypto test_hardware_stub test_board_detect test_hardware_libgpiod test_hardware_i2c test_hardware_camera test_pin_tables test_hardware_init test_hardware_tools test_registry test_ws test_manifest_build test_manifest_keys test_jcs test_asap_envelope test_asap_ulid test_asap_client test_asap_registry test_asap_server test_asap_invoke test_asap_log test_sandbox test_allowlist test_rate_limit test_auth test_static"
 # ASAP tests must stay aligned with ASAP_UNIT_TESTS in the top-level Makefile.
 if [ "${GATEWAY:-}" = "1" ]; then
 	TESTS="$TESTS test_gateway_http"

@@ -6,6 +6,7 @@
 
 #include "gateway/routes.h"
 #include "gateway/routes_hardware.h"
+#include "gateway/http.h"
 #include "gateway/auth.h"
 #include "gateway/rate_limit.h"
 #include "channels/channel.h"
@@ -14,14 +15,22 @@
 #include "asap/envelope.h"
 #include "asap/server.h"
 #include "asap/log.h"
+#include "core/agent.h"
+#include "core/bootstrap.h"
 #include "core/config.h"
+#include "core/config_patch.h"
 #include "core/memory.h"
+#include "core/reload.h"
 #include "core/skill.h"
 #include "providers/provider.h"
 #include "tools/context.h"
 #include "tools/cron.h"
 #include "cJSON.h"
 #include <libwebsockets.h>
+#include <fcntl.h>
+#include <libgen.h>
+#include <limits.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -186,9 +195,105 @@ static void handle_config_get(const config_t *cfg, char *buf, size_t size, int *
 	}
 }
 
+static int body_is_json_object(const char *body, size_t body_len)
+{
+	size_t i;
+	for (i = 0; i < body_len; i++) {
+		unsigned char c = (unsigned char)body[i];
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+			continue;
+		return c == '{';
+	}
+	return 0;
+}
+
+static int config_put_patch_json(http_server_ctx_t *ctx, const char *body, size_t body_len,
+                                 char **out_toml, size_t *out_len, char *buf, size_t size,
+                                 int *status)
+{
+	char *json_nul;
+	char errbuf[256] = {0};
+	json_nul = malloc(body_len + 1);
+	if (!json_nul) {
+		json_error(buf, size, status, 500, "Out of memory");
+		return -1;
+	}
+	memcpy(json_nul, body, body_len);
+	json_nul[body_len] = '\0';
+	if (config_patch_dashboard_json(ctx->config_path, json_nul, out_toml, out_len, errbuf,
+	                                sizeof(errbuf)) != 0) {
+		free(json_nul);
+		json_error(buf, size, status, 400, errbuf[0] ? errbuf : "Invalid config patch");
+		return -1;
+	}
+	free(json_nul);
+	return 0;
+}
+
+static int write_all_fd(int fd, const char *buf, size_t len)
+{
+	size_t off = 0;
+	while (off < len) {
+		ssize_t n = write(fd, buf + off, len - off);
+		if (n <= 0)
+			return -1;
+		off += (size_t)n;
+	}
+	return 0;
+}
+
+static void discard_cfg_tmp(int fd, const char *path)
+{
+	if (fd >= 0)
+		close(fd);
+	if (path)
+		unlink(path);
+}
+
+/* Unique temp so a planted config.toml.tmp symlink is not the sidecar. Caller renames. */
+static int write_config_temp(const char *path, const char *content, size_t len,
+                             char *tmp_out, size_t tmp_cap)
+{
+	char path_copy[PATH_MAX];
+	char *dir;
+	int fd;
+	int n;
+
+	if (!path || !content || !tmp_out || tmp_cap == 0)
+		return -1;
+	if (snprintf(path_copy, sizeof(path_copy), "%s", path) >= (int)sizeof(path_copy))
+		return -1;
+	dir = dirname(path_copy);
+	if (!dir || dir[0] == '\0')
+		return -1;
+	n = snprintf(tmp_out, tmp_cap, "%s/.sc-cfg-XXXXXX", dir);
+	if (n < 0 || (size_t)n >= tmp_cap)
+		return -1;
+	fd = mkstemp(tmp_out);
+	if (fd < 0)
+		return -1;
+	(void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+	if (fchmod(fd, 0600) != 0 || write_all_fd(fd, content, len) != 0 || fsync(fd) != 0) {
+		discard_cfg_tmp(fd, tmp_out);
+		return -1;
+	}
+	if (close(fd) != 0) {
+		discard_cfg_tmp(-1, tmp_out);
+		return -1;
+	}
+	return 0;
+}
+
 static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t body_len,
                               char *buf, size_t size, int *status)
 {
+	char *patched_body = NULL;
+	size_t patched_len = 0;
+	char errbuf[256] = {0};
+	const char *write_body = body;
+	size_t write_len = body_len;
+	char tmp_path[PATH_MAX];
+	config_t *cfg = NULL;
 	if (!ctx->config_path || !body || body_len == 0) {
 		json_error(buf, size, status, 400, "Bad request");
 		return;
@@ -197,40 +302,54 @@ static void handle_config_put(http_server_ctx_t *ctx, const char *body, size_t b
 		json_error(buf, size, status, 400, "Config too large");
 		return;
 	}
-	size_t path_len = strlen(ctx->config_path);
-	char *tmp_path = malloc(path_len + 8);
-	if (!tmp_path) { json_error(buf, size, status, 500, "Out of memory"); return; }
-	snprintf(tmp_path, path_len + 8, "%s.tmp", ctx->config_path);
-	FILE *f = fopen(tmp_path, "w");
-	if (!f) {
-		free(tmp_path);
+	if (body_is_json_object(body, body_len)) {
+		if (config_put_patch_json(ctx, body, body_len, &patched_body, &patched_len, buf, size,
+		                          status) != 0)
+			return;
+		write_body = patched_body;
+		write_len = patched_len;
+	}
+	if (write_config_temp(ctx->config_path, write_body, write_len, tmp_path, sizeof(tmp_path)) != 0) {
+		free(patched_body);
 		json_error(buf, size, status, 500, "Failed to write config");
 		return;
 	}
-	size_t written = fwrite(body, 1, body_len, f);
-	fclose(f);
-	if (written != body_len) {
-		unlink(tmp_path);
-		free(tmp_path);
-		json_error(buf, size, status, 500, "Failed to write config");
-		return;
-	}
-	config_t *cfg = NULL;
-	char errbuf[256] = {0};
 	if (config_load(tmp_path, &cfg, errbuf, sizeof(errbuf)) != 0) {
 		unlink(tmp_path);
-		free(tmp_path);
+		free(patched_body);
 		json_error(buf, size, status, 400, errbuf[0] ? errbuf : "Invalid TOML");
 		return;
 	}
 	config_free(cfg);
 	if (rename(tmp_path, ctx->config_path) != 0) {
 		unlink(tmp_path);
-		free(tmp_path);
+		free(patched_body);
 		json_error(buf, size, status, 500, "Failed to save config");
 		return;
 	}
-	free(tmp_path);
+	free(patched_body);
+	/* Dashboard/TOML save: swap live cfg now instead of waiting for SIGHUP.
+	 * agent_lock matches the SIGHUP path in main_loop so the two threads cannot
+	 * enqueue the same pointer. The gateway pointer is published before unlock. */
+	{
+		config_t *live_cfg = bootstrap_get_cfg();
+		int reload_rc;
+		if (!live_cfg) {
+			json_error(buf, size, status, 500, "Config saved but live reload failed");
+			return;
+		}
+		agent_lock();
+		reload_rc = try_config_reload(&live_cfg);
+		/* test_reload rebuilds reload.o without SHELLCLAW_GATEWAY, so the
+		 * publish inside try_config_reload may be compiled out of this binary. */
+		if (reload_rc == 0)
+			http_set_live_config(bootstrap_get_cfg());
+		agent_unlock();
+		if (reload_rc != 0) {
+			json_error(buf, size, status, 500, "Config saved but live reload failed");
+			return;
+		}
+	}
 	*status = 200;
 	json_response(buf, size, status, "{\"ok\":true}");
 }
@@ -389,30 +508,52 @@ static void handle_session_delete(const char *id, char *buf, size_t size, int *s
 	json_response(buf, size, status, "{\"ok\":true}");
 }
 
+static void free_cron_job_rows(cron_job_row_t *rows, int n)
+{
+	int i;
+	if (!rows || n <= 0) return;
+	for (i = 0; i < n; i++)
+		cron_job_row_free(&rows[i]);
+}
+
 static void handle_cron_list(char *buf, size_t size, int *status)
 {
 	cron_job_row_t *rows = calloc(64, sizeof(cron_job_row_t));
+	int n;
+	int i;
 	if (!rows) { json_error(buf, size, status, 500, "Out of memory"); return; }
-	int n = cron_job_list(rows, 64);
+	n = cron_job_list(rows, 64);
+	if (n < 0) {
+		free(rows);
+		json_error(buf, size, status, 500, "Internal error");
+		return;
+	}
 	cJSON *arr = cJSON_CreateArray();
-	if (!arr) { free(rows); json_error(buf, size, status, 500, "Internal error"); return; }
-	for (int i = 0; i < n; i++) {
+	if (!arr) {
+		free_cron_job_rows(rows, n);
+		free(rows);
+		json_error(buf, size, status, 500, "Internal error");
+		return;
+	}
+	for (i = 0; i < n; i++) {
 		cJSON *obj = cJSON_CreateObject();
 		if (!obj) {
+			free_cron_job_rows(rows, n);
 			free(rows);
 			cJSON_Delete(arr);
 			json_error(buf, size, status, 500, "Internal error");
 			return;
 		}
 		cJSON_AddItemToObject(obj, "id", cJSON_CreateString(rows[i].id));
-		cJSON_AddItemToObject(obj, "schedule", cJSON_CreateString(rows[i].schedule));
-		cJSON_AddItemToObject(obj, "message", cJSON_CreateString(rows[i].message));
+		cJSON_AddItemToObject(obj, "schedule", cJSON_CreateString(rows[i].schedule ? rows[i].schedule : ""));
+		cJSON_AddItemToObject(obj, "message", cJSON_CreateString(rows[i].message ? rows[i].message : ""));
 		cJSON_AddItemToObject(obj, "channel", cJSON_CreateString(rows[i].channel));
 		cJSON_AddItemToObject(obj, "recipient", cJSON_CreateString(rows[i].recipient));
 		cJSON_AddItemToObject(obj, "next_run", cJSON_CreateNumber((double)rows[i].next_run));
 		cJSON_AddItemToObject(obj, "enabled", cJSON_CreateBool(rows[i].enabled));
 		cJSON_AddItemToArray(arr, obj);
 	}
+	free_cron_job_rows(rows, n);
 	free(rows);
 	json_print_to_buf(arr, buf, size, status);
 	cJSON_Delete(arr);
@@ -555,6 +696,47 @@ static void handle_asap_log_get(char *buf, size_t size, int *status)
 	free(s);
 }
 
+/**
+ * Bind the running process into an inbound ASAP ctx. handle_asap used to
+ * set only cfg, so task.request always failed with "server missing cfg or
+ * provider" and mcp.tool_call saw an empty tool table (#53).
+ */
+static void asap_ctx_bind_bootstrap(asap_server_ctx_t *asap_ctx, const config_t *http_cfg,
+	agent_tool_t *flat_tools, size_t tools_cap)
+{
+	memset(asap_ctx, 0, sizeof *asap_ctx);
+	asap_ctx->cfg = http_cfg ? http_cfg : bootstrap_get_cfg();
+	asap_ctx->provider = bootstrap_get_provider();
+	asap_ctx->tool_count = bootstrap_fill_agent_tools(flat_tools, tools_cap);
+	asap_ctx->tools = flat_tools;
+}
+
+/**
+ * Copy serialized JSON-RPC into the gateway HTTP buffer. Truncation
+ * produced invalid JSON for callers (#61); reject instead.
+ * Takes ownership of @p resp_json.
+ * @return 0 if copied, -1 if rejected as too large.
+ */
+static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_json)
+{
+	size_t rlen;
+	rlen = strlen(resp_json);
+	if (rlen >= size) {
+		char too_big[96];
+		snprintf(too_big, sizeof too_big,
+			"ASAP response length %zu exceeds gateway buffer %zu",
+			rlen, size);
+		free(resp_json);
+		jsonrpc_error(buf, size, status, 500, -32603, too_big);
+		return -1;
+	}
+	*status = 200;
+	memcpy(buf, resp_json, rlen);
+	buf[rlen] = '\0';
+	free(resp_json);
+	return 0;
+}
+
 static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 	const char *body, size_t body_len, char *buf, size_t size, int *status)
 {
@@ -584,11 +766,14 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 	snippet = in.payload ? cJSON_PrintUnformatted(in.payload) : NULL;
 	asap_log_append_in(in.payload_type, in.id, snippet);
 	free(snippet);
-	memset(&asap_ctx, 0, sizeof asap_ctx);
-	asap_ctx.cfg = ctx ? ctx->cfg : NULL;
-	err_msg[0] = '\0';
-	asap_envelope_init(&out);
-	rc = asap_server_handle(&in, &out, &asap_ctx, err_msg, sizeof err_msg);
+	{
+		agent_tool_t flat_tools[SHELLCLAW_MAX_TOOLS];
+		asap_ctx_bind_bootstrap(&asap_ctx, ctx ? ctx->cfg : NULL,
+			flat_tools, SHELLCLAW_MAX_TOOLS);
+		err_msg[0] = '\0';
+		asap_envelope_init(&out);
+		rc = asap_server_handle(&in, &out, &asap_ctx, err_msg, sizeof err_msg);
+	}
 	asap_envelope_clear(&in);
 	if (rc != 0) {
 		asap_envelope_clear(&out);
@@ -596,22 +781,19 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 		return;
 	}
 	resp_json = asap_envelope_to_jsonrpc_string(&out, NULL);
+	if (!resp_json) {
+		asap_envelope_clear(&out);
+		jsonrpc_error(buf, size, status, 500, -32603, "failed to serialize response");
+		return;
+	}
+	if (write_asap_jsonrpc(buf, size, status, resp_json) != 0) {
+		asap_envelope_clear(&out);
+		return;
+	}
 	snippet = out.payload ? cJSON_PrintUnformatted(out.payload) : NULL;
 	asap_log_append_out(out.payload_type, out.id, snippet);
 	free(snippet);
 	asap_envelope_clear(&out);
-	if (!resp_json) {
-		jsonrpc_error(buf, size, status, 500, -32603, "failed to serialize response");
-		return;
-	}
-	*status = 200;
-	{
-		size_t rlen = strlen(resp_json);
-		if (rlen >= size) rlen = size - 1;
-		memcpy(buf, resp_json, rlen);
-		buf[rlen] = '\0';
-	}
-	free(resp_json);
 }
 
 static void handle_well_known(http_server_ctx_t *ctx, const char *uri, int uri_len,
