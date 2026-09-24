@@ -192,11 +192,29 @@ int cron_job_list(cron_job_row_t *out, int max_count);
 /**
  * Get the next due job (next_run <= now, enabled).
  *
+ * Ties on next_run are ordered by id ascending.
+ *
  * @param now Current Unix timestamp.
  * @param out Filled with job data if found. Caller must cron_job_row_free().
  * @return 1 if found, 0 if none, -1 on error.
  */
 int cron_job_get_next_due(long long now, cron_job_row_t *out);
+
+/**
+ * Get the next due job after a (next_run, id) cursor.
+ *
+ * Uses the same order as cron_job_get_next_due(). Example:
+ *   if (cron_job_get_next_due_after(now, row.next_run, row.id, &next) == 1)
+ *       cron_job_row_free(&next);
+ *
+ * @param now       Current Unix timestamp.
+ * @param after_run next_run of the last row already visited.
+ * @param after_id  Id of the last row already visited (must be non-empty).
+ * @param out       Filled with job data if found. Caller must cron_job_row_free().
+ * @return 1 if found, 0 if none, -1 on error.
+ */
+int cron_job_get_next_due_after(long long now, long long after_run, const char *after_id,
+				cron_job_row_t *out);
 
 /**
  * Load a cron job by id.

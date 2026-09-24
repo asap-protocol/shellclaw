@@ -449,6 +449,53 @@ static int test_cron_job_rejects_oversized_text(void)
 	return 0;
 }
 
+/* An unacked earlier job must not hide another job that is also due. */
+static int test_cron_poll_offers_sibling_while_earlier_unacked(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_sibling.db";
+	const channel_t *cron_ch;
+	channel_incoming_msg_t msg;
+	cron_job_row_t row;
+	struct timespec t0;
+	struct timespec t1;
+	long elapsed_ms;
+	long long now;
+
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("job_a", "interval:60", "A", "cli", "default", now - 10, 1) == 0);
+	ASSERT(cron_job_create("job_b", "interval:60", "B", "cli", "default", now - 5, 1) == 0);
+	cron_ch = channel_cron_get();
+	ASSERT(cron_ch != NULL && cron_ch->poll != NULL);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 1);
+	ASSERT(msg.user_id != NULL);
+	ASSERT(strcmp(msg.user_id, "job_a") == 0);
+	channel_incoming_msg_clear(&msg);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+	ASSERT(cron_ch->poll(&msg, 2000) == 1);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	ASSERT(msg.user_id != NULL);
+	ASSERT(strcmp(msg.user_id, "job_b") == 0);
+	ASSERT(elapsed_ms < 400);
+	channel_incoming_msg_clear(&msg);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("job_a", &row) == 1);
+	ASSERT(row.next_run == now - 10);
+	cron_job_row_free(&row);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("job_b", &row) == 1);
+	ASSERT(row.next_run == now - 5);
+	cron_job_row_free(&row);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_interval_next_run());
@@ -469,6 +516,7 @@ int main(void)
 	RUN(test_cron_ack_fail_closed_on_parse_error());
 	RUN(test_cron_poll_waits_before_reoffer());
 	RUN(test_cron_job_rejects_oversized_text());
+	RUN(test_cron_poll_offers_sibling_while_earlier_unacked());
 	printf("test_cron: all tests passed\n");
 	return 0;
 }
