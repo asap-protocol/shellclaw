@@ -4,6 +4,8 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-25
+
 ### Fixed
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
 - Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
@@ -59,8 +61,6 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Document that protocol-public `POST /asap` can invoke local tools; production must set `[asap].trusted_senders` before exposing the gateway.
 
 ---
-
-## [1.0.0] - TBD
 
 **Phase 5: Edge AI Hardware & Release** — Jetson Orin Nano Super primary target.
 
