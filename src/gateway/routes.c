@@ -17,6 +17,7 @@
 #include "asap/log.h"
 #include "core/agent.h"
 #include "core/bootstrap.h"
+#include "core/dispatch.h"
 #include "core/config.h"
 #include "core/config_patch.h"
 #include "core/memory.h"
@@ -500,7 +501,7 @@ static void handle_sessions_list(char *buf, size_t size, int *status)
 
 static void handle_session_delete(const char *id, char *buf, size_t size, int *status)
 {
-	if (session_delete(id) != 0) {
+	if (dispatch_delete_session(id) != 0) {
 		json_error(buf, size, status, 404, "Session not found");
 		return;
 	}

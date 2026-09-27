@@ -43,6 +43,18 @@ static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_
 	return maybe_ack_cron(ch, msg);
 }
 
+int dispatch_delete_session(const char *session_id)
+{
+	int rc;
+	if (!session_id || session_id[0] == '\0')
+		return -1;
+	/* Serialize with agent_run so session_save cannot recreate the row. */
+	agent_lock();
+	rc = session_delete(session_id);
+	agent_unlock();
+	return rc;
+}
+
 int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 {
 	const char *text = msg->text ? msg->text : "";

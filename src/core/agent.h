@@ -54,6 +54,7 @@ int agent_run(const config_t *cfg, const char *session_id, const char *user_mess
  * Every agent_run() caller (main-loop handle_message, inbound ASAP HTTP,
  * WebSocket dispatcher) must hold this mutex for the duration of agent_run().
  * /reset in handle_message must also hold it around session_delete().
+ * Dashboard DELETE /api/sessions/:id must use dispatch_delete_session().
  * After a successful cron ch->send, handle_message re-takes it around
  * cron_ack_delivery() (SQLite amalgamation is SQLITE_THREADSAFE=0).
  * Inbound mcp.tool_call must hold it around tool execute (see #60).
