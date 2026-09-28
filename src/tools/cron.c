@@ -6,6 +6,7 @@
 
 #include "tools/cron.h"
 #include "crypto/crypto.h"
+#include "core/agent.h"
 #include "core/memory.h"
 #include "channels/channel.h"
 #include "core/config.h"
@@ -320,28 +321,39 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 {
 	cron_due_key_t keys[CRON_DUE_SCAN_MAX];
 	struct timespec mono;
-	long age = 0;
 	int n;
 	int i;
+	int wait_for_first = 0;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &mono) != 0)
 		memset(&mono, 0, sizeof(mono));
+	/* HTTP dashboard routes use this same connection (SQLITE_THREADSAFE=0).
+	 * Drop the lock before the re-offer sleep so that thread is not stalled. */
+	agent_lock();
 	n = cron_job_list_due(now, keys, CRON_DUE_SCAN_MAX);
-	if (n <= 0)
-		return 0;
-	for (i = 0; i < n; i++) {
-		if (!cron_due_is_returnable(keys[i].id, timeout_ms, &mono))
-			continue;
-		if (cron_job_get_by_id(keys[i].id, row) == 1)
-			return 1;
+	if (n > 0) {
+		for (i = 0; i < n; i++) {
+			if (!cron_due_is_returnable(keys[i].id, timeout_ms, &mono))
+				continue;
+			if (cron_job_get_by_id(keys[i].id, row) == 1) {
+				agent_unlock();
+				return 1;
+			}
+		}
+		if (cron_job_get_by_id(keys[0].id, row) == 1)
+			wait_for_first = 1;
 	}
-	if (cron_job_get_by_id(keys[0].id, row) != 1)
+	agent_unlock();
+	if (!wait_for_first)
 		return 0;
 	/* An id that never fit in the table has no age, so wait_remaining would return immediately. */
-	if (cron_offer_age_ms(row->id, &mono, &age))
-		cron_wait_remaining(row->id, timeout_ms);
-	else
-		cron_sleep_ms((long)timeout_ms);
+	{
+		long age = 0;
+		if (cron_offer_age_ms(row->id, &mono, &age))
+			cron_wait_remaining(row->id, timeout_ms);
+		else
+			cron_sleep_ms((long)timeout_ms);
+	}
 	return 1;
 }
 
