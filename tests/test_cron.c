@@ -124,6 +124,38 @@ static int test_invalid_schedule(void)
 	return 0;
 }
 
+/* A seconds value that does not fit in now+sec used to wrap next_run negative.
+ * Ack recomputes that sum, so the job stays due and the agent runs it forever. */
+static int test_interval_overflow_does_not_stay_due(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_interval_overflow.db";
+	const char *schedule = "interval:9223372036854775807";
+	cron_job_row_t row;
+	long long now;
+	long long next = 0;
+	long long floor_next;
+	long long ceil_next;
+
+	now = 1700000000;
+	ASSERT(cron_parse_next_run(schedule, now, &next) == -1);
+	ASSERT(cron_parse_next_run("interval:999999999999999999999", now, &next) == -1);
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("overflow", schedule, "msg", "cli", "default", now - 1, 1) == 0);
+	ASSERT(cron_ack_delivery("overflow") == 0);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("overflow", &row) == 1);
+	floor_next = now + 365LL * 24 * 3600 - 2;
+	ceil_next = now + 365LL * 24 * 3600 + 2;
+	ASSERT(row.next_run >= floor_next);
+	ASSERT(row.next_run <= ceil_next);
+	cron_job_row_free(&row);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 static int test_cron_job_crud_and_due(void)
 {
 	const char *path = "/tmp/shellclaw_test_cron.db";
@@ -659,6 +691,7 @@ int main(void)
 	RUN(test_cron_expr_skips_current_minute());
 	RUN(test_cron_expr_monthly_beyond_eight_days());
 	RUN(test_invalid_schedule());
+	RUN(test_interval_overflow_does_not_stay_due());
 	RUN(test_cron_job_crud_and_due());
 	RUN(test_cron_tool_execute());
 	RUN(test_one_shot_detection());
