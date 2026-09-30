@@ -414,6 +414,17 @@ const provider_t *provider_anthropic_get(void)
 	return &anthropic_provider;
 }
 
+void provider_anthropic_set_live_config(const config_t *cfg)
+{
+	if (cfg && s_anth_api_key)
+		s_anth_cfg = cfg;
+}
+
+const config_t *anthropic_live_config_for_test(void)
+{
+	return s_anth_cfg;
+}
+
 #ifdef SHELLCLAW_TEST
 int anthropic_parse_response_for_test(const char *json, provider_response_t *response)
 {

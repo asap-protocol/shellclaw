@@ -124,6 +124,10 @@ void provider_stub_b_set_chat_error_message(const char *message);
 
 /** Anthropic (Claude) provider. Messages API, tool_use. */
 const provider_t *provider_anthropic_get(void);
+/** After SIGHUP or dashboard reload: refresh model and max_tokens without re-init. */
+void provider_anthropic_set_live_config(const config_t *cfg);
+/** Config pointer Anthropic chat reads. NULL until init. For tests. */
+const config_t *anthropic_live_config_for_test(void);
 
 /** OpenAI provider. Chat Completions, tool_calls (function calling). */
 const provider_t *provider_openai_get(void);
