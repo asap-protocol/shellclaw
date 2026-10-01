@@ -265,6 +265,111 @@ static int do_request(const char *body, provider_response_t *response)
 	return ret;
 }
 
+static int append_one_tool_result(cJSON *content_arr, const provider_message_t *msg)
+{
+	cJSON *tr = cJSON_CreateObject();
+	if (!tr)
+		return -1;
+	if (!cJSON_AddStringToObject(tr, "type", "tool_result") ||
+	    !cJSON_AddStringToObject(tr, "tool_use_id", msg->tool_use_id ? msg->tool_use_id : "") ||
+	    !cJSON_AddStringToObject(tr, "content", msg->content ? msg->content : "")) {
+		cJSON_Delete(tr);
+		return -1;
+	}
+	cJSON_AddItemToArray(content_arr, tr);
+	return 0;
+}
+
+/* One user message must carry every tool_result for that assistant turn. */
+static int append_tool_result_message(cJSON *msg_arr, const provider_message_t *messages,
+                                      size_t message_count, size_t *index)
+{
+	cJSON *msg = cJSON_CreateObject();
+	cJSON *content_arr = cJSON_CreateArray();
+	if (!msg || !content_arr) {
+		cJSON_Delete(msg);
+		cJSON_Delete(content_arr);
+		return -1;
+	}
+	cJSON_AddItemToObject(msg, "role", cJSON_CreateString("user"));
+	cJSON_AddItemToObject(msg, "content", content_arr);
+	cJSON_AddItemToArray(msg_arr, msg);
+	for (;;) {
+		if (append_one_tool_result(content_arr, &messages[*index]) != 0)
+			return -1;
+		if (*index + 1 >= message_count || !messages[*index + 1].tool_use_id)
+			break;
+		(*index)++;
+	}
+	return 0;
+}
+static int append_assistant_tool_content(cJSON *msg, const provider_message_t *message)
+{
+	cJSON *content_arr = cJSON_CreateArray();
+	size_t k;
+	if (!content_arr)
+		return -1;
+	if (message->content && message->content[0] != '\0') {
+		cJSON *text_block = cJSON_CreateObject();
+		if (!text_block) {
+			cJSON_Delete(content_arr);
+			return -1;
+		}
+		cJSON_AddItemToObject(text_block, "type", cJSON_CreateString("text"));
+		cJSON_AddItemToObject(text_block, "text", cJSON_CreateString(message->content));
+		cJSON_AddItemToArray(content_arr, text_block);
+	}
+	for (k = 0; k < message->tool_calls_count; k++) {
+		const provider_tool_call_t *tc = &message->tool_calls[k];
+		cJSON *tu = cJSON_CreateObject();
+		cJSON *input;
+		if (!tu) {
+			cJSON_Delete(content_arr);
+			return -1;
+		}
+		cJSON_AddItemToObject(tu, "type", cJSON_CreateString("tool_use"));
+		cJSON_AddItemToObject(tu, "id", cJSON_CreateString(tc->id ? tc->id : ""));
+		cJSON_AddItemToObject(tu, "name", cJSON_CreateString(tc->name ? tc->name : ""));
+		input = tc->arguments && tc->arguments[0] ? cJSON_Parse(tc->arguments) : cJSON_CreateObject();
+		if (input)
+			cJSON_AddItemToObject(tu, "input", input);
+		cJSON_AddItemToArray(content_arr, tu);
+	}
+	cJSON_AddItemToObject(msg, "content", content_arr);
+	return 0;
+}
+
+static int append_anthropic_messages(cJSON *msg_arr, const provider_message_t *messages,
+                                     size_t message_count)
+{
+	size_t i;
+	for (i = 0; i < message_count; i++) {
+		const char *role = messages[i].role ? messages[i].role : "user";
+		cJSON *msg;
+		if (strcmp(role, "system") == 0)
+			continue;
+		if (messages[i].tool_use_id) {
+			if (append_tool_result_message(msg_arr, messages, message_count, &i) != 0)
+				return -1;
+			continue;
+		}
+		msg = cJSON_CreateObject();
+		if (!msg)
+			return -1;
+		cJSON_AddItemToArray(msg_arr, msg);
+		cJSON_AddItemToObject(msg, "role", cJSON_CreateString(role));
+		if (messages[i].tool_calls && messages[i].tool_calls_count > 0 &&
+		    strcmp(role, "assistant") == 0) {
+			if (append_assistant_tool_content(msg, &messages[i]) != 0)
+				return -1;
+		} else {
+			cJSON_AddItemToObject(msg, "content",
+			                      cJSON_CreateString(messages[i].content ? messages[i].content : ""));
+		}
+	}
+	return 0;
+}
+
 static int build_and_send(const provider_message_t *messages, size_t message_count,
                           const provider_tool_def_t *tools, size_t tool_count,
                           provider_response_t *response)
@@ -286,59 +391,12 @@ static int build_and_send(const provider_message_t *messages, size_t message_cou
 	}
 	cJSON *msg_arr = cJSON_CreateArray();
 	if (!msg_arr) { cJSON_Delete(root); provider_set_error(response, "Out of memory"); return -1; }
-	for (size_t i = 0; i < message_count; i++) {
-		const char *role = messages[i].role ? messages[i].role : "user";
-		if (strcmp(role, "system") == 0) continue;
-		cJSON *msg = cJSON_CreateObject();
-		if (!msg) {
-			cJSON_Delete(root);
-			provider_set_error(response, "Out of memory");
-			return -1;
-		}
-		cJSON_AddItemToObject(msg, "role", cJSON_CreateString(role));
-		if (messages[i].tool_use_id) {
-			cJSON *content_arr = cJSON_CreateArray();
-			if (content_arr) {
-				cJSON *tr = cJSON_CreateObject();
-				if (tr) {
-					cJSON_AddItemToObject(tr, "type", cJSON_CreateString("tool_result"));
-					cJSON_AddItemToObject(tr, "tool_use_id", cJSON_CreateString(messages[i].tool_use_id));
-					cJSON_AddItemToObject(tr, "content", cJSON_CreateString(messages[i].content ? messages[i].content : ""));
-					cJSON_AddItemToArray(content_arr, tr);
-				}
-				cJSON_AddItemToObject(msg, "content", content_arr);
-			} else
-				cJSON_AddItemToObject(msg, "content", cJSON_CreateString(""));
-		} else if (messages[i].tool_calls && messages[i].tool_calls_count > 0 && strcmp(role, "assistant") == 0) {
-			cJSON *content_arr = cJSON_CreateArray();
-			if (content_arr) {
-				if (messages[i].content && messages[i].content[0] != '\0') {
-					cJSON *text_block = cJSON_CreateObject();
-					if (text_block) {
-						cJSON_AddItemToObject(text_block, "type", cJSON_CreateString("text"));
-						cJSON_AddItemToObject(text_block, "text", cJSON_CreateString(messages[i].content));
-						cJSON_AddItemToArray(content_arr, text_block);
-					}
-				}
-				for (size_t k = 0; k < messages[i].tool_calls_count; k++) {
-					const provider_tool_call_t *tc = &messages[i].tool_calls[k];
-					cJSON *tu = cJSON_CreateObject();
-					if (!tu) break;
-					cJSON_AddItemToObject(tu, "type", cJSON_CreateString("tool_use"));
-					cJSON_AddItemToObject(tu, "id", cJSON_CreateString(tc->id ? tc->id : ""));
-					cJSON_AddItemToObject(tu, "name", cJSON_CreateString(tc->name ? tc->name : ""));
-					cJSON *input = tc->arguments && tc->arguments[0] ? cJSON_Parse(tc->arguments) : cJSON_CreateObject();
-					if (input) cJSON_AddItemToObject(tu, "input", input);
-					cJSON_AddItemToArray(content_arr, tu);
-				}
-				cJSON_AddItemToObject(msg, "content", content_arr);
-			} else
-				cJSON_AddItemToObject(msg, "content", cJSON_CreateString(messages[i].content ? messages[i].content : ""));
-		} else
-			cJSON_AddItemToObject(msg, "content", cJSON_CreateString(messages[i].content ? messages[i].content : ""));
-		cJSON_AddItemToArray(msg_arr, msg);
-	}
 	cJSON_AddItemToObject(root, "messages", msg_arr);
+	if (append_anthropic_messages(msg_arr, messages, message_count) != 0) {
+		cJSON_Delete(root);
+		provider_set_error(response, "Out of memory");
+		return -1;
+	}
 	if (tool_count > 0 && tools) {
 		cJSON *tools_arr = cJSON_CreateArray();
 		if (tools_arr) {
@@ -419,5 +477,23 @@ int anthropic_parse_response_for_test(const char *json, provider_response_t *res
 {
 	if (!json || !response) return -1;
 	return parse_response_body(json, response);
+}
+
+char *anthropic_messages_json_for_test(const provider_message_t *messages, size_t message_count)
+{
+	cJSON *arr;
+	char *printed;
+	if (!messages && message_count > 0)
+		return NULL;
+	arr = cJSON_CreateArray();
+	if (!arr)
+		return NULL;
+	if (append_anthropic_messages(arr, messages, message_count) != 0) {
+		cJSON_Delete(arr);
+		return NULL;
+	}
+	printed = cJSON_PrintUnformatted(arr);
+	cJSON_Delete(arr);
+	return printed;
 }
 #endif

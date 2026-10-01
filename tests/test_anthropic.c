@@ -6,6 +6,7 @@
 
 #include "core/config.h"
 #include "providers/provider.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,7 @@
 
 #ifdef SHELLCLAW_TEST
 extern int anthropic_parse_response_for_test(const char *json, provider_response_t *response);
+extern char *anthropic_messages_json_for_test(const provider_message_t *messages, size_t message_count);
 extern void anthropic_test_fail_next_reallocs(int n);
 #endif
 
@@ -233,6 +235,58 @@ static int test_parse_text_realloc_failure_is_error(void)
 	return 0;
 }
 
+static int test_parallel_tool_results_share_one_user_message(void)
+{
+	provider_tool_call_t calls[2] = {
+		{.id = "toolu_a", .name = "shell", .arguments = "{\"command\":\"pwd\"}"},
+		{.id = "toolu_b", .name = "read_file", .arguments = "{\"path\":\"a.txt\"}"},
+	};
+	provider_message_t messages[4];
+	char *json;
+	cJSON *arr;
+	cJSON *assistant;
+	cJSON *user;
+	cJSON *content;
+	cJSON *role;
+	cJSON *block;
+
+	memset(messages, 0, sizeof(messages));
+	messages[0].role = "user";
+	messages[0].content = "do both";
+	messages[1].role = "assistant";
+	messages[1].content = "";
+	messages[1].tool_calls = calls;
+	messages[1].tool_calls_count = 2;
+	messages[2].role = "user";
+	messages[2].content = "out-a";
+	messages[2].tool_use_id = "toolu_a";
+	messages[3].role = "user";
+	messages[3].content = "out-b";
+	messages[3].tool_use_id = "toolu_b";
+	json = anthropic_messages_json_for_test(messages, 4);
+	ASSERT(json != NULL);
+	arr = cJSON_Parse(json);
+	cJSON_free(json);
+	ASSERT(arr != NULL && cJSON_IsArray(arr));
+	ASSERT(cJSON_GetArraySize(arr) == 3);
+	assistant = cJSON_GetArrayItem(arr, 1);
+	content = assistant ? cJSON_GetObjectItem(assistant, "content") : NULL;
+	ASSERT(cJSON_IsArray(content) && cJSON_GetArraySize(content) == 2);
+	user = cJSON_GetArrayItem(arr, 2);
+	role = user ? cJSON_GetObjectItem(user, "role") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "user") == 0);
+	content = user ? cJSON_GetObjectItem(user, "content") : NULL;
+	ASSERT(cJSON_IsArray(content) && cJSON_GetArraySize(content) == 2);
+	block = cJSON_GetArrayItem(content, 0);
+	role = block ? cJSON_GetObjectItem(block, "tool_use_id") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "toolu_a") == 0);
+	block = cJSON_GetArrayItem(content, 1);
+	role = block ? cJSON_GetObjectItem(block, "tool_use_id") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "toolu_b") == 0);
+	cJSON_Delete(arr);
+	return 0;
+}
+
 static int test_parse_tool_realloc_failure_is_error(void)
 {
 	char body[1024];
@@ -268,6 +322,7 @@ int main(void)
 	RUN(test_parse_null_json_returns_error());
 	RUN(test_parse_text_past_initial_cap());
 	RUN(test_parse_six_tool_use_blocks());
+	RUN(test_parallel_tool_results_share_one_user_message());
 	RUN(test_parse_text_realloc_failure_is_error());
 	RUN(test_parse_tool_realloc_failure_is_error());
 #endif
