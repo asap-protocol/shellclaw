@@ -82,7 +82,25 @@ static int copy_printed_session_json(char *dst, size_t dst_size, char *printed,
 
 static const char SUMMARIZE_SYSTEM[] = "Summarize the following conversation in one short paragraph. Output only the summary, no preamble.";
 
-/** Summarize oldest messages when over max_ctx; replace with one summary + trailing. */
+/** Append one "role: content" line, or roll back if the whole line does not fit. */
+static int summary_source_append(char *buf, size_t cap, size_t *used,
+	const char *role, const char *content)
+{
+	int n;
+	if (!buf || !used || *used >= cap - 1)
+		return 0;
+	n = snprintf(buf + *used, cap - *used, "%s: %s\n",
+		role ? role : "user", content ? content : "");
+	if (n < 0 || (size_t)n >= cap - *used) {
+		buf[*used] = '\0';
+		return 0;
+	}
+	*used += (size_t)n;
+	return 1;
+}
+
+/** Summarize oldest messages when over max_ctx; replace with one summary + trailing.
+ *  Messages that do not fit in the summary source stay in the session. */
 static int compact_session_via_llm(const char *session_id, char *session_buf, size_t session_buf_size,
 	int msg_count, int max_ctx, const provider_t *provider)
 {
@@ -97,17 +115,27 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	if (!source_buf) { cJSON_Delete(root); return -1; }
 	source_buf[0] = '\0';
 	size_t used = 0;
-	for (int i = 0; i < to_summarize_n && used < SUMMARY_SOURCE_MAX - 1; i++) {
+	int next_unsummarized = to_summarize_n;
+	for (int i = 0; i < to_summarize_n; i++) {
 		const cJSON *item = cJSON_GetArrayItem(root, i);
-		if (!item || !cJSON_IsObject(item)) continue;
 		const char *role = "user";
 		const char *content = "";
-		const cJSON *r = cJSON_GetObjectItem(item, "role");
-		const cJSON *c = cJSON_GetObjectItem(item, "content");
+		const cJSON *r;
+		const cJSON *c;
+		if (!item || !cJSON_IsObject(item)) continue;
+		r = cJSON_GetObjectItem(item, "role");
+		c = cJSON_GetObjectItem(item, "content");
 		if (cJSON_IsString(r)) role = r->valuestring;
 		if (cJSON_IsString(c)) content = c->valuestring;
-		int n = snprintf(source_buf + used, SUMMARY_SOURCE_MAX - used, "%s: %s\n", role, content ? content : "");
-		if (n > 0 && (size_t)n < SUMMARY_SOURCE_MAX - used) used += (size_t)n;
+		if (!summary_source_append(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
+			next_unsummarized = i;
+			break;
+		}
+	}
+	if (used == 0 || next_unsummarized == 0) {
+		free(source_buf);
+		cJSON_Delete(root);
+		return -1;
 	}
 	provider_message_t summ_msgs[2] = {
 		{ .role = "system", .content = SUMMARIZE_SYSTEM, .tool_calls = NULL, .tool_calls_count = 0, .tool_use_id = NULL },
@@ -136,7 +164,8 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		cJSON_AddItemToArray(new_arr, summ_obj);
 	}
 	int keep = max_ctx - 1;
-	int start = msg_count - keep;
+	int start = (next_unsummarized < to_summarize_n)
+		? next_unsummarized : (msg_count - keep);
 	if (start < 0) start = 0;
 	for (int i = start; i < msg_count; i++) {
 		const cJSON *item = cJSON_GetArrayItem(root, i);
