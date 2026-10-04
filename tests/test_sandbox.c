@@ -147,6 +147,29 @@ static int test_stderr_captured(void)
 	return 0;
 }
 
+/** Host API keys must not be readable from sh -c. printenv is not blocklisted. */
+static int test_command_does_not_inherit_host_secrets(void)
+{
+	char out[4096];
+	int rc;
+	const char *secret = "leaked_via_env";
+
+	ASSERT(setenv("SHELLCLAW_AUDIT_SECRET", secret, 1) == 0);
+	ASSERT(setenv("ANTHROPIC_API_KEY", secret, 1) == 0);
+	rc = sandbox_exec(
+		"printenv SHELLCLAW_AUDIT_SECRET ANTHROPIC_API_KEY; "
+		"tr '\\0' '\\n' < /proc/1/environ 2>/dev/null; echo PATH_OK",
+		out, sizeof out, 5000, NULL);
+	unsetenv("SHELLCLAW_AUDIT_SECRET");
+	unsetenv("ANTHROPIC_API_KEY");
+	if (skip_if_isolation_denied(rc, out, "test_command_does_not_inherit_host_secrets"))
+		return 0;
+	ASSERT(rc == 0);
+	ASSERT(strstr(out, secret) == NULL);
+	ASSERT(strstr(out, "PATH_OK") != NULL);
+	return 0;
+}
+
 static int test_null_cmd_returns_error(void)
 {
 	char out[256];
@@ -823,6 +846,7 @@ int main(void)
 	RUN(test_fail_closed_reports_isolation_error());
 	RUN(test_output_capture());
 	RUN(test_stderr_captured());
+	RUN(test_command_does_not_inherit_host_secrets());
 	RUN(test_null_cmd_returns_error());
 	RUN(test_zero_cap_returns_error());
 	RUN(test_exit_nonzero_runs());
