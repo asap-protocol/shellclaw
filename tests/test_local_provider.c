@@ -75,6 +75,52 @@ static int test_init_unreachable_sets_unavailable_then_chat_errors(void)
 	return 0;
 }
 
+/**
+ * Init probe failure must not stick for the process lifetime. llama-server
+ * often is not listening yet at startup; the next chat has to probe again.
+ */
+static int test_chat_reprobes_when_server_comes_up(void)
+{
+	FILE *f = fopen(TMP_CFG, "w");
+	config_t *cfg = NULL;
+	char errbuf[256];
+	const provider_t *p;
+	provider_message_t msg = { .role = "user", .content = "ping", .tool_calls = NULL,
+	                           .tool_calls_count = 0, .tool_use_id = NULL };
+	provider_response_t response = {0};
+	ASSERT(f);
+	local_provider_test_reset();
+	unsetenv("SHELLCLAW_FALLBACK_CHAIN");
+	unsetenv("SHELLCLAW_LOCAL_ENDPOINT");
+	unsetenv("SHELLCLAW_LOCAL_MODEL");
+	fprintf(f, "[agent]\nmodel = \"test-model\"\n");
+	fprintf(f, "[providers.local]\n");
+	fprintf(f, "endpoint = \"http://127.0.0.1:1/v1/chat/completions\"\nmodel = \"tiny\"\n");
+	fclose(f);
+	ASSERT(config_load(TMP_CFG, &cfg, errbuf, sizeof(errbuf)) == 0);
+	p = provider_local_get();
+	ASSERT(p->init(cfg) == 0);
+#ifdef SHELLCLAW_TEST
+	ASSERT(local_provider_is_unavailable_for_test() != 0);
+#endif
+	local_provider_test_set_skip_probe(1);
+	local_provider_test_set_http_response(
+		"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"back online\"}}]}");
+	ASSERT(p->chat(&msg, 1, NULL, 0, &response) == 0);
+	ASSERT(response.error == 0);
+	ASSERT(response.content != NULL);
+	ASSERT(strstr(response.content, "back online") != NULL);
+#ifdef SHELLCLAW_TEST
+	ASSERT(local_provider_is_unavailable_for_test() == 0);
+#endif
+	p->cleanup();
+	provider_response_clear(&response);
+	local_provider_test_reset();
+	config_free(cfg);
+	remove(TMP_CFG);
+	return 0;
+}
+
 static int test_chat_mock_http_happy_path(void)
 {
 	FILE *f = fopen(TMP_CFG, "w");
@@ -113,6 +159,7 @@ int main(void)
 	RUN(test_local_provider_vtable());
 	RUN(test_init_requires_config());
 	RUN(test_init_unreachable_sets_unavailable_then_chat_errors());
+	RUN(test_chat_reprobes_when_server_comes_up());
 	RUN(test_chat_mock_http_happy_path());
 	curl_global_cleanup();
 	printf("test_local_provider: all tests passed\n");

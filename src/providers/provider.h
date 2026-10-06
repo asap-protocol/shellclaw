@@ -134,7 +134,7 @@ void provider_openai_set_live_config(const config_t *cfg);
 const provider_t *provider_local_get(void);
 /** After SIGHUP reload: refresh live config reads without re-init (PRD §9 Q4). */
 void provider_local_set_live_config(const config_t *cfg);
-/** Lightweight GET probe via `/v1/models` or `/health`; used by init and router recovery. */
+/** Lightweight GET probe via `/v1/models` or `/health`; used by init, chat retry, and router recovery. */
 int provider_local_endpoint_reachable(const char *endpoint);
 /** After a successful recovery GET probe on local; clears init-time unreachable flag. */
 void provider_local_recovery_probe_succeeded(void);
