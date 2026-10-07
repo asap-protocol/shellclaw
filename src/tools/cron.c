@@ -26,14 +26,17 @@
 
 static int parse_field(const char *s, int *out, int min_val, int max_val)
 {
+	char *end = NULL;
+	long n;
 	if (!s || !out) return -1;
 	if (strcmp(s, "*") == 0) {
 		*out = -1;
 		return 0;
 	}
-	char *end = NULL;
-	long n = strtol(s, &end, 10);
-	if (end == s || n < min_val || n > max_val) return -1;
+	/* strtol stops at the first junk character. "1,15" would otherwise
+	 * match only day 1 and still schedule successfully. */
+	n = strtol(s, &end, 10);
+	if (!end || end == s || *end != '\0' || n < min_val || n > max_val) return -1;
 	*out = (int)n;
 	return 0;
 }
@@ -129,13 +132,21 @@ int cron_parse_next_run(const char *schedule, long long now, long long *next_out
 {
 	if (!schedule || !next_out) return -1;
 	if (strncmp(schedule, CRON_PREFIX_INTERVAL, strlen(CRON_PREFIX_INTERVAL)) == 0) {
-		long sec = strtol(schedule + strlen(CRON_PREFIX_INTERVAL), NULL, 10);
-		if (sec <= 0) return -1;
+		const char *num = schedule + strlen(CRON_PREFIX_INTERVAL);
+		char *end = NULL;
+		long sec = strtol(num, &end, 10);
+		if (!end || end == num || *end != '\0' || sec <= 0) return -1;
 		*next_out = now + sec;
 		return 0;
 	}
 	if (strncmp(schedule, CRON_PREFIX_AT, strlen(CRON_PREFIX_AT)) == 0) {
-		long long ts = (long long)strtoll(schedule + strlen(CRON_PREFIX_AT), NULL, 10);
+		const char *num = schedule + strlen(CRON_PREFIX_AT);
+		char *end = NULL;
+		long long ts;
+		/* A partial convert (at:2026-10-08 -> 2026) is already due, so the
+		 * one-shot fires on the next poll and ack deletes the future reminder. */
+		ts = strtoll(num, &end, 10);
+		if (!end || end == num || *end != '\0') return -1;
 		*next_out = ts;
 		return 0;
 	}
