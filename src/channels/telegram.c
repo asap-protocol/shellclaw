@@ -148,14 +148,15 @@ static int parse_update(const char *json, channel_incoming_msg_t *out, long *upd
 		return 0;
 	}
 	cJSON *from = cJSON_GetObjectItem(msg, "from");
-	if (!from || !cJSON_IsObject(from)) {
-		cJSON_Delete(root);
-		return -1;
-	}
-	cJSON *from_id = cJSON_GetObjectItem(from, "id");
+	cJSON *from_id = (from && cJSON_IsObject(from)) ? cJSON_GetObjectItem(from, "id") : NULL;
+	/* Channel and anonymous-admin posts can omit a numeric from.id. Failing
+	 * the poll here left last_update_id unchanged, so this update stayed at
+	 * the head of getUpdates and later messages never ran. Skip it instead. */
 	if (!from_id || !cJSON_IsNumber(from_id)) {
+		fprintf(stderr, "shellclaw: telegram: skip update %ld (message has no from id)\n",
+		        *update_id_out);
 		cJSON_Delete(root);
-		return -1;
+		return 0;
 	}
 	long user_id = (long)from_id->valuedouble;
 	if (!is_user_allowed(g_tg.cfg, user_id)) {
@@ -221,14 +222,32 @@ static int parse_update(const char *json, channel_incoming_msg_t *out, long *upd
 	return 1;
 }
 
+static int format_getupdates_url(char *url, size_t url_cap, const char *token,
+                                 int timeout_sec, long offset)
+{
+	int n;
+	if (!url || url_cap == 0 || !token || token[0] == '\0')
+		return -1;
+	/* Default getUpdates limit is 100. A backlog of long messages exceeds the
+	 * 256 KiB read buffer, curl aborts, and the offset never advances, so
+	 * every later poll retries the same batch. The parser only consumes
+	 * result[0]; ask for that one update so a single message always fits. */
+	n = snprintf(url, url_cap, "%s%s/%s?timeout=%d&offset=%ld&limit=1",
+	             TG_API_BASE, token, TG_GET_UPDATES, timeout_sec, offset);
+	if (n < 0 || (size_t)n >= url_cap)
+		return -1;
+	return 0;
+}
+
 static int tg_poll(channel_incoming_msg_t *out, int timeout_ms)
 {
 	if (!out || !g_tg.initialized || !g_tg.token) return -1;
 	memset(out, 0, sizeof(*out));
 	int timeout_sec = (timeout_ms / 1000) > 0 ? (timeout_ms / 1000) : 1;
 	char url[512];
-	snprintf(url, sizeof(url), "%s%s/%s?timeout=%d&offset=%ld",
-	         TG_API_BASE, g_tg.token, TG_GET_UPDATES, timeout_sec, g_tg.last_update_id + 1);
+	if (format_getupdates_url(url, sizeof(url), g_tg.token, timeout_sec,
+	                          g_tg.last_update_id + 1) != 0)
+		return -1;
 	CURL *curl = curl_easy_init();
 	if (!curl) return -1;
 	tg_curl_harden(curl);
@@ -329,6 +348,12 @@ void shellclaw_telegram_set_live_cfg(const config_t *cfg)
 int telegram_parse_update_for_test(const char *json, channel_incoming_msg_t *out, long *update_id)
 {
 	return parse_update(json, out, update_id);
+}
+
+int telegram_format_getupdates_url_for_test(char *url, size_t url_cap, const char *token,
+                                            int timeout_sec, long offset)
+{
+	return format_getupdates_url(url, url_cap, token, timeout_sec, offset);
 }
 
 void telegram_set_test_config(const config_t *cfg)
