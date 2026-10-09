@@ -377,28 +377,76 @@ static void handle_skills_list(const config_t *cfg, char *buf, size_t size, int 
 #define SKILL_CONTENT_MAX 32768
 #define MEMORY_RESULTS_MAX 16384
 
-static void handle_skill_get(const config_t *cfg, const char *name, char *buf, size_t size, int *status)
+static void skill_too_large(char *buf, size_t size, int *status, const char *name,
+                           const char *limit_desc)
 {
-	char *content = malloc(SKILL_CONTENT_MAX);
-	if (!content) { json_error(buf, size, status, 500, "Out of memory"); return; }
-	if (skill_get_content(cfg, name, content, SKILL_CONTENT_MAX) != 0) {
-		free(content);
-		json_error(buf, size, status, 404, "Skill not found");
+	char msg[256];
+	int n;
+
+	n = snprintf(msg, sizeof(msg), "skill \"%s\" exceeds %s",
+	             name ? name : "", limit_desc ? limit_desc : "edit buffer");
+	if (n < 0 || (size_t)n >= sizeof(msg))
+		json_error(buf, size, status, 413, "skill exceeds edit buffer");
+	else
+		json_error(buf, size, status, 413, msg);
+}
+
+static void skill_get_send(const char *name, const char *content, char *buf, size_t size,
+                          int *status)
+{
+	cJSON *obj;
+	char *printed;
+	char limit_desc[64];
+
+	obj = cJSON_CreateObject();
+	if (!obj) {
+		json_error(buf, size, status, 500, "Internal error");
 		return;
 	}
-	cJSON *obj = cJSON_CreateObject();
-	if (!obj) { free(content); json_error(buf, size, status, 500, "Internal error"); return; }
 	cJSON_AddItemToObject(obj, "name", cJSON_CreateString(name));
 	cJSON_AddItemToObject(obj, "content", cJSON_CreateString(content));
-	free(content);
-	char *s = cJSON_PrintUnformatted(obj);
+	printed = cJSON_PrintUnformatted(obj);
 	cJSON_Delete(obj);
-	if (s) {
-		json_response(buf, size, status, s);
-		free(s);
-	} else {
+	if (!printed) {
 		json_error(buf, size, status, 500, "Internal error");
+		return;
 	}
+	/* A cut-off 200 body parses as empty in the dashboard and Save wipes the file. */
+	if (strlen(printed) >= size) {
+		free(printed);
+		snprintf(limit_desc, sizeof(limit_desc), "%zu byte response buffer", size);
+		skill_too_large(buf, size, status, name, limit_desc);
+		return;
+	}
+	json_response(buf, size, status, printed);
+	free(printed);
+}
+
+static void handle_skill_get(const config_t *cfg, const char *name, char *buf, size_t size, int *status)
+{
+	char *content;
+	char limit_desc[64];
+	int rc;
+
+	content = malloc(SKILL_CONTENT_MAX);
+	if (!content) {
+		json_error(buf, size, status, 500, "Out of memory");
+		return;
+	}
+	rc = skill_get_content(cfg, name, content, SKILL_CONTENT_MAX);
+	if (rc != 0) {
+		free(content);
+		if (rc == -2) {
+			snprintf(limit_desc, sizeof(limit_desc), "%d byte edit buffer",
+			         SKILL_CONTENT_MAX - 1);
+			skill_too_large(buf, size, status, name, limit_desc);
+		} else {
+			json_error(buf, size, status, 404, "Skill not found");
+		}
+		return;
+	}
+	skill_get_send(name, content, buf, size, status);
+	free(content);
 }
 
 static void handle_skill_create(const config_t *cfg, const char *body, size_t body_len,

@@ -249,6 +249,45 @@ static int test_skill_update_write_failure_preserves_existing(void)
 	return 0;
 }
 
+/*
+ * Dashboard GET /api/skills/:name loads this buffer into a textarea and PUT
+ * saves it back. A short buffer must not succeed with a prefix, or Save
+ * deletes the rest of the skill file.
+ */
+static int test_skill_get_content_refuses_short_buffer(void)
+{
+	char cmd[256];
+	char small[32];
+	char exact[64];
+	char full[128];
+	const char *body = "HEAD_MARKER_skill_body_TAIL_MARKER_must_survive";
+	size_t body_len;
+	config_t *cfg = NULL;
+	char errbuf[256];
+
+	snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" && mkdir -p \"%s\"", TMP_DIR, TMP_DIR);
+	ASSERT(system(cmd) == 0);
+	ASSERT(write_minimal_config(TMP_DIR) == 0);
+	ASSERT(config_load(TMP_CONFIG, &cfg, errbuf, sizeof(errbuf)) == 0);
+	ASSERT(skill_create(cfg, "longskill", body) == 0);
+	body_len = strlen(body);
+	ASSERT(body_len + 1 <= sizeof(exact));
+
+	memset(small, 'X', sizeof(small));
+	ASSERT(skill_get_content(cfg, "longskill", small, sizeof(small)) == -2);
+	ASSERT(skill_get_content(cfg, "longskill", exact, body_len) == -2);
+	ASSERT(skill_get_content(cfg, "longskill", exact, body_len + 1) == 0);
+	ASSERT(strcmp(exact, body) == 0);
+	ASSERT(skill_get_content(cfg, "longskill", full, sizeof(full)) == 0);
+	ASSERT(strstr(full, "TAIL_MARKER_must_survive") != NULL);
+
+	config_free(cfg);
+	remove(TMP_CONFIG);
+	snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", TMP_DIR);
+	(void)system(cmd);
+	return 0;
+}
+
 static int test_hot_reload_watch(void)
 {
 	char cmd[256];
@@ -287,6 +326,7 @@ int main(void)
 	RUN(test_system_prompt_base_order());
 	RUN(test_skill_crud());
 	RUN(test_skill_update_write_failure_preserves_existing());
+	RUN(test_skill_get_content_refuses_short_buffer());
 	RUN(test_hot_reload_watch());
 	printf("test_skill: all tests passed\n");
 	return 0;
