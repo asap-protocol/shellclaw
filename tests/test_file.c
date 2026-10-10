@@ -563,6 +563,48 @@ static void test_write_in_workspace_symlink_alias_rejected(void)
 	rmdir(tmpdir);
 }
 
+static void test_read_rejects_file_larger_than_result_buffer(void)
+{
+	char tmpdir[64];
+	char notes_path[PATH_MAX];
+	char config_path[PATH_MAX];
+	char args[PATH_MAX + 64];
+	char buf[32];
+	char exact[8];
+	FILE *f;
+	config_t *cfg;
+	const tool_t *t;
+	int i;
+
+	snprintf(tmpdir, sizeof(tmpdir), "/tmp/sc_test_readcap_%d", (int)getpid());
+	if (mkdir(tmpdir, 0755) != 0 && errno != EEXIST)
+		return;
+	snprintf(notes_path, sizeof(notes_path), "%s/notes.md", tmpdir);
+	f = fopen(notes_path, "w");
+	MU_ASSERT(f != NULL, "create oversized notes.md");
+	for (i = 0; i < 64; i++)
+		fputc('A', f);
+	fclose(f);
+	cfg = make_ws_config(tmpdir, config_path, sizeof(config_path));
+	MU_ASSERT(cfg != NULL, "readcap: load config");
+	tool_file_set_config(cfg);
+	t = tool_file_get();
+	snprintf(args, sizeof(args), "{\"operation\":\"read_file\",\"path\":\"%s\"}", notes_path);
+	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == -1, "oversize read fails");
+	MU_ASSERT(strstr(buf, "error") != NULL, "oversize read reports an error");
+	MU_ASSERT(strstr(buf, "AAAAAAAAAAAAAAAA") == NULL, "oversize read is not a raw prefix");
+	f = fopen(notes_path, "w");
+	MU_ASSERT(f != NULL, "rewrite exact-fit notes.md");
+	fputs("0123456", f);
+	fclose(f);
+	MU_ASSERT(t->execute(args, exact, sizeof(exact)) == 0, "exact-fit read succeeds");
+	MU_ASSERT(strcmp(exact, "0123456") == 0, "exact-fit read returns the whole file");
+	config_free(cfg);
+	unlink(config_path);
+	unlink(notes_path);
+	rmdir(tmpdir);
+}
+
 int main(void)
 {
 	MU_RUN(test_file_read_write_list);
@@ -577,6 +619,7 @@ int main(void)
 	MU_RUN(test_file_write_failure_preserves_existing);
 	MU_RUN(test_write_does_not_clobber_sibling_tmp);
 	MU_RUN(test_write_in_workspace_symlink_alias_rejected);
+	MU_RUN(test_read_rejects_file_larger_than_result_buffer);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }
