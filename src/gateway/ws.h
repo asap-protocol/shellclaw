@@ -42,6 +42,8 @@ int ws_register_conn(int conn_id, ws_conn_t wsi);
 
 /**
  * Unregister a WebSocket connection. Called when connection closes.
+ * Drops outgoing frames still queued for @p conn_id so a closed session
+ * cannot fill the shared outbound queue.
  *
  * @param conn_id Connection ID.
  */
