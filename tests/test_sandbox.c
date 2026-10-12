@@ -19,6 +19,7 @@
 #include "sandbox/sandbox_landlock.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -274,6 +275,39 @@ static int test_missing_workspace_fail_closed(void)
 	ASSERT(rc == -1);
 	ASSERT(strstr(out, "should_not_run") == NULL);
 	ASSERT(strstr(out, "sandbox:") != NULL);
+	return 0;
+}
+
+static void trickle_timeout_watchdog(int sig)
+{
+	(void)sig;
+	fprintf(stderr, "FAIL: sandbox timeout did not fire while stdout trickled\n");
+	_exit(2);
+}
+
+static int test_timeout_kills_trickle_output(void)
+{
+	char out[8192];
+	struct timespec t0;
+	struct timespec t1;
+	long elapsed_ms;
+	int rc;
+
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+	signal(SIGALRM, trickle_timeout_watchdog);
+	alarm(4);
+	rc = sandbox_exec("while true; do echo x; sleep 0.05; done",
+	                  out, sizeof(out), 400, NULL);
+	alarm(0);
+	signal(SIGALRM, SIG_DFL);
+	if (skip_if_isolation_denied(rc, out, "test_timeout_kills_trickle_output"))
+		return 0;
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	ASSERT(rc == 0);
+	ASSERT(strstr(out, "timed out") != NULL);
+	ASSERT(elapsed_ms < 2500);
 	return 0;
 }
 
@@ -832,6 +866,7 @@ int main(void)
 	RUN(test_dev_null_is_writable());
 	RUN(test_workspace_chdir());
 	RUN(test_missing_workspace_fail_closed());
+	RUN(test_timeout_kills_trickle_output());
 	RUN(test_timeout_kills_process());
 #ifdef __linux__
 	RUN(test_landlock_probe_without_restrict());
