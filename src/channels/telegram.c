@@ -21,6 +21,8 @@
 #define POLL_TIMEOUT_SEC 30
 #define RESP_BUF_SIZE (256 * 1024)
 #define RESP_BUF_INIT 4096
+/* Bot API sendMessage text limit. Longer agent replies are sent as several messages. */
+#define TG_TEXT_MAX 4096
 
 struct telegram_ctx {
 	char *token;
@@ -261,41 +263,127 @@ static int tg_poll(channel_incoming_msg_t *out, int timeout_ms)
 	return 0;
 }
 
-static int tg_send(const char *recipient, const char *text,
-                   const channel_attachment_t *attachments, size_t att_count)
+/* Curl success is not delivery. sendMessage reports refusal in HTTP status and ok. */
+static int telegram_response_ok(long http_code, const char *body)
 {
-	(void)attachments;
-	(void)att_count;
-	if (!g_tg.initialized || !g_tg.token || !recipient || !text) return -1;
-	const char *chat_id = strchr(recipient, ':');
-	if (chat_id) chat_id++;
-	else chat_id = recipient;
+	cJSON *root;
+	cJSON *ok_item;
+
+	if (http_code < 200 || http_code >= 300)
+		return 0;
+	if (!body || body[0] == '\0')
+		return 0;
+	root = cJSON_Parse(body);
+	if (!root || !cJSON_IsObject(root)) {
+		if (root)
+			cJSON_Delete(root);
+		return 0;
+	}
+	ok_item = cJSON_GetObjectItemCaseSensitive(root, "ok");
+	if (!cJSON_IsBool(ok_item) || !cJSON_IsTrue(ok_item)) {
+		cJSON_Delete(root);
+		return 0;
+	}
+	cJSON_Delete(root);
+	return 1;
+}
+
+static int telegram_perform_post(CURL *curl, const char *url, const char *postfields)
+{
+	tg_buf_t resp;
+	long http_code = 0;
+	int ret = -1;
+
+	resp.buf = malloc(RESP_BUF_INIT);
+	if (!resp.buf)
+		return -1;
+	resp.len = 0;
+	resp.cap = RESP_BUF_INIT;
+	resp.buf[0] = '\0';
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+	if (tg_curl_perform(curl, "sendMessage") == 0) {
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+		if (telegram_response_ok(http_code, resp.buf))
+			ret = 0;
+		else
+			fprintf(stderr, "shellclaw: telegram: sendMessage rejected HTTP %ld\n",
+			        http_code);
+	}
+	free(resp.buf);
+	return ret;
+}
+
+static int telegram_post_chunk(const char *chat_id, const char *text)
+{
 	char url[512];
-	snprintf(url, sizeof(url), "%s%s/%s", TG_API_BASE, g_tg.token, TG_SEND_MSG);
-	CURL *curl = curl_easy_init();
-	if (!curl) return -1;
+	CURL *curl;
+	char *escaped;
+	char *postfields;
+	int ret;
+	size_t need;
+
+	curl = curl_easy_init();
+	if (!curl)
+		return -1;
 	tg_curl_harden(curl);
 	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
 	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-	char *escaped = curl_easy_escape(curl, text, (int)strlen(text));
+	snprintf(url, sizeof(url), "%s%s/%s", TG_API_BASE, g_tg.token, TG_SEND_MSG);
+	escaped = curl_easy_escape(curl, text, (int)strlen(text));
 	if (!escaped) {
 		curl_easy_cleanup(curl);
 		return -1;
 	}
-	size_t need = strlen(chat_id) + strlen(escaped) + 32;
-	char *postfields = malloc(need);
-	int ret = -1;
-	if (postfields) {
-		snprintf(postfields, need, "chat_id=%s&text=%s", chat_id, escaped);
-		curl_easy_setopt(curl, CURLOPT_URL, url);
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields);
-		ret = (tg_curl_perform(curl, "sendMessage") == 0) ? 0 : -1;
-		free(postfields);
+	need = strlen(chat_id) + strlen(escaped) + 32;
+	postfields = malloc(need);
+	if (!postfields) {
+		curl_free(escaped);
+		curl_easy_cleanup(curl);
+		return -1;
 	}
+	snprintf(postfields, need, "chat_id=%s&text=%s", chat_id, escaped);
+	ret = telegram_perform_post(curl, url, postfields);
+	free(postfields);
 	curl_free(escaped);
 	curl_easy_cleanup(curl);
 	return ret;
+}
+
+static int tg_send(const char *recipient, const char *text,
+                   const channel_attachment_t *attachments, size_t att_count)
+{
+	const char *chat_id;
+	const char *cursor;
+
+	(void)attachments;
+	(void)att_count;
+	if (!g_tg.initialized || !g_tg.token || !recipient || !text || text[0] == '\0')
+		return -1;
+	chat_id = strchr(recipient, ':');
+	if (chat_id)
+		chat_id++;
+	else
+		chat_id = recipient;
+	if (chat_id[0] == '\0')
+		return -1;
+	cursor = text;
+	while (cursor[0] != '\0') {
+		char piece[TG_TEXT_MAX + 1];
+		size_t n = channel_outbound_chunk_len(cursor, TG_TEXT_MAX);
+
+		if (n == 0 || n > TG_TEXT_MAX)
+			return -1;
+		memcpy(piece, cursor, n);
+		piece[n] = '\0';
+		if (telegram_post_chunk(chat_id, piece) != 0)
+			return -1;
+		cursor += n;
+	}
+	return 0;
 }
 
 static void tg_cleanup(void)
@@ -334,5 +422,10 @@ int telegram_parse_update_for_test(const char *json, channel_incoming_msg_t *out
 void telegram_set_test_config(const config_t *cfg)
 {
 	g_tg.cfg = cfg;
+}
+
+int telegram_response_ok_for_test(long http_code, const char *body)
+{
+	return telegram_response_ok(http_code, body);
 }
 #endif
