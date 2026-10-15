@@ -81,6 +81,19 @@ int provider_parse_chat_completions_json(const char *response_body, provider_res
 /** Non-zero if router may try next chain entry: no `HTTP 4xx` in message, otherwise transport/5xx may retry. */
 int provider_error_allows_fallback_retry(const char *provider_error_content);
 
+/**
+ * Resolve @p model to the id @p backend should send.
+ *
+ * A `vendor/rest` id whose vendor matches @p backend returns the rest (a pointer
+ * into @p model). A known other cloud vendor, a bare Claude id on OpenAI, or a
+ * bare OpenAI id on Anthropic returns NULL. Callers must fail that case without
+ * an HTTP status: a 4xx stops the fallback chain.
+ *
+ * Example: provider_model_id_for_backend("anthropic/claude-sonnet-4-20250514", "anthropic")
+ * returns "claude-sonnet-4-20250514".
+ */
+const char *provider_model_id_for_backend(const char *model, const char *backend);
+
 void provider_router_active_backend_snapshot(char *dst, size_t dst_sz);
 void provider_router_last_error_snapshot(char *dst, size_t dst_sz);
 void provider_router_periodic_recovery_tick(time_t now_wall);

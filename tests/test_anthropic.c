@@ -16,6 +16,8 @@
 #ifdef SHELLCLAW_TEST
 extern int anthropic_parse_response_for_test(const char *json, provider_response_t *response);
 extern void anthropic_test_fail_next_reallocs(int n);
+extern void anthropic_test_set_skip_http(int skip);
+extern const char *anthropic_test_last_request_model(void);
 #endif
 
 static const char *TMP_CONFIG = "/tmp/shellclaw_test_anthropic_config.toml";
@@ -233,6 +235,50 @@ static int test_parse_text_realloc_failure_is_error(void)
 	return 0;
 }
 
+static int test_example_model_prefix_is_stripped(void)
+{
+	const char *saved = getenv("ANTHROPIC_API_KEY");
+	char *saved_copy = saved ? strdup(saved) : NULL;
+	config_t *cfg = NULL;
+	char errbuf[256];
+	provider_response_t response = {0};
+	const provider_t *p;
+	provider_message_t msg = {
+		.role = "user", .content = "Hi", .tool_calls = NULL,
+		.tool_calls_count = 0, .tool_use_id = NULL
+	};
+	FILE *f;
+	int chat_ret;
+
+	f = fopen(TMP_CONFIG, "w");
+	ASSERT(f != NULL);
+	fprintf(f, "[agent]\nmodel = \"anthropic/claude-sonnet-4-20250514\"\nmax_tokens = 256\n");
+	fprintf(f, "[memory]\ndb_path = \"/tmp/shellclaw_anth_test.db\"\n");
+	fprintf(f, "[providers.anthropic]\napi_key_env = \"ANTHROPIC_API_KEY\"\n");
+	fclose(f);
+	ASSERT(setenv("ANTHROPIC_API_KEY", "sk-test-not-a-real-key", 1) == 0);
+	anthropic_test_set_skip_http(1);
+	ASSERT(config_load(TMP_CONFIG, &cfg, errbuf, sizeof(errbuf)) == 0);
+	p = provider_anthropic_get();
+	ASSERT(p != NULL);
+	ASSERT(p->init(cfg) == 0);
+	chat_ret = p->chat(&msg, 1, NULL, 0, &response);
+	ASSERT(chat_ret == 0);
+	ASSERT(strcmp(anthropic_test_last_request_model(), "claude-sonnet-4-20250514") == 0);
+	p->cleanup();
+	config_free(cfg);
+	remove(TMP_CONFIG);
+	anthropic_test_set_skip_http(0);
+	if (saved_copy) {
+		setenv("ANTHROPIC_API_KEY", saved_copy, 1);
+		free(saved_copy);
+	} else {
+		unsetenv("ANTHROPIC_API_KEY");
+	}
+	provider_response_clear(&response);
+	return 0;
+}
+
 static int test_parse_tool_realloc_failure_is_error(void)
 {
 	char body[1024];
@@ -270,6 +316,7 @@ int main(void)
 	RUN(test_parse_six_tool_use_blocks());
 	RUN(test_parse_text_realloc_failure_is_error());
 	RUN(test_parse_tool_realloc_failure_is_error());
+	RUN(test_example_model_prefix_is_stripped());
 #endif
 	printf("test_anthropic: all tests passed\n");
 	return 0;
