@@ -110,36 +110,89 @@ static void cgroup_remove(const char *base, const char *name)
 
 #endif /* __linux__ */
 
-static size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms)
+/* Wall time since start, or -1 if the monotonic clock cannot be read. */
+static long monotonic_elapsed_ms(const struct timespec *start)
 {
+    struct timespec now;
+    long ms;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    ms = (now.tv_sec - start->tv_sec) * 1000L
+        + (now.tv_nsec - start->tv_nsec) / 1000000L;
+    return ms < 0 ? 0 : ms;
+}
+
+static int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap)
+{
+    long remain;
+
+    remain = (long)timeout_ms - elapsed_ms;
+    if (remain < 1)
+        return 1;
+    if (remain > slice_cap)
+        return slice_cap;
+    return (int)remain;
+}
+
+/*
+ * Stop at timeout_ms of wall time, not idle poll time. A writer that keeps
+ * the pipe readable otherwise never advances the old counter, so the agent
+ * stays blocked until cap fills.
+ */
+static size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, int *hit_deadline)
+{
+    struct timespec start;
     size_t total = 0;
-    int elapsed_ms = 0;
+    int have_clock;
+    long elapsed_ms = 0;
     char chunk[512];
-    if (cap == 0) return 0;
-    while (total < cap - 1 && elapsed_ms < timeout_ms) {
+
+    if (hit_deadline)
+        *hit_deadline = 0;
+    if (cap == 0)
+        return 0;
+    have_clock = clock_gettime(CLOCK_MONOTONIC, &start) == 0;
+    while (total < cap - 1) {
         struct pollfd pfd;
         int slice;
         int r;
         ssize_t n;
+
+        if (have_clock) {
+            long wall = monotonic_elapsed_ms(&start);
+            if (wall < 0)
+                have_clock = 0;
+            else
+                elapsed_ms = wall;
+        }
+        if (elapsed_ms >= (long)timeout_ms) {
+            if (hit_deadline)
+                *hit_deadline = 1;
+            break;
+        }
+        slice = poll_remain_ms(timeout_ms, elapsed_ms, PIPE_POLL_SLICE_MS);
         pfd.fd = fd;
         pfd.events = POLLIN;
         pfd.revents = 0;
-        slice = timeout_ms - elapsed_ms;
-        if (slice > PIPE_POLL_SLICE_MS) slice = PIPE_POLL_SLICE_MS;
         r = poll(&pfd, 1, slice);
         if (r < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             break;
         }
         if (r == 0) {
-            elapsed_ms += slice;
+            if (!have_clock)
+                elapsed_ms += slice;
             continue;
         }
         n = read(fd, chunk, sizeof(chunk));
-        if (n <= 0) break;
+        if (n <= 0)
+            break;
         {
             size_t add = (size_t)n;
-            if (total + add >= cap - 1) add = cap - 1 - total;
+            if (total + add >= cap - 1)
+                add = cap - 1 - total;
             memcpy(buf + total, chunk, add);
             total += add;
         }
@@ -471,9 +524,14 @@ int sandbox_exec(const char *cmd, char *out, size_t out_cap,
             return report_isolation_failure(out, out_cap, iso);
         }
     }
-    total = drain_pipe(pipefd[0], out, out_cap, timeout_ms);
-    close(pipefd[0]);
-    timed_out = reap_child(pid, NULL);
+    {
+        int drain_deadline = 0;
+        total = drain_pipe(pipefd[0], out, out_cap, timeout_ms, &drain_deadline);
+        close(pipefd[0]);
+        timed_out = reap_child(pid, NULL);
+        if (drain_deadline)
+            timed_out = 1;
+    }
     if (timed_out && total < out_cap - 40)
         snprintf(out + total, out_cap - total, "\n[Sandbox: command timed out after %d ms]",
                  timeout_ms);
