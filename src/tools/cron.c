@@ -11,6 +11,8 @@
 #include "channels/channel.h"
 #include "core/config.h"
 #include "cJSON.h"
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,15 +128,28 @@ static long long cron_next_from_expr(const char *cron_part, long long now)
 	return -1;
 }
 
+/* Reject a span that does not fit in now+seconds. Signed wrap stores a past
+ * next_run, and ack recomputes the same sum, so the job stays due forever. */
+static int interval_next_run(const char *num, long long now, long long *next_out)
+{
+	char *end;
+	long long sec;
+
+	errno = 0;
+	sec = strtoll(num, &end, 10);
+	if (end == num || errno == ERANGE || sec <= 0)
+		return -1;
+	if (now < 0 || sec > LLONG_MAX - now)
+		return -1;
+	*next_out = now + sec;
+	return 0;
+}
+
 int cron_parse_next_run(const char *schedule, long long now, long long *next_out)
 {
 	if (!schedule || !next_out) return -1;
-	if (strncmp(schedule, CRON_PREFIX_INTERVAL, strlen(CRON_PREFIX_INTERVAL)) == 0) {
-		long sec = strtol(schedule + strlen(CRON_PREFIX_INTERVAL), NULL, 10);
-		if (sec <= 0) return -1;
-		*next_out = now + sec;
-		return 0;
-	}
+	if (strncmp(schedule, CRON_PREFIX_INTERVAL, strlen(CRON_PREFIX_INTERVAL)) == 0)
+		return interval_next_run(schedule + strlen(CRON_PREFIX_INTERVAL), now, next_out);
 	if (strncmp(schedule, CRON_PREFIX_AT, strlen(CRON_PREFIX_AT)) == 0) {
 		long long ts = (long long)strtoll(schedule + strlen(CRON_PREFIX_AT), NULL, 10);
 		*next_out = ts;
