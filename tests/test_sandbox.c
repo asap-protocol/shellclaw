@@ -17,6 +17,7 @@
 
 #include "sandbox/sandbox.h"
 #include "sandbox/sandbox_landlock.h"
+#include "sandbox/sandbox_env.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -25,6 +26,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #ifdef __linux__
 #include <sys/stat.h>
 #include <arpa/inet.h>
@@ -32,7 +34,6 @@
 #include <netinet/in.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
-#include <sys/wait.h>
 #endif
 
 #define ASSERT(c) do { \
@@ -874,6 +875,137 @@ static int test_command_inherits_cgroup(void)
 }
 #endif
 
+/* --- No-namespace units for the wall-clock deadline rewrite (#116) and the
+ * secret-free child environment (#109). GitHub runners reject unshare, so
+ * the sandbox_exec paths above skip and these units keep the helpers
+ * covered on every host. Linked from sandbox_test.o. --- */
+
+long monotonic_elapsed_ms(const struct timespec *start);
+int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap);
+size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, int *hit_deadline);
+
+static int test_poll_remain_ms_bounds(void)
+{
+	ASSERT(poll_remain_ms(1000, 0, 100) == 100);
+	ASSERT(poll_remain_ms(1000, 950, 100) == 50);
+	ASSERT(poll_remain_ms(1000, 999, 100) == 1);
+	ASSERT(poll_remain_ms(1000, 2500, 100) == 1);
+	ASSERT(poll_remain_ms(1000, 0, 5000) == 1000);
+	return 0;
+}
+
+static int test_monotonic_elapsed_ms_never_negative(void)
+{
+	struct timespec start;
+	struct timespec future;
+
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	usleep(30000);
+	ASSERT(monotonic_elapsed_ms(&start) >= 20);
+	ASSERT(monotonic_elapsed_ms(&start) < 60000);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &future) == 0);
+	future.tv_sec += 10;
+	ASSERT(monotonic_elapsed_ms(&future) == 0);
+	return 0;
+}
+
+static int test_drain_pipe_reads_until_eof(void)
+{
+	char buf[64];
+	const char msg[] = "hi";
+	size_t total;
+	int hit = -1;
+	int fds[2];
+	pid_t pid;
+	int st;
+
+	ASSERT(pipe(fds) == 0);
+	pid = fork();
+	if (pid == 0) {
+		ssize_t w;
+		close(fds[0]);
+		w = write(fds[1], msg, sizeof(msg) - 1);
+		(void)w;
+		close(fds[1]);
+		exit(0);
+	}
+	close(fds[1]);
+	total = drain_pipe(fds[0], buf, sizeof(buf), 5000, &hit);
+	close(fds[0]);
+	waitpid(pid, &st, 0);
+	ASSERT(total == 2);
+	ASSERT(hit == 0);
+	ASSERT(buf[0] == 'h' && buf[1] == 'i');
+	return 0;
+}
+
+static int test_drain_pipe_stops_at_wall_deadline(void)
+{
+	char buf[256];
+	char byte = 'x';
+	size_t total;
+	int hit = -1;
+	int fds[2];
+	pid_t pid;
+	int st;
+
+	ASSERT(pipe(fds) == 0);
+	pid = fork();
+	if (pid == 0) {
+		close(fds[0]);
+		/* Trickle one byte every 20 ms so the pipe stays readable and the
+		 * cap is never reached: only the wall deadline can stop the loop. */
+		for (;;) {
+			if (write(fds[1], &byte, 1) <= 0)
+				exit(0);
+			usleep(20000);
+		}
+	}
+	close(fds[1]);
+	total = drain_pipe(fds[0], buf, sizeof(buf), 400, &hit);
+	close(fds[0]);
+	waitpid(pid, &st, 0);
+	ASSERT(hit == 1);
+	ASSERT(total >= 1);
+	ASSERT(total < sizeof(buf) - 1);
+	return 0;
+}
+
+static int test_scrubbed_env_child_loses_secrets(void)
+{
+	pid_t pid;
+	int st;
+	int status;
+
+	pid = fork();
+	if (pid == 0) {
+		if (setenv("SHELLCLAW_AUDIT_SECRET", "leak", 1) != 0)
+			exit(4);
+		if (setenv("PATH", "/usr/bin", 1) != 0)
+			exit(5);
+		sandbox_scrub_command_environment("/ws/home");
+		if (getenv("SHELLCLAW_AUDIT_SECRET"))
+			exit(1);
+		if (!getenv("PATH") || strcmp(getenv("PATH"), "/usr/bin") != 0)
+			exit(2);
+		if (!getenv("HOME") || strcmp(getenv("HOME"), "/ws/home") != 0)
+			exit(3);
+		exit(0);
+	}
+	if (waitpid(pid, &st, 0) < 0) {
+		fprintf(stderr, "FAIL: waitpid scrub child: %s\n", strerror(errno));
+		return 1;
+	}
+	if (!WIFEXITED(st))
+		return 1;
+	status = WEXITSTATUS(st);
+	if (status != 0) {
+		fprintf(stderr, "FAIL: scrub env child exit=%d\n", status);
+		return 1;
+	}
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_isolation_denied_helper());
@@ -883,6 +1015,11 @@ int main(void)
 	RUN(test_command_does_not_inherit_host_secrets());
 	RUN(test_null_cmd_returns_error());
 	RUN(test_zero_cap_returns_error());
+	RUN(test_scrubbed_env_child_loses_secrets());
+	RUN(test_poll_remain_ms_bounds());
+	RUN(test_monotonic_elapsed_ms_never_negative());
+	RUN(test_drain_pipe_reads_until_eof());
+	RUN(test_drain_pipe_stops_at_wall_deadline());
 	RUN(test_exit_nonzero_runs());
 	RUN(test_exit_122_is_not_isolation_failure());
 	RUN(test_exit_123_with_workspace_is_not_isolation_failure());

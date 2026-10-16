@@ -128,6 +128,9 @@ ASAP_INVOKE_TEST_O := $(BINDIR)/asap_invoke_test.o
 SANDBOX_CORE_O := src/sandbox/sandbox.o
 SANDBOX_LANDLOCK_O := src/sandbox/sandbox_landlock.o
 SANDBOX_ENV_O := src/sandbox/sandbox_env.o
+# Sandbox unit test object: exposes drain_pipe helpers (SHELLCLAW_SANDBOX_TEST)
+# so coverage does not depend on namespace privileges the CI runners revoke.
+SANDBOX_TEST_O := $(BINDIR)/sandbox_test.o
 SANDBOX_O  := $(SANDBOX_CORE_O) $(SANDBOX_LANDLOCK_O) $(SANDBOX_ENV_O)
 ALLOWLIST_SCAN_O := src/sandbox/allowlist.o
 ALLOWLIST_PATH_O := src/sandbox/allowlist_path.o
@@ -391,6 +394,9 @@ $(SANDBOX_CORE_O): src/sandbox/sandbox.c src/sandbox/sandbox.h src/sandbox/sandb
 
 $(SANDBOX_ENV_O): src/sandbox/sandbox_env.c src/sandbox/sandbox_env.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/sandbox/sandbox_env.c
+
+$(SANDBOX_TEST_O): src/sandbox/sandbox.c src/sandbox/sandbox.h src/sandbox/sandbox_landlock.h src/sandbox/sandbox_env.h
+	$(CC) $(CFLAGS) $(INC) -DSHELLCLAW_SANDBOX_TEST -c -o $@ src/sandbox/sandbox.c
 
 $(SANDBOX_LANDLOCK_O): src/sandbox/sandbox_landlock.c src/sandbox/sandbox_landlock.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/sandbox/sandbox_landlock.c
@@ -754,9 +760,9 @@ test_static: tests/test_static.c src/gateway/ui_assets.h src/gateway/static.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_static.c src/gateway/static.o $(LDLIBS)
 	$(DSYM_SCRIPT)
 
-test_sandbox: tests/test_sandbox.c $(SANDBOX_O)
+test_sandbox: tests/test_sandbox.c $(SANDBOX_TEST_O) $(SANDBOX_LANDLOCK_O) $(SANDBOX_ENV_O)
 	@mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_sandbox.c $(SANDBOX_O) $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_sandbox.c $(SANDBOX_TEST_O) $(SANDBOX_LANDLOCK_O) $(SANDBOX_ENV_O) $(LDLIBS)
 	$(DSYM_SCRIPT)
 
 test_allowlist: tests/test_allowlist.c $(ALLOWLIST_O)

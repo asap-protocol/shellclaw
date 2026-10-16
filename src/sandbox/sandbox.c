@@ -110,8 +110,18 @@ static void cgroup_remove(const char *base, const char *name)
 
 #endif /* __linux__ */
 
+/* Sandbox unit tests link the pipe helpers as globals under
+ * SHELLCLAW_SANDBOX_TEST (CR-21 provider-test pattern). CI runners revoke
+ * user namespaces, so the sandbox_exec success-path tests skip there and
+ * the wall-clock deadline rewrite would otherwise stay uncovered. */
+#ifdef SHELLCLAW_SANDBOX_TEST
+#define SANDBOX_UNIT
+#else
+#define SANDBOX_UNIT static
+#endif
+
 /* Wall time since start, or -1 if the monotonic clock cannot be read. */
-static long monotonic_elapsed_ms(const struct timespec *start)
+SANDBOX_UNIT long monotonic_elapsed_ms(const struct timespec *start)
 {
     struct timespec now;
     long ms;
@@ -123,7 +133,7 @@ static long monotonic_elapsed_ms(const struct timespec *start)
     return ms < 0 ? 0 : ms;
 }
 
-static int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap)
+SANDBOX_UNIT int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap)
 {
     long remain;
 
@@ -140,7 +150,7 @@ static int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap)
  * the pipe readable otherwise never advances the old counter, so the agent
  * stays blocked until cap fills.
  */
-static size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, int *hit_deadline)
+SANDBOX_UNIT size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, int *hit_deadline)
 {
     struct timespec start;
     size_t total = 0;
