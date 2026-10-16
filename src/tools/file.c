@@ -259,7 +259,14 @@ static int file_read(const char *path, char *result_buf, size_t max_len)
 		return -1;
 	}
 	size_t to_read = (size_t)sz;
-	if (to_read >= max_len - 1) to_read = max_len - 1;
+	/* A prefix with return 0 is the whole file to the model. write_file would
+	 * then replace the original and drop the unread tail. */
+	if (to_read + 1 > max_len) {
+		fclose(f);
+		snprintf(result_buf, max_len,
+		         "{\"error\":\"file exceeds result buffer\",\"bytes\":%ld}", sz);
+		return -1;
+	}
 	size_t n = fread(result_buf, 1, to_read, f);
 	fclose(f);
 	result_buf[n] = '\0';
