@@ -29,14 +29,17 @@
 
 static int parse_field(const char *s, int *out, int min_val, int max_val)
 {
+	char *end = NULL;
+	long n;
 	if (!s || !out) return -1;
 	if (strcmp(s, "*") == 0) {
 		*out = -1;
 		return 0;
 	}
-	char *end = NULL;
-	long n = strtol(s, &end, 10);
-	if (end == s || n < min_val || n > max_val) return -1;
+	/* strtol stops at the first junk character. "1,15" would otherwise
+	 * match only day 1 and still schedule successfully. */
+	n = strtol(s, &end, 10);
+	if (!end || end == s || *end != '\0' || n < min_val || n > max_val) return -1;
 	*out = (int)n;
 	return 0;
 }
@@ -129,7 +132,9 @@ static long long cron_next_from_expr(const char *cron_part, long long now)
 }
 
 /* Reject a span that does not fit in now+seconds. Signed wrap stores a past
- * next_run, and ack recomputes the same sum, so the job stays due forever. */
+ * next_run, and ack recomputes the same sum, so the job stays due forever.
+ * A number that stops early (interval:60abc) is rejected too: strto* would
+ * otherwise accept the numeric prefix. */
 static int interval_next_run(const char *num, long long now, long long *next_out)
 {
 	char *end;
@@ -137,7 +142,7 @@ static int interval_next_run(const char *num, long long now, long long *next_out
 
 	errno = 0;
 	sec = strtoll(num, &end, 10);
-	if (end == num || errno == ERANGE || sec <= 0)
+	if (end == num || *end != '\0' || errno == ERANGE || sec <= 0)
 		return -1;
 	if (now < 0 || sec > LLONG_MAX - now)
 		return -1;
@@ -151,7 +156,13 @@ int cron_parse_next_run(const char *schedule, long long now, long long *next_out
 	if (strncmp(schedule, CRON_PREFIX_INTERVAL, strlen(CRON_PREFIX_INTERVAL)) == 0)
 		return interval_next_run(schedule + strlen(CRON_PREFIX_INTERVAL), now, next_out);
 	if (strncmp(schedule, CRON_PREFIX_AT, strlen(CRON_PREFIX_AT)) == 0) {
-		long long ts = (long long)strtoll(schedule + strlen(CRON_PREFIX_AT), NULL, 10);
+		const char *num = schedule + strlen(CRON_PREFIX_AT);
+		char *end = NULL;
+		long long ts;
+		/* A partial convert (at:2026-10-08 -> 2026) is already due, so the
+		 * one-shot fires on the next poll and ack deletes the future reminder. */
+		ts = strtoll(num, &end, 10);
+		if (!end || end == num || *end != '\0') return -1;
 		*next_out = ts;
 		return 0;
 	}

@@ -164,6 +164,30 @@ static int test_interval_overflow_does_not_stay_due(void)
 	return 0;
 }
 
+/* strto* used to stop at the first non-digit and still return success.
+ * at:2026-10-08 became next_run 2026 (already due), so the one-shot fired
+ * on the next poll and ack deleted it. 1,3,5 matched only the first day. */
+static int test_schedule_rejects_partial_numbers(void)
+{
+	long long now = 1700000000;
+	long long next = 99;
+
+	ASSERT(cron_parse_next_run("at:2026-10-08", now, &next) == -1);
+	ASSERT(next == 99);
+	ASSERT(cron_parse_next_run("at:tomorrow", now, &next) == -1);
+	ASSERT(cron_parse_next_run("at:", now, &next) == -1);
+	ASSERT(cron_parse_next_run("interval:60abc", now, &next) == -1);
+	ASSERT(cron_parse_next_run("cron:0 9 * * 1,3,5", now, &next) == -1);
+	ASSERT(cron_parse_next_run("cron:0 9 1,15 * *", now, &next) == -1);
+	ASSERT(cron_parse_next_run("0 9 * * 1-5", now, &next) == 0);
+	ASSERT(next > now);
+	ASSERT(cron_parse_next_run("at:1700000100", now, &next) == 0);
+	ASSERT(next == 1700000100);
+	ASSERT(cron_parse_next_run("interval:60", now, &next) == 0);
+	ASSERT(next == now + 60);
+	return 0;
+}
+
 static int test_cron_job_crud_and_due(void)
 {
 	const char *path = "/tmp/shellclaw_test_cron.db";
@@ -740,6 +764,7 @@ int main(void)
 	RUN(test_cron_expr_monthly_beyond_eight_days());
 	RUN(test_invalid_schedule());
 	RUN(test_interval_overflow_does_not_stay_due());
+	RUN(test_schedule_rejects_partial_numbers());
 	RUN(test_cron_job_crud_and_due());
 	RUN(test_cron_tool_execute());
 	RUN(test_one_shot_detection());
