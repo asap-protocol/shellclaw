@@ -464,6 +464,87 @@ cleanup_early:
 	return failed;
 }
 
+/* A message past the summary-source cap must stay in the session. The summarizer
+ * only receives lines that fit; deleting the rest loses history the model never saw. */
+static int test_compaction_keeps_message_that_does_not_fit_summary(void)
+{
+	enum { BIG = 65 * 1024, JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *big = NULL;
+	const char *db_path = "build/test_agent_compact_fit.db";
+	const char *config_path = "build/test_agent_compact_fit.toml";
+	size_t off;
+	int i;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	memory_cleanup();
+	compaction_call_count = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	big = malloc((size_t)BIG + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !big || !loaded)
+		goto cleanup;
+	memset(big, 'A', (size_t)BIG);
+	memcpy(big + BIG - 16, "BIG_MARKER_END!!", 16);
+	big[BIG] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"{\"role\":\"user\",\"content\":\"alpha_small\"}");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"user\",\"content\":\"%s\"}", big);
+	for (i = 2; i < 6; i++) {
+		off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+			",{\"role\":\"user\",\"content\":\"m%d\"}", i);
+	}
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:compactfit", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 4\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, "cli:compactfit", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (session_load("cli:compactfit", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (strstr(loaded, "BIG_MARKER_END!!") == NULL) {
+		fprintf(stderr,
+			"FAIL: compacted session dropped the message that did not fit the summary\n");
+		goto cleanup;
+	}
+	if (strstr(loaded, "Summary of earlier") == NULL) {
+		fprintf(stderr, "FAIL: expected a summary of the messages that did fit\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(big);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
 static int test_local_offline_note_when_active_is_local(void)
 {
 	const char *path = "build/test_agent_local_note.toml";
@@ -1198,6 +1279,7 @@ int main(void)
 	RUN(test_react_loop_preserves_prior_tool_results());
 	RUN(test_session_persisted_after_exchange());
 	RUN(test_context_compaction_when_history_exceeds_max());
+	RUN(test_compaction_keeps_message_that_does_not_fit_summary());
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());
 	RUN(test_session_overflow_does_not_corrupt_history());
