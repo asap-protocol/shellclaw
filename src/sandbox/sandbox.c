@@ -12,7 +12,9 @@
  * procfs, applies Landlock, sets PR_SET_PDEATHSIG, and closes fds >= 3
  * so a timeout SIGKILL of the isolator cannot leave the command under
  * host init. The isolator joins its cgroup before the command fork so
- * memory.max and cpu.max apply to sh -c. Limits degrade if unavailable.
+ * memory.max and cpu.max apply to sh -c. The command process then
+ * replaces the inherited environment so provider keys and bot tokens
+ * are not readable via printenv. Limits degrade if unavailable.
  *
  * Non-Linux path: plain fork() + execl(); a warning is emitted to stderr.
  */
@@ -20,6 +22,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/sandbox.h"
+#include "sandbox/sandbox_env.h"
 #include "sandbox/sandbox_landlock.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -446,6 +449,7 @@ int sandbox_exec(const char *cmd, char *out, size_t out_cap,
 #endif
         close(errpipe[1]);
         close_inherited_fds();
+        sandbox_scrub_command_environment(workspace);
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
