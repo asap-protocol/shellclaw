@@ -92,7 +92,9 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		if (root) cJSON_Delete(root);
 		return -1;
 	}
-	int to_summarize_n = msg_count - max_ctx;
+	/* Tail keeps max_ctx-1 messages, so the summary must include index
+	 * msg_count-max_ctx. Stopping one short drops that turn from SQLite. */
+	int to_summarize_n = msg_count - max_ctx + 1;
 	char *source_buf = malloc(SUMMARY_SOURCE_MAX);
 	if (!source_buf) { cJSON_Delete(root); return -1; }
 	source_buf[0] = '\0';

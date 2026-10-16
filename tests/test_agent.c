@@ -366,7 +366,14 @@ cleanup:
 }
 
 static int compaction_call_count;
-static int compaction_init(const config_t *cfg) { (void)cfg; compaction_call_count = 0; return 0; }
+static int compaction_source_has_boundary;
+static int compaction_init(const config_t *cfg)
+{
+	(void)cfg;
+	compaction_call_count = 0;
+	compaction_source_has_boundary = 0;
+	return 0;
+}
 static int compaction_chat(const provider_message_t *messages, size_t message_count,
 	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
 {
@@ -377,6 +384,9 @@ static int compaction_chat(const provider_message_t *messages, size_t message_co
 	response->tool_calls_count = 0;
 	compaction_call_count++;
 	if (compaction_call_count == 1) {
+		const char *src = (message_count >= 2 && messages[1].content) ? messages[1].content : "";
+		/* msg_10 is the index the summary window and the kept tail both skipped. */
+		compaction_source_has_boundary = strstr(src, "msg_10\n") != NULL;
 		response->content = strdup("Summary of earlier conversation.");
 		return 0;
 	}
@@ -442,6 +452,8 @@ static int test_context_compaction_when_history_exceeds_max(void)
 	}
 	if (!found_summary) goto cleanup;
 	if (!found_tail) goto cleanup;
+	/* Boundary message must be in the summary source; the tail starts at msg_11. */
+	if (!compaction_source_has_boundary) goto cleanup;
 	failed = 0;
 cleanup:
 	config_free(cfg);
