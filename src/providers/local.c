@@ -1,6 +1,7 @@
 /**
  * @file local.c
  * @brief OpenAI-compatible Chat Completions client for llama-server; init probe marks unreachable without failing startup.
+ * A later chat probes again so a server that was down only at startup can still serve.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -183,6 +184,14 @@ static int local_chat(const provider_message_t *messages, size_t message_count,
 	if (!s_local_cfg) {
 		provider_set_error(response, "Local provider not initialized");
 		return -1;
+	}
+	/* Init probes once, often before llama-server has loaded the model.
+	 * Default fallback order puts local last, so router recovery (which
+	 * only probes backends before the active index) never clears the flag. */
+	if (s_local_unavailable) {
+		const char *endpoint = config_provider_local_endpoint(s_local_cfg);
+		if (endpoint && endpoint[0] != '\0' && provider_local_endpoint_reachable(endpoint))
+			provider_local_recovery_probe_succeeded();
 	}
 	if (s_local_unavailable) {
 		provider_set_error(response, "Local inference server unreachable");
