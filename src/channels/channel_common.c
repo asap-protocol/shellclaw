@@ -31,6 +31,23 @@ const channel_t *channel_get_by_name(const char *name)
 	return NULL;
 }
 
+size_t channel_outbound_chunk_len(const char *text, size_t max_bytes)
+{
+	size_t len;
+	size_t n;
+
+	if (!text || max_bytes == 0)
+		return 0;
+	len = strlen(text);
+	if (len <= max_bytes)
+		return len;
+	/* Walk back over UTF-8 continuation bytes so the cut sits on a boundary. */
+	n = max_bytes;
+	while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80)
+		n--;
+	return n > 0 ? n : max_bytes;
+}
+
 void channel_incoming_msg_clear(channel_incoming_msg_t *msg)
 {
 	if (!msg) return;

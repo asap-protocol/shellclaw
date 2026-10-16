@@ -38,6 +38,19 @@ typedef struct channel_incoming_msg {
 void channel_incoming_msg_clear(channel_incoming_msg_t *msg);
 
 /**
+ * Byte length of the next outbound piece of @p text.
+ * The piece is at most @p max_bytes and stops before a multibyte UTF-8
+ * character that would not fit, so chat APIs do not see a split code point.
+ *
+ * Example: `channel_outbound_chunk_len("hello", 2)` returns 2.
+ *
+ * @param text      NUL-terminated text. NULL returns 0.
+ * @param max_bytes Maximum piece size in bytes. 0 returns 0.
+ * @return Byte length of the next piece, or 0 when @p text is empty.
+ */
+size_t channel_outbound_chunk_len(const char *text, size_t max_bytes);
+
+/**
  * Channel vtable: init, poll, send, cleanup. CLI and Telegram implement this.
  */
 typedef struct channel {

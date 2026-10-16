@@ -862,25 +862,13 @@ static int discord_recipient_channel_id(const char *recipient, char *out, size_t
 	return 0;
 }
 
-static int discord_send(const char *recipient, const char *text,
-                        const channel_attachment_t *attachments, size_t att_count)
+static int discord_post_text(const char *channel_id, const char *text, const char *auth_hdr)
 {
-	struct discord_ctx *dc = &g_dc;
-	char channel_id[DISCORD_CHANNEL_ID_CAP];
 	cJSON *root;
 	char *json_body;
 	char url[DISCORD_URL_CAP];
-	char auth_hdr[DISCORD_AUTH_HDR_CAP];
 	int attempt;
-	(void)attachments;
-	if (att_count > 0)
-		return -1;
-	if (!dc->token || !recipient || !text || text[0] == '\0')
-		return -1;
-	if (strlen(text) > (size_t)DISCORD_MSG_MAX_LEN)
-		return -1;
-	if (discord_recipient_channel_id(recipient, channel_id, sizeof(channel_id)) != 0)
-		return -1;
+
 	root = cJSON_CreateObject();
 	if (!root)
 		return -1;
@@ -890,10 +878,6 @@ static int discord_send(const char *recipient, const char *text,
 	if (!json_body)
 		return -1;
 	if (snprintf(url, sizeof(url), DISCORD_API_MSG_URL, channel_id) >= (int)sizeof(url)) {
-		free(json_body);
-		return -1;
-	}
-	if (snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bot %s", dc->token) >= (int)sizeof(auth_hdr)) {
 		free(json_body);
 		return -1;
 	}
@@ -949,7 +933,44 @@ static int discord_send(const char *recipient, const char *text,
 		free(json_body);
 		return -1;
 	}
+	free(json_body);
 	return -1;
+}
+
+static int discord_send(const char *recipient, const char *text,
+                        const channel_attachment_t *attachments, size_t att_count)
+{
+	struct discord_ctx *dc = &g_dc;
+	char channel_id[DISCORD_CHANNEL_ID_CAP];
+	char auth_hdr[DISCORD_AUTH_HDR_CAP];
+	const char *cursor;
+
+	(void)attachments;
+	if (att_count > 0)
+		return -1;
+	if (!dc->token || !recipient || !text || text[0] == '\0')
+		return -1;
+	if (discord_recipient_channel_id(recipient, channel_id, sizeof(channel_id)) != 0)
+		return -1;
+	if (snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bot %s", dc->token) >=
+	    (int)sizeof(auth_hdr))
+		return -1;
+	/* A single REST message is 2000 characters. Longer replies used to fail
+	 * the whole send, so cron kept re-running the agent and the user saw nothing. */
+	cursor = text;
+	while (cursor[0] != '\0') {
+		char piece[DISCORD_MSG_MAX_LEN + 1];
+		size_t n = channel_outbound_chunk_len(cursor, (size_t)DISCORD_MSG_MAX_LEN);
+
+		if (n == 0 || n > (size_t)DISCORD_MSG_MAX_LEN)
+			return -1;
+		memcpy(piece, cursor, n);
+		piece[n] = '\0';
+		if (discord_post_text(channel_id, piece, auth_hdr) != 0)
+			return -1;
+		cursor += n;
+	}
+	return 0;
 }
 
 static void discord_cleanup(void)

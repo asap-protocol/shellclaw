@@ -74,6 +74,22 @@ static void test_stub_cleanup(void)
 	MU_ASSERT(1, "stub cleanup does not crash");
 }
 
+static void test_outbound_chunk_len(void)
+{
+	/* U+20AC EURO SIGN is the three-byte sequence e2 82 ac. */
+	const char euro[] = "x\xE2\x82\xAC" "y";
+	size_t n;
+
+	MU_ASSERT(channel_outbound_chunk_len(NULL, 10) == 0, "NULL text is empty");
+	MU_ASSERT(channel_outbound_chunk_len("", 10) == 0, "empty text is empty");
+	MU_ASSERT(channel_outbound_chunk_len("hi", 0) == 0, "zero cap is empty");
+	MU_ASSERT(channel_outbound_chunk_len("hello", 5) == 5, "exact fit stays one piece");
+	MU_ASSERT(channel_outbound_chunk_len("hello", 2) == 2, "ascii splits on the cap");
+	n = channel_outbound_chunk_len(euro, 2);
+	MU_ASSERT(n == 1, "multibyte character is not split");
+	MU_ASSERT(channel_outbound_chunk_len(euro + n, 3) == 3, "next piece is the whole euro sign");
+}
+
 int main(void)
 {
 	MU_RUN(test_stub_channel_exists);
@@ -82,6 +98,7 @@ int main(void)
 	MU_RUN(test_incoming_msg_clear_safe);
 	MU_RUN(test_stub_send_succeeds);
 	MU_RUN(test_stub_cleanup);
+	MU_RUN(test_outbound_chunk_len);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }
