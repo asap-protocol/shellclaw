@@ -130,7 +130,8 @@ SANDBOX_LANDLOCK_O := src/sandbox/sandbox_landlock.o
 SANDBOX_ENV_O := src/sandbox/sandbox_env.o
 # Sandbox unit test object: exposes drain_pipe helpers (SHELLCLAW_SANDBOX_TEST)
 # so coverage does not depend on namespace privileges the CI runners revoke.
-SANDBOX_TEST_O := $(BINDIR)/sandbox_test.o
+# Lives under src/sandbox/ so the coverage.sh capture (--directory src) merges it.
+SANDBOX_TEST_O := src/sandbox/sandbox_test.o
 SANDBOX_O  := $(SANDBOX_CORE_O) $(SANDBOX_LANDLOCK_O) $(SANDBOX_ENV_O)
 ALLOWLIST_SCAN_O := src/sandbox/allowlist.o
 ALLOWLIST_PATH_O := src/sandbox/allowlist_path.o
