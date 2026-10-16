@@ -82,6 +82,80 @@ static int copy_printed_session_json(char *dst, size_t dst_size, char *printed,
 
 static const char SUMMARIZE_SYSTEM[] = "Summarize the following conversation in one short paragraph. Output only the summary, no preamble.";
 
+/** True when the kept tail already starts with user, so a summary user turn would not alternate. */
+static int kept_tail_starts_with_user(const cJSON *root, int start)
+{
+	const cJSON *item;
+	const cJSON *role;
+
+	item = cJSON_GetArrayItem(root, start);
+	if (!item || !cJSON_IsObject(item))
+		return 0;
+	role = cJSON_GetObjectItem(item, "role");
+	return cJSON_IsString(role) && role->valuestring && strcmp(role->valuestring, "user") == 0;
+}
+
+/** Fold the summary into an existing user turn. A second user message 400s on Anthropic. */
+static int fold_summary_into_user(cJSON *item, const char *summary)
+{
+	const cJSON *content;
+	const char *old;
+	char *merged;
+	cJSON *node;
+	size_t old_len;
+	size_t sum_len;
+	size_t n;
+
+	content = cJSON_GetObjectItem(item, "content");
+	old = (content && cJSON_IsString(content) && content->valuestring) ? content->valuestring : "";
+	old_len = strlen(old);
+	sum_len = strlen(summary ? summary : "");
+	if (sum_len > SIZE_MAX - old_len - 3)
+		return -1;
+	n = sum_len + 2 + old_len + 1;
+	merged = malloc(n);
+	if (!merged)
+		return -1;
+	snprintf(merged, n, "%s\n\n%s", summary ? summary : "", old);
+	node = cJSON_CreateString(merged);
+	free(merged);
+	if (!node)
+		return -1;
+	if (cJSON_GetObjectItem(item, "content")) {
+		if (!cJSON_ReplaceItemInObject(item, "content", node)) {
+			cJSON_Delete(node);
+			return -1;
+		}
+		return 0;
+	}
+	if (!cJSON_AddItemToObject(item, "content", node)) {
+		cJSON_Delete(node);
+		return -1;
+	}
+	return 0;
+}
+
+static int append_summary_user(cJSON *arr, const char *summary)
+{
+	cJSON *obj;
+	cJSON *role;
+	cJSON *content;
+
+	obj = cJSON_CreateObject();
+	role = cJSON_CreateString("user");
+	content = cJSON_CreateString(summary ? summary : "");
+	if (!obj || !role || !content) {
+		cJSON_Delete(obj);
+		cJSON_Delete(role);
+		cJSON_Delete(content);
+		return -1;
+	}
+	cJSON_AddItemToObject(obj, "role", role);
+	cJSON_AddItemToObject(obj, "content", content);
+	cJSON_AddItemToArray(arr, obj);
+	return 0;
+}
+
 /** Summarize oldest messages when over max_ctx; replace with one summary + trailing. */
 static int compact_session_via_llm(const char *session_id, char *session_buf, size_t session_buf_size,
 	int msg_count, int max_ctx, const provider_t *provider)
@@ -128,29 +202,50 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	summary_buf[sum_len] = '\0';
 	provider_response_clear(&resp);
 	cJSON *new_arr = cJSON_CreateArray();
-	if (!new_arr) { cJSON_Delete(root); return -1; }
-	cJSON *summ_obj = cJSON_CreateObject();
-	if (summ_obj) {
-		cJSON_AddItemToObject(summ_obj, "role", cJSON_CreateString("user"));
-		cJSON_AddItemToObject(summ_obj, "content", cJSON_CreateString(summary_buf));
-		cJSON_AddItemToArray(new_arr, summ_obj);
-	}
 	int keep = max_ctx - 1;
 	int start = msg_count - keep;
+	int merge;
+	int folded = 0;
 	if (start < 0) start = 0;
+	/* Tail can start on a user turn (odd max_context_messages, or a cut that
+	 * lands on user). Inserting another user role makes Anthropic reject the
+	 * session on this turn and every later one. */
+	merge = kept_tail_starts_with_user(root, start);
+	if (!new_arr) { cJSON_Delete(root); return -1; }
+	if (!merge && append_summary_user(new_arr, summary_buf) != 0) {
+		cJSON_Delete(new_arr);
+		cJSON_Delete(root);
+		return -1;
+	}
 	for (int i = start; i < msg_count; i++) {
 		const cJSON *item = cJSON_GetArrayItem(root, i);
-		if (item) {
-			cJSON *dup = cJSON_Duplicate(item, 1);
-			if (dup) cJSON_AddItemToArray(new_arr, dup);
+		cJSON *dup;
+		if (!item) continue;
+		dup = cJSON_Duplicate(item, 1);
+		if (!dup) continue;
+		if (merge && i == start) {
+			if (fold_summary_into_user(dup, summary_buf) != 0) {
+				cJSON_Delete(dup);
+				cJSON_Delete(new_arr);
+				cJSON_Delete(root);
+				return -1;
+			}
+			folded = 1;
 		}
+		cJSON_AddItemToArray(new_arr, dup);
+	}
+	if (merge && !folded) {
+		cJSON_Delete(new_arr);
+		cJSON_Delete(root);
+		return -1;
 	}
 	cJSON_Delete(root);
 	char *printed = cJSON_PrintUnformatted(new_arr);
 	cJSON_Delete(new_arr);
 	if (copy_printed_session_json(session_buf, session_buf_size, printed, session_id) != 0)
 		return -1;
-	session_save(session_id, session_buf);
+	/* Do not session_save here. A failed follow-up chat must leave the stored
+	 * transcript unchanged; agent_persist_session writes this buffer on success. */
 	return 0;
 }
 
