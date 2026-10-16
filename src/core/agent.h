@@ -58,14 +58,17 @@ int agent_run(const config_t *cfg, const char *session_id, const char *user_mess
  * cron_ack_delivery() (SQLite amalgamation is SQLITE_THREADSAFE=0).
  * Inbound mcp.tool_call must hold it around tool execute (see #60).
  * Inbound state.query must hold it around memory_get_row_counts() (see #60).
- * Release before channel I/O (ch->send). The mutex is not recursive.
+ * Dashboard /api/memory, /api/sessions list, and /api/cron handlers must hold
+ * it around g_db. cron_poll must hold it around due-job SQL, and must release
+ * it before the re-offer sleep. The mutex is not recursive.
+ * Release before channel I/O (ch->send).
  */
 void agent_lock(void);
 
 /**
  * Release the global agent mutex after agent_run(), a locked session_delete(),
- * inbound mcp.tool_call execute, a locked state.query memory read, or a
- * locked cron_ack_delivery().
+ * inbound mcp.tool_call execute, a locked state.query memory read, a locked
+ * cron_ack_delivery(), a dashboard g_db handler, or cron_poll's due-job SQL.
  */
 void agent_unlock(void);
 
