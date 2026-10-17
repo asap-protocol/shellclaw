@@ -281,6 +281,62 @@ static void test_shell_caps_output_without_hanging(void)
 	          "sequential sleep 9999 did not leak");
 }
 
+static void trickle_timeout_watchdog(int sig)
+{
+	(void)sig;
+	fprintf(stderr, "FAIL: shell timeout did not fire while stdout trickled\n");
+	_exit(2);
+}
+
+/* Idle-only poll accounting used to ignore shell_timeout_sec while the
+ * child kept the pipe readable. The agent lock stayed held until the
+ * output buffer filled. */
+static void test_shell_trickle_output_hits_timeout(void)
+{
+	const tool_t *t = tool_shell_get();
+	config_t *cfg = NULL;
+	char errbuf[256];
+	char cfg_path[64];
+	char buf[8192];
+	FILE *f;
+	struct timespec t0;
+	struct timespec t1;
+	long elapsed_ms;
+	int before;
+	int r;
+
+	snprintf(cfg_path, sizeof(cfg_path), "/tmp/sc_shell_to_%d.toml", (int)getpid());
+	f = fopen(cfg_path, "w");
+	MU_ASSERT(f != NULL, "write timeout config");
+	fputs("[agent]\nmodel = \"test\"\n[sandbox]\nenabled = false\nshell_timeout_sec = 1\n", f);
+	fclose(f);
+	MU_ASSERT(config_load(cfg_path, &cfg, errbuf, sizeof(errbuf)) == 0, "load timeout config");
+	tool_shell_set_config(cfg);
+	before = count_sleep_argv("9999");
+	MU_ASSERT(before >= 0, "can count sleep 9999 before trickle timeout");
+	memset(buf, 0, sizeof(buf));
+	signal(SIGALRM, trickle_timeout_watchdog);
+	alarm(4);
+	MU_ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0, "clock start");
+	/* The background sleep sits in the command process group, so the
+	 * timeout path must group-kill it together with the trickling shell. */
+	r = t->execute("{\"command\":\"sleep 9999 & while true; do echo x; sleep 0.05; done\"}",
+	               buf, sizeof(buf));
+	alarm(0);
+	signal(SIGALRM, SIG_DFL);
+	MU_ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0, "clock end");
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	tool_shell_set_config(NULL);
+	config_free(cfg);
+	unlink(cfg_path);
+	MU_ASSERT(r == 0, "trickle command returns");
+	MU_ASSERT(strstr(buf, "timed out") != NULL, "trickle command reports timeout");
+	MU_ASSERT(elapsed_ms < 3000, "trickle command stopped near the 1s timeout");
+	MU_ASSERT(sleep_argv_did_not_grow("9999", before),
+	          "timeout path killed the background sleep 9999");
+}
+
 static void test_shell_caps_output_kills_background_sleep(void)
 {
 	const tool_t *t = tool_shell_get();
@@ -317,6 +373,7 @@ int main(void)
 	MU_RUN(test_shell_invalid_json);
 	MU_RUN(test_shell_missing_command);
 	MU_RUN(test_shell_caps_output_without_hanging);
+	MU_RUN(test_shell_trickle_output_hits_timeout);
 	MU_RUN(test_shell_caps_output_kills_background_sleep);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
