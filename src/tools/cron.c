@@ -429,9 +429,16 @@ int cron_ack_delivery(const char *job_id)
 	}
 	now = (long long)time(NULL);
 	rc = cron_parse_next_run(row.schedule, now, &next);
-	cron_job_row_free(&row);
-	if (rc != 0)
+	if (rc != 0) {
+		/* A stored schedule the parser now rejects (e.g. a legacy comma
+		 * list) would otherwise snooze the job for a year with no trace;
+		 * log the job so the silent gap is diagnosable. */
+		fprintf(stderr,
+			"shellclaw: cron: job '%s' schedule '%s' rejected; next run snoozed +365d\n",
+			row.id, row.schedule);
 		next = now + 365LL * 24 * 3600;
+	}
+	cron_job_row_free(&row);
 	rc = cron_job_update_next_run(job_id, next);
 	if (rc == 0)
 		cron_offer_release(job_id);
