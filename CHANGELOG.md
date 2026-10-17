@@ -5,6 +5,10 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Session compaction includes the boundary turn (index `msg_count - max_context_messages`) in the summary window, so the turn at the keep-tail boundary is not deleted without being summarized.
+- Session compaction keeps a message that does not fit the 64 KiB summary source, and everything after it, instead of skipping the long line and deleting it anyway.
+- Session compaction no longer persists the summarized transcript before the user turn finishes: a failed follow-up provider call leaves the raw stored session unchanged, and when the kept tail already starts with a user turn the summary is folded into that turn so consecutive user roles cannot break the next Anthropic call (supersedes #126).
+- Session compaction summarizes a message larger than the summary source as a truncated `[truncated]` stub, so a single oversized line can no longer abort the pass with an empty summary source or keep the session above `max_context_messages` forever.
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
 - Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
 - Dashboard config save and JSON patch validation use a unique temp plus `fsync`, and the live gateway config pointer is published once under `agent_lock`.
