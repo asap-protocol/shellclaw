@@ -5,6 +5,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Live config reload reaches the Anthropic provider (`provider_anthropic_set_live_config`, guarded like OpenAI), so dashboard/SIGHUP reloads update model and `max_tokens` instead of staying on the config captured at init.
+- Parallel tool results are grouped into one `user` message (one `tool_result` block per call, per the Messages API contract), fixing Anthropic 400s on parallel tool calls.
+- The local provider re-probes on the next request after an unreachable startup, at most once every 15 seconds, so a down `llama-server` no longer costs synchronous curl probes on every agent turn.
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
 - Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
 - Dashboard config save and JSON patch validation use a unique temp plus `fsync`, and the live gateway config pointer is published once under `agent_lock`.
