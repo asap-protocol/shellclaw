@@ -4,6 +4,8 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-25
+
 ### Fixed
 - Provider model ids keep their vendor prefix in config but are stripped per backend before the request: `anthropic/claude-...` no longer reaches the Anthropic API (HTTP 4xx) or OpenAI after a 5xx, so the fallback chain runs through to local.
 - WebChat writes are moved off the agent thread: frames are queued and the lws service thread is woken (`lws_cancel_service`), marking writable only from `EVENT_WAIT_CANCELLED`, which stops the poll-set race against a closing socket.
@@ -79,8 +81,6 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Document that protocol-public `POST /asap` can invoke local tools; production must set `[asap].trusted_senders` before exposing the gateway.
 
 ---
-
-## [1.0.0] - TBD
 
 **Phase 5: Edge AI Hardware & Release** — Jetson Orin Nano Super primary target.
 
