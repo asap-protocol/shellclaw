@@ -372,11 +372,22 @@ static int telegram_post_chunk(const char *chat_id, const char *text)
 	return ret;
 }
 
+typedef struct {
+	const char *chat_id;
+} tg_chunk_ctx_t;
+
+static int tg_post_piece(const char *piece, void *userdata)
+{
+	const tg_chunk_ctx_t *ctx = (const tg_chunk_ctx_t *)userdata;
+
+	return telegram_post_chunk(ctx->chat_id, piece);
+}
+
 static int tg_send(const char *recipient, const char *text,
                    const channel_attachment_t *attachments, size_t att_count)
 {
+	tg_chunk_ctx_t ctx;
 	const char *chat_id;
-	const char *cursor;
 
 	(void)attachments;
 	(void)att_count;
@@ -389,20 +400,8 @@ static int tg_send(const char *recipient, const char *text,
 		chat_id = recipient;
 	if (chat_id[0] == '\0')
 		return -1;
-	cursor = text;
-	while (cursor[0] != '\0') {
-		char piece[TG_TEXT_MAX + 1];
-		size_t n = channel_outbound_chunk_len(cursor, TG_TEXT_MAX);
-
-		if (n == 0 || n > TG_TEXT_MAX)
-			return -1;
-		memcpy(piece, cursor, n);
-		piece[n] = '\0';
-		if (telegram_post_chunk(chat_id, piece) != 0)
-			return -1;
-		cursor += n;
-	}
-	return 0;
+	ctx.chat_id = chat_id;
+	return channel_send_chunked(text, TG_TEXT_MAX, tg_post_piece, &ctx, NULL);
 }
 
 static void tg_cleanup(void)

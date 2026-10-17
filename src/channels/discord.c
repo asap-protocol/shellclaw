@@ -937,40 +937,37 @@ static int discord_post_text(const char *channel_id, const char *text, const cha
 	return -1;
 }
 
+struct discord_chunk_ctx {
+	char channel_id[DISCORD_CHANNEL_ID_CAP];
+	char auth_hdr[DISCORD_AUTH_HDR_CAP];
+};
+
+static int discord_post_piece(const char *piece, void *userdata)
+{
+	const struct discord_chunk_ctx *ctx = (const struct discord_chunk_ctx *)userdata;
+
+	return discord_post_text(ctx->channel_id, piece, ctx->auth_hdr);
+}
+
 static int discord_send(const char *recipient, const char *text,
                         const channel_attachment_t *attachments, size_t att_count)
 {
+	struct discord_chunk_ctx ctx;
 	struct discord_ctx *dc = &g_dc;
-	char channel_id[DISCORD_CHANNEL_ID_CAP];
-	char auth_hdr[DISCORD_AUTH_HDR_CAP];
-	const char *cursor;
 
 	(void)attachments;
 	if (att_count > 0)
 		return -1;
 	if (!dc->token || !recipient || !text || text[0] == '\0')
 		return -1;
-	if (discord_recipient_channel_id(recipient, channel_id, sizeof(channel_id)) != 0)
+	/* A single REST message is capped at 2000 characters, so a longer
+	 * reply is delivered as several messages. */
+	if (discord_recipient_channel_id(recipient, ctx.channel_id, sizeof(ctx.channel_id)) != 0)
 		return -1;
-	if (snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bot %s", dc->token) >=
-	    (int)sizeof(auth_hdr))
+	if (snprintf(ctx.auth_hdr, sizeof(ctx.auth_hdr), "Authorization: Bot %s", dc->token) >=
+	    (int)sizeof(ctx.auth_hdr))
 		return -1;
-	/* A single REST message is 2000 characters. Longer replies used to fail
-	 * the whole send, so cron kept re-running the agent and the user saw nothing. */
-	cursor = text;
-	while (cursor[0] != '\0') {
-		char piece[DISCORD_MSG_MAX_LEN + 1];
-		size_t n = channel_outbound_chunk_len(cursor, (size_t)DISCORD_MSG_MAX_LEN);
-
-		if (n == 0 || n > (size_t)DISCORD_MSG_MAX_LEN)
-			return -1;
-		memcpy(piece, cursor, n);
-		piece[n] = '\0';
-		if (discord_post_text(channel_id, piece, auth_hdr) != 0)
-			return -1;
-		cursor += n;
-	}
-	return 0;
+	return channel_send_chunked(text, (size_t)DISCORD_MSG_MAX_LEN, discord_post_piece, &ctx, NULL);
 }
 
 static void discord_cleanup(void)
