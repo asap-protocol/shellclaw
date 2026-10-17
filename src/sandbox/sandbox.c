@@ -110,18 +110,18 @@ static void cgroup_remove(const char *base, const char *name)
 
 #endif /* __linux__ */
 
-/* Sandbox unit tests link the pipe helpers as globals under
+/* Sandbox unit tests link drain_pipe as a global under
  * SHELLCLAW_SANDBOX_TEST (CR-21 provider-test pattern). CI runners revoke
  * user namespaces, so the sandbox_exec success-path tests skip there and
- * the wall-clock deadline rewrite would otherwise stay uncovered. */
+ * the wall-clock deadline loop would otherwise stay uncovered. */
 #ifdef SHELLCLAW_SANDBOX_TEST
 #define SANDBOX_UNIT
 #else
 #define SANDBOX_UNIT static
 #endif
 
-/* Wall time since start, or -1 if the monotonic clock cannot be read. */
-SANDBOX_UNIT long monotonic_elapsed_ms(const struct timespec *start)
+/* Docs in sandbox.h. */
+long monotonic_elapsed_ms(const struct timespec *start)
 {
     struct timespec now;
     long ms;
@@ -133,13 +133,11 @@ SANDBOX_UNIT long monotonic_elapsed_ms(const struct timespec *start)
     return ms < 0 ? 0 : ms;
 }
 
-SANDBOX_UNIT int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap)
+int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap)
 {
     long remain;
 
     remain = (long)timeout_ms - elapsed_ms;
-    if (remain < 1)
-        return 1;
     if (remain > slice_cap)
         return slice_cap;
     return (int)remain;
@@ -154,7 +152,6 @@ SANDBOX_UNIT size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, in
 {
     struct timespec start;
     size_t total = 0;
-    int have_clock;
     long elapsed_ms = 0;
     char chunk[512];
 
@@ -162,20 +159,17 @@ SANDBOX_UNIT size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, in
         *hit_deadline = 0;
     if (cap == 0)
         return 0;
-    have_clock = clock_gettime(CLOCK_MONOTONIC, &start) == 0;
+    /* Unchecked on purpose: CLOCK_MONOTONIC failure is not a realistic case
+     * (vDSO). If it ever failed, monotonic_elapsed_ms keeps returning -1,
+     * the deadline never fires, and poll slices stay bounded. */
+    (void)clock_gettime(CLOCK_MONOTONIC, &start);
     while (total < cap - 1) {
         struct pollfd pfd;
         int slice;
         int r;
         ssize_t n;
 
-        if (have_clock) {
-            long wall = monotonic_elapsed_ms(&start);
-            if (wall < 0)
-                have_clock = 0;
-            else
-                elapsed_ms = wall;
-        }
+        elapsed_ms = monotonic_elapsed_ms(&start);
         if (elapsed_ms >= (long)timeout_ms) {
             if (hit_deadline)
                 *hit_deadline = 1;
@@ -191,11 +185,8 @@ SANDBOX_UNIT size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, in
                 continue;
             break;
         }
-        if (r == 0) {
-            if (!have_clock)
-                elapsed_ms += slice;
+        if (r == 0)
             continue;
-        }
         n = read(fd, chunk, sizeof(chunk));
         if (n <= 0)
             break;

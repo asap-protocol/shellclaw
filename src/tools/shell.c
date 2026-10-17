@@ -66,19 +66,6 @@ static void kill_command_tree(pid_t pid)
 		(void)kill(pid, SIGKILL);
 }
 
-/* Wall time since start, or -1 if the monotonic clock cannot be read. */
-static long monotonic_elapsed_ms(const struct timespec *start)
-{
-	struct timespec now;
-	long ms;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-		return -1;
-	ms = (now.tv_sec - start->tv_sec) * 1000L
-		+ (now.tv_nsec - start->tv_nsec) / 1000000L;
-	return ms < 0 ? 0 : ms;
-}
-
 /* Always SIGKILL the process group first so background grandchildren cannot
  * leak after the shell has already exited (SIGPIPE, or `cmd &`). Then reap
  * the tracked pid. Matching the hang fix for #69 / #96. */
@@ -129,8 +116,8 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 	size_t total = 0;
 	int timed_out = 0;
 	long elapsed_ms = 0;
+	long timeout_ms;
 	struct timespec start_ts;
-	int have_clock;
 	char buf[256];
 	if (pipe(pipefd) != 0) {
 		snprintf(result_buf, max_len, "{\"error\":\"pipe failed\"}");
@@ -155,23 +142,20 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 	(void)setpgid(pid, pid);
 	close(pipefd[1]);
 	result_buf[0] = '\0';
-	have_clock = clock_gettime(CLOCK_MONOTONIC, &start_ts) == 0;
+	/* Unchecked on purpose: CLOCK_MONOTONIC failure is not a realistic case
+	 * (vDSO). If it ever failed, monotonic_elapsed_ms keeps returning -1,
+	 * the deadline never fires, and poll slices stay bounded. */
+	(void)clock_gettime(CLOCK_MONOTONIC, &start_ts);
 	/* Wall time, not idle poll time: a steady writer never used to trip
 	 * the timeout, so the agent lock stayed held until the buffer filled. */
+	timeout_ms = (long)timeout_sec * 1000L;
 	while (total < max_len - 1) {
 		struct pollfd pfd;
-		long remain;
 		int rem;
 		int r;
 		ssize_t n;
-		if (have_clock) {
-			long wall = monotonic_elapsed_ms(&start_ts);
-			if (wall < 0)
-				have_clock = 0;
-			else
-				elapsed_ms = wall;
-		}
-		if (elapsed_ms >= (long)timeout_sec * 1000L) {
+		elapsed_ms = monotonic_elapsed_ms(&start_ts);
+		if (elapsed_ms >= timeout_ms) {
 			timed_out = 1;
 			kill_command_tree(pid);
 			break;
@@ -179,23 +163,14 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 		pfd.fd = pipefd[0];
 		pfd.events = POLLIN;
 		pfd.revents = 0;
-		remain = (long)timeout_sec * 1000L - elapsed_ms;
-		if (remain > 5000)
-			rem = 5000;
-		else if (remain < 1)
-			rem = 1;
-		else
-			rem = (int)remain;
+		rem = poll_remain_ms((int)timeout_ms, elapsed_ms, 5000);
 		r = poll(&pfd, 1, rem);
 		if (r < 0) {
 			if (errno == EINTR) continue;
 			break;
 		}
-		if (r == 0) {
-			if (!have_clock)
-				elapsed_ms += rem;
+		if (r == 0)
 			continue;
-		}
 		n = read(pipefd[0], buf, sizeof(buf));
 		if (n <= 0) break;
 		append_unsandboxed_output(result_buf, max_len, &total, buf, (size_t)n);

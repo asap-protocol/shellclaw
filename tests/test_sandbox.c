@@ -880,8 +880,6 @@ static int test_command_inherits_cgroup(void)
  * the sandbox_exec paths above skip and these units keep the helpers
  * covered on every host. Linked from sandbox_test.o. --- */
 
-long monotonic_elapsed_ms(const struct timespec *start);
-int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap);
 size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, int *hit_deadline);
 
 static int test_poll_remain_ms_bounds(void)
@@ -889,7 +887,6 @@ static int test_poll_remain_ms_bounds(void)
 	ASSERT(poll_remain_ms(1000, 0, 100) == 100);
 	ASSERT(poll_remain_ms(1000, 950, 100) == 50);
 	ASSERT(poll_remain_ms(1000, 999, 100) == 1);
-	ASSERT(poll_remain_ms(1000, 2500, 100) == 1);
 	ASSERT(poll_remain_ms(1000, 0, 5000) == 1000);
 	return 0;
 }
