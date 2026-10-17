@@ -5,6 +5,10 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Dashboard and cron SQLite access is serialized with `agent_lock()` (matching `POST /asap`), including `DELETE /api/sessions/{id}` session deletion, so the lws service thread cannot race `agent_run` / `cron_poll` on the shared `g_db` (`SQLITE_THREADSAFE=0`).
+- `interval:` schedules reject intervals that do not fit `now + seconds` and numbers that stop parsing early (`interval:60abc`), instead of wrapping to a past `next_run` that stays due and re-fires forever.
+- Cron schedules reject partial numbers instead of silently accepting the numeric prefix: `at:2026-10-08` (would become 2026), comma lists such as `0 9 1,15 * *`, and step syntax are now parse errors.
+- Stored recurring jobs whose schedule the stricter parser now rejects no longer disappear silently: on ack they are snoozed to `now + 365d` and the job id and schedule are logged (`shellclaw: cron:`), so the year-long gap is diagnosable.
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
 - Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
 - Dashboard config save and JSON patch validation use a unique temp plus `fsync`, and the live gateway config pointer is published once under `agent_lock`.
