@@ -5,6 +5,10 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Dashboard and cron SQLite access is serialized with `agent_lock()` (matching `POST /asap`), including `DELETE /api/sessions/{id}` session deletion, so the lws service thread cannot race `agent_run` / `cron_poll` on the shared `g_db` (`SQLITE_THREADSAFE=0`).
+- `interval:` schedules reject intervals that do not fit `now + seconds` and numbers that stop parsing early (`interval:60abc`), instead of wrapping to a past `next_run` that stays due and re-fires forever.
+- Cron schedules reject partial numbers instead of silently accepting the numeric prefix: `at:2026-10-08` (would become 2026), comma lists such as `0 9 1,15 * *`, and step syntax are now parse errors.
+- Stored recurring jobs whose schedule the stricter parser now rejects no longer disappear silently: on ack they are snoozed to `now + 365d` and the job id and schedule are logged (`shellclaw: cron:`), so the year-long gap is diagnosable.
 - Session compaction includes the boundary turn (index `msg_count - max_context_messages`) in the summary window, so the turn at the keep-tail boundary is not deleted without being summarized.
 - Session compaction keeps a message that does not fit the 64 KiB summary source, and everything after it, instead of skipping the long line and deleting it anyway.
 - Session compaction no longer persists the summarized transcript before the user turn finishes: a failed follow-up provider call leaves the raw stored session unchanged, and when the kept tail already starts with a user turn the summary is folded into that turn so consecutive user roles cannot break the next Anthropic call (supersedes #126).

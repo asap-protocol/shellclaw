@@ -458,8 +458,13 @@ static void handle_skill_delete(const config_t *cfg, const char *name,
 static void handle_memory_get(const char *query, int limit, char *buf, size_t size, int *status)
 {
 	char *results = malloc(MEMORY_RESULTS_MAX);
+	int recall_rc;
 	if (!results) { json_error(buf, size, status, 500, "Out of memory"); return; }
-	if (memory_recall(query ? query : "", results, MEMORY_RESULTS_MAX, limit > 0 ? limit : 20) != 0) {
+	agent_lock();
+	recall_rc = memory_recall(query ? query : "", results, MEMORY_RESULTS_MAX,
+				   limit > 0 ? limit : 20);
+	agent_unlock();
+	if (recall_rc != 0) {
 		free(results);
 		json_error(buf, size, status, 500, "Memory recall failed");
 		return;
@@ -481,7 +486,10 @@ static void handle_memory_get(const char *query, int limit, char *buf, size_t si
 static void handle_sessions_list(char *buf, size_t size, int *status)
 {
 	char *ids[64];
-	int n = session_list(ids, 64);
+	int n;
+	agent_lock();
+	n = session_list(ids, 64);
+	agent_unlock();
 	cJSON *arr = cJSON_CreateArray();
 	if (!arr) { json_error(buf, size, status, 500, "Internal error"); return; }
 	for (int i = 0; i < n; i++) {
@@ -500,7 +508,11 @@ static void handle_sessions_list(char *buf, size_t size, int *status)
 
 static void handle_session_delete(const char *id, char *buf, size_t size, int *status)
 {
-	if (session_delete(id) != 0) {
+	int rc;
+	agent_lock();
+	rc = session_delete(id);
+	agent_unlock();
+	if (rc != 0) {
 		json_error(buf, size, status, 404, "Session not found");
 		return;
 	}
@@ -522,7 +534,9 @@ static void handle_cron_list(char *buf, size_t size, int *status)
 	int n;
 	int i;
 	if (!rows) { json_error(buf, size, status, 500, "Out of memory"); return; }
+	agent_lock();
 	n = cron_job_list(rows, 64);
+	agent_unlock();
 	if (n < 0) {
 		free(rows);
 		json_error(buf, size, status, 500, "Internal error");
@@ -580,7 +594,10 @@ static void handle_cron_create(const char *body, size_t body_len, char *buf, siz
 		id[0] = '\0';
 	const char *ch = (channel && cJSON_IsString(channel)) ? channel->valuestring : NULL;
 	const char *rec = (recipient && cJSON_IsString(recipient)) ? recipient->valuestring : NULL;
-	int ret = cron_create_job(schedule->valuestring, message->valuestring, ch, rec, id, sizeof(id));
+	int ret;
+	agent_lock();
+	ret = cron_create_job(schedule->valuestring, message->valuestring, ch, rec, id, sizeof(id));
+	agent_unlock();
 	cJSON_Delete(root);
 	if (ret != 0) {
 		json_error(buf, size, status, 400, "Failed to create job");
@@ -600,7 +617,11 @@ static void handle_cron_create(const char *body, size_t body_len, char *buf, siz
 
 static void handle_cron_delete(const char *id, char *buf, size_t size, int *status)
 {
-	if (cron_job_delete(id) != 0) {
+	int rc;
+	agent_lock();
+	rc = cron_job_delete(id);
+	agent_unlock();
+	if (rc != 0) {
 		json_error(buf, size, status, 404, "Job not found");
 		return;
 	}
@@ -610,7 +631,11 @@ static void handle_cron_delete(const char *id, char *buf, size_t size, int *stat
 
 static void handle_cron_toggle(const char *id, char *buf, size_t size, int *status)
 {
-	if (cron_job_toggle(id) != 0) {
+	int rc;
+	agent_lock();
+	rc = cron_job_toggle(id);
+	agent_unlock();
+	if (rc != 0) {
 		json_error(buf, size, status, 404, "Job not found");
 		return;
 	}
@@ -964,8 +989,10 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		if (method != HTTP_GET) { json_error(buf, size, status, 405, "Method not allowed"); return 0; }
 		char qbuf[256] = {0};
 		char lbuf[32] = {0};
-		lws_get_urlarg_by_name_safe(wsi, "q", qbuf, sizeof(qbuf));
-		lws_get_urlarg_by_name_safe(wsi, "limit", lbuf, sizeof(lbuf));
+		if (wsi) {
+			lws_get_urlarg_by_name_safe(wsi, "q", qbuf, sizeof(qbuf));
+			lws_get_urlarg_by_name_safe(wsi, "limit", lbuf, sizeof(lbuf));
+		}
 		int limit = parse_memory_limit_arg(lbuf[0] ? lbuf : NULL);
 		handle_memory_get(qbuf[0] ? qbuf : NULL, limit, buf, size, status);
 		return 0;

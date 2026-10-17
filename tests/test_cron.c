@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "tools/cron.h"
+#include "core/agent.h"
 #include "core/memory.h"
 #include "channels/channel.h"
 #include <stdio.h>
@@ -14,6 +15,13 @@
 
 #define ASSERT(c) do { if (!(c)) { fprintf(stderr, "FAIL: %s:%d %s\n", __FILE__, __LINE__, #c); return 1; } } while (0)
 #define RUN(t) do { int r = (t); if (r) return r; } while (0)
+
+/** Satisfies agent.o. Cron tests never enter the local-backend prompt path. */
+void provider_router_active_backend_snapshot(char *dst, size_t dst_sz)
+{
+	if (dst && dst_sz > 0)
+		dst[0] = '\0';
+}
 
 static void cron_test_reset_offers(void)
 {
@@ -121,6 +129,62 @@ static int test_invalid_schedule(void)
 	ASSERT(cron_parse_next_run("invalid", now, &next) == -1);
 	ASSERT(cron_parse_next_run("interval:0", now, &next) == -1);
 	ASSERT(cron_parse_next_run("interval:-1", now, &next) == -1);
+	return 0;
+}
+
+/* A seconds value that does not fit in now+sec used to wrap next_run negative.
+ * Ack recomputes that sum, so the job stays due and the agent runs it forever. */
+static int test_interval_overflow_does_not_stay_due(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_interval_overflow.db";
+	const char *schedule = "interval:9223372036854775807";
+	cron_job_row_t row;
+	long long now;
+	long long next = 0;
+	long long floor_next;
+	long long ceil_next;
+
+	now = 1700000000;
+	ASSERT(cron_parse_next_run(schedule, now, &next) == -1);
+	ASSERT(cron_parse_next_run("interval:999999999999999999999", now, &next) == -1);
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("overflow", schedule, "msg", "cli", "default", now - 1, 1) == 0);
+	ASSERT(cron_ack_delivery("overflow") == 0);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("overflow", &row) == 1);
+	floor_next = now + 365LL * 24 * 3600 - 2;
+	ceil_next = now + 365LL * 24 * 3600 + 2;
+	ASSERT(row.next_run >= floor_next);
+	ASSERT(row.next_run <= ceil_next);
+	cron_job_row_free(&row);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
+/* strto* used to stop at the first non-digit and still return success.
+ * at:2026-10-08 became next_run 2026 (already due), so the one-shot fired
+ * on the next poll and ack deleted it. 1,3,5 matched only the first day. */
+static int test_schedule_rejects_partial_numbers(void)
+{
+	long long now = 1700000000;
+	long long next = 99;
+
+	ASSERT(cron_parse_next_run("at:2026-10-08", now, &next) == -1);
+	ASSERT(next == 99);
+	ASSERT(cron_parse_next_run("at:tomorrow", now, &next) == -1);
+	ASSERT(cron_parse_next_run("at:", now, &next) == -1);
+	ASSERT(cron_parse_next_run("interval:60abc", now, &next) == -1);
+	ASSERT(cron_parse_next_run("cron:0 9 * * 1,3,5", now, &next) == -1);
+	ASSERT(cron_parse_next_run("cron:0 9 1,15 * *", now, &next) == -1);
+	ASSERT(cron_parse_next_run("0 9 * * 1-5", now, &next) == 0);
+	ASSERT(next > now);
+	ASSERT(cron_parse_next_run("at:1700000100", now, &next) == 0);
+	ASSERT(next == 1700000100);
+	ASSERT(cron_parse_next_run("interval:60", now, &next) == 0);
+	ASSERT(next == now + 60);
 	return 0;
 }
 
@@ -316,6 +380,46 @@ static int test_cron_ack_delivery_deferred(void)
 	ASSERT(cron_job_get_by_id("interval_ack", &row) == 1);
 	ASSERT(row.next_run > before_ack);
 	cron_job_row_free(&row);
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
+static int g_poll_sqlite_hits;
+static int g_poll_sqlite_unlocked;
+
+static void poll_sqlite_probe(void)
+{
+	g_poll_sqlite_hits++;
+	if (!agent_mutex_is_locked_for_test())
+		g_poll_sqlite_unlocked = 1;
+}
+
+/** Due-job SQL must run under agent_lock; the HTTP thread uses the same g_db. */
+static int test_cron_poll_holds_agent_lock(void)
+{
+	const channel_t *cron_ch;
+	channel_incoming_msg_t msg;
+	const char *path = "/tmp/shellclaw_test_cron_poll_lock.db";
+	long long now;
+
+	cron_test_reset_offers();
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("poll_lock", "at:9999999999", "Due", "cli", "default", now - 1, 1) == 0);
+	cron_ch = channel_cron_get();
+	ASSERT(cron_ch != NULL && cron_ch->poll != NULL);
+	g_poll_sqlite_hits = 0;
+	g_poll_sqlite_unlocked = 0;
+	memory_sqlite_entry_set_hook_for_test(poll_sqlite_probe);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 1);
+	memory_sqlite_entry_set_hook_for_test(NULL);
+	ASSERT(g_poll_sqlite_hits > 0);
+	ASSERT(g_poll_sqlite_unlocked == 0);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	channel_incoming_msg_clear(&msg);
 	memory_cleanup();
 	remove(path);
 	return 0;
@@ -659,12 +763,15 @@ int main(void)
 	RUN(test_cron_expr_skips_current_minute());
 	RUN(test_cron_expr_monthly_beyond_eight_days());
 	RUN(test_invalid_schedule());
+	RUN(test_interval_overflow_does_not_stay_due());
+	RUN(test_schedule_rejects_partial_numbers());
 	RUN(test_cron_job_crud_and_due());
 	RUN(test_cron_tool_execute());
 	RUN(test_one_shot_detection());
 	RUN(test_due_job_delivers_full_message());
 	RUN(test_long_interval_schedule_roundtrips());
 	RUN(test_cron_ack_delivery_deferred());
+	RUN(test_cron_poll_holds_agent_lock());
 	RUN(test_cron_poll_keeps_job_until_ack());
 	RUN(test_cron_ack_advances_recurring_past_due_minute());
 	RUN(test_cron_ack_fail_closed_on_parse_error());
