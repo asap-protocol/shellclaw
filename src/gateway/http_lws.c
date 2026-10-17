@@ -488,6 +488,10 @@ int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		if (conn_id > 0) ws_unregister_conn(conn_id);
 		break;
 	}
+	case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
+		/* wsi here is not a client socket. Mark real conns from our table. */
+		ws_on_service_cancel();
+		break;
 	default:
 		break;
 	}

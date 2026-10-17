@@ -8,7 +8,31 @@
 #ifdef SHELLCLAW_WS_TEST
 struct lws;
 struct lws_context;
-static void lws_callback_on_writable(struct lws *wsi) { (void)wsi; }
+static int g_ws_test_writable_count;
+static int g_ws_test_cancel_count;
+static void lws_callback_on_writable(struct lws *wsi)
+{
+	(void)wsi;
+	g_ws_test_writable_count++;
+}
+static void lws_cancel_service(struct lws_context *ctx)
+{
+	(void)ctx;
+	g_ws_test_cancel_count++;
+}
+int ws_test_writable_count(void)
+{
+	return g_ws_test_writable_count;
+}
+int ws_test_cancel_count(void)
+{
+	return g_ws_test_cancel_count;
+}
+void ws_test_reset_wake_counts(void)
+{
+	g_ws_test_writable_count = 0;
+	g_ws_test_cancel_count = 0;
+}
 #else
 #include "gateway/lws_compat.h"
 #include <libwebsockets.h>
@@ -59,7 +83,48 @@ static struct lws_context *g_lws_ctx;
 
 void ws_set_context(void *ctx)
 {
+	pthread_mutex_lock(&g_mutex);
 	g_lws_ctx = (struct lws_context *)ctx;
+	pthread_mutex_unlock(&g_mutex);
+}
+
+/* Cross-thread wake. lws_cancel_service is the call that is safe off the
+ * service thread; the writable mark happens in ws_on_service_cancel. */
+static void ws_wake_service(void)
+{
+	struct lws_context *ctx;
+
+	pthread_mutex_lock(&g_mutex);
+	ctx = g_lws_ctx;
+	pthread_mutex_unlock(&g_mutex);
+	if (ctx)
+		lws_cancel_service(ctx);
+}
+
+void ws_on_service_cancel(void)
+{
+	struct lws *wake[MAX_CONNECTIONS];
+	int n = 0;
+	int i;
+
+	pthread_mutex_lock(&g_mutex);
+	for (i = 0; i < MAX_CONNECTIONS; i++) {
+		ws_msg_t *msg;
+		int conn_id;
+
+		if (!g_conns[i].wsi)
+			continue;
+		conn_id = g_conns[i].conn_id;
+		for (msg = g_outgoing_head; msg; msg = msg->next) {
+			if (msg->conn_id != conn_id)
+				continue;
+			wake[n++] = (struct lws *)g_conns[i].wsi;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_mutex);
+	for (i = 0; i < n; i++)
+		lws_callback_on_writable(wake[i]);
 }
 
 int ws_next_conn_id(void)
@@ -250,15 +315,14 @@ int ws_send_to(const char *session_id, const char *text)
 	}
 	pthread_mutex_unlock(&g_mutex);
 	if (!wsi) return 0;
-	lws_callback_on_writable((struct lws *)wsi);
+	ws_wake_service();
 	return 0;
 }
 
 void ws_broadcast_text(const char *text)
 {
 	int i;
-	int wake_count = 0;
-	ws_conn_t wake_list[MAX_CONNECTIONS];
+	int queued = 0;
 	if (!ws_text_len_ok(text)) return;
 	pthread_mutex_lock(&g_mutex);
 	for (i = 0; i < MAX_CONNECTIONS; i++) {
@@ -284,16 +348,11 @@ void ws_broadcast_text(const char *text)
 			g_outgoing_tail = m;
 		}
 		g_outgoing_count++;
-		if (wake_count < MAX_CONNECTIONS) {
-			wake_list[wake_count] = g_conns[i].wsi;
-			wake_count++;
-		}
+		queued = 1;
 	}
 	pthread_mutex_unlock(&g_mutex);
-	for (i = 0; i < wake_count; i++) {
-		if (wake_list[i])
-			lws_callback_on_writable((struct lws *)wake_list[i]);
-	}
+	if (queued)
+		ws_wake_service();
 }
 
 void ws_shutdown_signal(void)

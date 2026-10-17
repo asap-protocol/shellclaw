@@ -98,6 +98,17 @@ int ws_dequeue_outgoing(int conn_id, char *buf, size_t buf_size, size_t *len_out
 int ws_has_pending_outgoing(int conn_id);
 
 /**
+ * Ask the service thread to flush queued WebChat frames.
+ * Call only from the libwebsockets thread, in
+ * LWS_CALLBACK_EVENT_WAIT_CANCELLED. lws_callback_on_writable() is not
+ * safe from the agent thread: libwebsockets 4.3 updates the poll set
+ * without the per-thread lock.
+ *
+ * Example: `case LWS_CALLBACK_EVENT_WAIT_CANCELLED: ws_on_service_cancel(); break;`
+ */
+void ws_on_service_cancel(void);
+
+/**
  * Get next connection ID for new connections.
  *
  * @return New unique connection ID.
