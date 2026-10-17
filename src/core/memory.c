@@ -292,6 +292,7 @@ int session_delete(const char *session_id)
 	if (g_session_delete_hook_for_test)
 		g_session_delete_hook_for_test(session_id);
 	if (!g_db || !session_id) return -1;
+	memory_sqlite_entry_probe();
 	const char *sql = "DELETE FROM sessions WHERE id = ?1";
 	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;

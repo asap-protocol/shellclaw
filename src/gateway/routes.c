@@ -508,7 +508,11 @@ static void handle_sessions_list(char *buf, size_t size, int *status)
 
 static void handle_session_delete(const char *id, char *buf, size_t size, int *status)
 {
-	if (session_delete(id) != 0) {
+	int rc;
+	agent_lock();
+	rc = session_delete(id);
+	agent_unlock();
+	if (rc != 0) {
 		json_error(buf, size, status, 404, "Session not found");
 		return;
 	}

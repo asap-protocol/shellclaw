@@ -61,6 +61,9 @@ static int test_dashboard_sqlite_holds_agent_lock(void)
 
 	ASSERT(call_route(&ctx, HTTP_GET, "/api/sessions", NULL, &status) == 0);
 	ASSERT(status == 200);
+	ASSERT(session_save("sess_lock", "[]") == 0);
+	ASSERT(call_route(&ctx, HTTP_DELETE, "/api/sessions/sess_lock", NULL, &status) == 0);
+	ASSERT(status == 200);
 	ASSERT(call_route(&ctx, HTTP_GET, "/api/memory", NULL, &status) == 0);
 	ASSERT(call_route(&ctx, HTTP_GET, "/api/cron", NULL, &status) == 0);
 	ASSERT(status == 200);
