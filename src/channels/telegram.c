@@ -387,6 +387,7 @@ static int tg_send(const char *recipient, const char *text,
                    const channel_attachment_t *attachments, size_t att_count)
 {
 	tg_chunk_ctx_t ctx;
+	channel_chunk_fail_t fail;
 	const char *chat_id;
 
 	(void)attachments;
@@ -401,7 +402,16 @@ static int tg_send(const char *recipient, const char *text,
 	if (chat_id[0] == '\0')
 		return -1;
 	ctx.chat_id = chat_id;
-	return channel_send_chunked(text, TG_TEXT_MAX, tg_post_piece, &ctx, NULL);
+	if (channel_send_chunked(text, TG_TEXT_MAX, tg_post_piece, &ctx, &fail) != 0) {
+		/* At-least-once delivery: dispatch skips the cron ack when send
+		 * fails, so a re-run repeats already-delivered chunks. Log where
+		 * the reply stopped so the duplicate boundary is traceable. */
+		fprintf(stderr,
+		        "shellclaw: telegram: sendMessage failed at chunk %zu (byte offset %zu)\n",
+		        fail.index, fail.offset);
+		return -1;
+	}
+	return 0;
 }
 
 static void tg_cleanup(void)

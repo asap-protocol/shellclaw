@@ -954,6 +954,7 @@ static int discord_send(const char *recipient, const char *text,
 {
 	struct discord_chunk_ctx ctx;
 	struct discord_ctx *dc = &g_dc;
+	channel_chunk_fail_t fail;
 
 	(void)attachments;
 	if (att_count > 0)
@@ -967,7 +968,17 @@ static int discord_send(const char *recipient, const char *text,
 	if (snprintf(ctx.auth_hdr, sizeof(ctx.auth_hdr), "Authorization: Bot %s", dc->token) >=
 	    (int)sizeof(ctx.auth_hdr))
 		return -1;
-	return channel_send_chunked(text, (size_t)DISCORD_MSG_MAX_LEN, discord_post_piece, &ctx, NULL);
+	if (channel_send_chunked(text, (size_t)DISCORD_MSG_MAX_LEN, discord_post_piece, &ctx,
+	                         &fail) != 0) {
+		/* At-least-once delivery: dispatch skips the cron ack when send
+		 * fails, so a re-run repeats already-delivered chunks. Log where
+		 * the reply stopped so the duplicate boundary is traceable. */
+		fprintf(stderr,
+		        "shellclaw: discord: send failed at chunk %zu (byte offset %zu)\n",
+		        fail.index, fail.offset);
+		return -1;
+	}
+	return 0;
 }
 
 static void discord_cleanup(void)
