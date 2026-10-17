@@ -153,21 +153,35 @@ static int test_stderr_captured(void)
 static int test_command_does_not_inherit_host_secrets(void)
 {
 	char out[4096];
+	char ws[] = "/tmp/sc_sb_env_XXXXXX";
+	sandbox_config_t cfg;
+	char *dir;
 	int rc;
 	const char *secret = "leaked_via_env";
 
 	ASSERT(setenv("SHELLCLAW_AUDIT_SECRET", secret, 1) == 0);
 	ASSERT(setenv("ANTHROPIC_API_KEY", secret, 1) == 0);
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_command_does_not_inherit_host_secrets: mkdtemp failed\n");
+		return 1;
+	}
+	memset(&cfg, 0, sizeof cfg);
+	cfg.workspace_path = dir;
 	rc = sandbox_exec(
 		"printenv SHELLCLAW_AUDIT_SECRET ANTHROPIC_API_KEY; "
-		"tr '\\0' '\\n' < /proc/1/environ 2>/dev/null; echo PATH_OK",
-		out, sizeof out, 5000, NULL);
+		"tr '\\0' '\\n' < /proc/1/environ 2>/dev/null; "
+		"echo HOME=$(printenv HOME); echo PATH_OK",
+		out, sizeof out, 5000, &cfg);
+	rmdir(dir);
 	unsetenv("SHELLCLAW_AUDIT_SECRET");
 	unsetenv("ANTHROPIC_API_KEY");
 	if (skip_if_isolation_denied(rc, out, "test_command_does_not_inherit_host_secrets"))
 		return 0;
 	ASSERT(rc == 0);
 	ASSERT(strstr(out, secret) == NULL);
+	/* A real workspace exercises the HOME=workspace branch of the scrub. */
+	ASSERT(strstr(out, dir) != NULL);
 	ASSERT(strstr(out, "PATH_OK") != NULL);
 	return 0;
 }
@@ -980,9 +994,13 @@ static int test_scrubbed_env_child_loses_secrets(void)
 			exit(4);
 		if (setenv("PATH", "/usr/bin", 1) != 0)
 			exit(5);
+		if (setenv("LD_PRELOAD", "/no/such/sc_fake_lib.so", 1) != 0)
+			exit(6);
 		sandbox_scrub_command_environment("/ws/home");
 		if (getenv("SHELLCLAW_AUDIT_SECRET"))
 			exit(1);
+		if (getenv("LD_PRELOAD"))
+			exit(7);
 		if (!getenv("PATH") || strcmp(getenv("PATH"), "/usr/bin") != 0)
 			exit(2);
 		if (!getenv("HOME") || strcmp(getenv("HOME"), "/ws/home") != 0)
