@@ -1,6 +1,7 @@
 /**
  * @file local.c
  * @brief OpenAI-compatible Chat Completions client for llama-server; init probe marks unreachable without failing startup.
+ * A later chat probes again so a server that was down only at startup can still serve.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -14,14 +15,17 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define REQUEST_TIMEOUT_SEC 120
 #define CONNECT_TIMEOUT_SEC 30
 #define LOCAL_PROBE_TIMEOUT_SEC 3L
 #define LOCAL_PROBE_CONNECT_SEC 2L
+#define LOCAL_REPROBE_MIN_SEC 15L
 
 static const config_t *s_local_cfg;
 static int s_local_unavailable;
+static time_t s_local_reprobe_last_wall;
 #ifdef SHELLCLAW_TEST
 static const char *s_local_test_http_body;
 static int s_local_test_skip_probe;
@@ -184,6 +188,24 @@ static int local_chat(const provider_message_t *messages, size_t message_count,
 		provider_set_error(response, "Local provider not initialized");
 		return -1;
 	}
+	/* Init probes once, often before llama-server has loaded the model.
+	 * Default fallback order puts local last, so router recovery (which
+	 * only probes backends before the active index) never clears the flag. */
+	if (s_local_unavailable) {
+		const char *endpoint = config_provider_local_endpoint(s_local_cfg);
+		time_t now = time(NULL);
+		/* agent_run holds agent_lock while this probe runs synchronously;
+		 * at most one probe per LOCAL_REPROBE_MIN_SEC while unavailable,
+		 * else a down llama-server blocks the gateway/channel every turn. */
+		int reprobe_due = s_local_reprobe_last_wall == (time_t)0 ||
+		                  (unsigned long)(now - s_local_reprobe_last_wall) >=
+		                  (unsigned long)LOCAL_REPROBE_MIN_SEC;
+		if (reprobe_due) {
+			s_local_reprobe_last_wall = now;
+			if (endpoint && endpoint[0] != '\0' && provider_local_endpoint_reachable(endpoint))
+				provider_local_recovery_probe_succeeded();
+		}
+	}
 	if (s_local_unavailable) {
 		provider_set_error(response, "Local inference server unreachable");
 		return -1;
@@ -196,6 +218,7 @@ static void local_cleanup(void)
 {
 	s_local_cfg = NULL;
 	s_local_unavailable = 0;
+	s_local_reprobe_last_wall = (time_t)0;
 }
 
 #ifdef SHELLCLAW_TEST
@@ -209,6 +232,7 @@ void local_provider_test_reset(void)
 	s_local_test_http_body = NULL;
 	s_local_test_skip_probe = 0;
 	s_local_unavailable = 0;
+	s_local_reprobe_last_wall = (time_t)0;
 }
 
 void local_provider_test_set_http_response(const char *json_body)

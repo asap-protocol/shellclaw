@@ -124,6 +124,10 @@ void provider_stub_b_set_chat_error_message(const char *message);
 
 /** Anthropic (Claude) provider. Messages API, tool_use. */
 const provider_t *provider_anthropic_get(void);
+/** After SIGHUP or dashboard reload: refresh model and max_tokens without re-init. */
+void provider_anthropic_set_live_config(const config_t *cfg);
+/** Config pointer Anthropic chat reads. NULL until init. For tests. */
+const config_t *anthropic_live_config_for_test(void);
 
 /** OpenAI provider. Chat Completions, tool_calls (function calling). */
 const provider_t *provider_openai_get(void);
@@ -134,7 +138,7 @@ void provider_openai_set_live_config(const config_t *cfg);
 const provider_t *provider_local_get(void);
 /** After SIGHUP reload: refresh live config reads without re-init (PRD §9 Q4). */
 void provider_local_set_live_config(const config_t *cfg);
-/** Lightweight GET probe via `/v1/models` or `/health`; used by init and router recovery. */
+/** Lightweight GET probe via `/v1/models` or `/health`; used by init, chat retry, and router recovery. */
 int provider_local_endpoint_reachable(const char *endpoint);
 /** After a successful recovery GET probe on local; clears init-time unreachable flag. */
 void provider_local_recovery_probe_succeeded(void);
