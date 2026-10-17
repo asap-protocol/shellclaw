@@ -115,7 +115,6 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 	pid_t pid;
 	size_t total = 0;
 	int timed_out = 0;
-	long elapsed_ms = 0;
 	long timeout_ms;
 	struct timespec start_ts;
 	char buf[256];
@@ -151,6 +150,7 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 	timeout_ms = (long)timeout_sec * 1000L;
 	while (total < max_len - 1) {
 		struct pollfd pfd;
+		long elapsed_ms;
 		int rem;
 		int r;
 		ssize_t n;

@@ -152,7 +152,6 @@ SANDBOX_UNIT size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, in
 {
     struct timespec start;
     size_t total = 0;
-    long elapsed_ms = 0;
     char chunk[512];
 
     if (hit_deadline)
@@ -165,6 +164,7 @@ SANDBOX_UNIT size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, in
     (void)clock_gettime(CLOCK_MONOTONIC, &start);
     while (total < cap - 1) {
         struct pollfd pfd;
+        long elapsed_ms;
         int slice;
         int r;
         ssize_t n;
