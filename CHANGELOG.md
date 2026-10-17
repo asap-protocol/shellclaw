@@ -5,6 +5,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Live config reload reaches the Anthropic provider (`provider_anthropic_set_live_config`, guarded like OpenAI), so dashboard/SIGHUP reloads update model and `max_tokens` instead of staying on the config captured at init.
+- Parallel tool results are grouped into one `user` message (one `tool_result` block per call, per the Messages API contract), fixing Anthropic 400s on parallel tool calls.
+- The local provider re-probes on the next request after an unreachable startup, at most once every 15 seconds, so a down `llama-server` no longer costs synchronous curl probes on every agent turn.
 - Dashboard and cron SQLite access is serialized with `agent_lock()` (matching `POST /asap`), including `DELETE /api/sessions/{id}` session deletion, so the lws service thread cannot race `agent_run` / `cron_poll` on the shared `g_db` (`SQLITE_THREADSAFE=0`).
 - `interval:` schedules reject intervals that do not fit `now + seconds` and numbers that stop parsing early (`interval:60abc`), instead of wrapping to a past `next_run` that stays due and re-fires forever.
 - Cron schedules reject partial numbers instead of silently accepting the numeric prefix: `at:2026-10-08` (would become 2026), comma lists such as `0 9 1,15 * *`, and step syntax are now parse errors.
