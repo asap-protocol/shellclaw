@@ -42,6 +42,8 @@ int ws_register_conn(int conn_id, ws_conn_t wsi);
 
 /**
  * Unregister a WebSocket connection. Called when connection closes.
+ * Drops outgoing frames still queued for @p conn_id so a closed session
+ * cannot fill the shared outbound queue.
  *
  * @param conn_id Connection ID.
  */
@@ -71,6 +73,9 @@ int ws_pop_incoming(char *session_id_out, size_t session_size,
 /**
  * Send text to a WebSocket connection by session_id.
  * Message is queued and sent from the lws thread. Session ID format: "webchat:<conn_id>".
+ * Frames targeted at an absent, unregistered, or closed socket (no live wsi) are
+ * dropped instead of queued and 0 is still returned, so a dead session cannot
+ * pin the shared outgoing queue.
  *
  * @param session_id Recipient session ID.
  * @param text       Text to send.

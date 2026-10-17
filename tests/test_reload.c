@@ -2,12 +2,15 @@
  * @file test_reload.c
  * @brief Unit tests for SIGHUP config reload and stale config queue.
  */
+#define _POSIX_C_SOURCE 200809L
 
 #include "test_runner.h"
 #include "core/reload.h"
 #include "core/bootstrap.h"
 #include "core/config.h"
+#include "providers/provider.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static config_t *load_minimal_config(const char *path, const char *model)
@@ -212,8 +215,49 @@ static int test_try_config_reload_ignores_stale_caller_pointer(void)
 	return 0;
 }
 
+static int test_try_config_reload_updates_anthropic_model(void)
+{
+	char path[128];
+	config_t *cfg = NULL;
+	const provider_t *anth;
+	const config_t *live;
+
+	ASSERT(test_runner_mkstemp_path("shellclaw_test_reload", path, sizeof(path)) == 0);
+	cfg = load_config_with_tokens(path, "model-before", 111);
+	ASSERT(cfg != NULL);
+	bootstrap_set_config_path(path);
+	bootstrap_set_cfg(cfg);
+	ASSERT(setenv("ANTHROPIC_API_KEY", "test-key-not-sent", 1) == 0);
+	anth = provider_anthropic_get();
+	ASSERT(anth != NULL && anth->init != NULL && anth->cleanup != NULL);
+	ASSERT(anth->init(cfg) == 0);
+	live = anthropic_live_config_for_test();
+	ASSERT(live != NULL);
+	ASSERT(strcmp(config_agent_model(live), "model-before") == 0);
+	ASSERT(config_agent_max_tokens(live) == 111);
+	{
+		FILE *f = fopen(path, "w");
+		ASSERT(f);
+		fprintf(f, "[agent]\nmodel = \"model-after\"\nmax_tokens = 222\n");
+		fclose(f);
+	}
+	ASSERT(try_config_reload(&cfg) == 0);
+	live = anthropic_live_config_for_test();
+	ASSERT(live != NULL);
+	ASSERT(strcmp(config_agent_model(live), "model-after") == 0);
+	ASSERT(config_agent_max_tokens(live) == 222);
+	anth->cleanup();
+	stale_free_all();
+	config_free(cfg);
+	bootstrap_set_cfg(NULL);
+	unsetenv("ANTHROPIC_API_KEY");
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
+	RUN(test_try_config_reload_updates_anthropic_model());
 	RUN(test_on_hup_sets_reload_flag());
 	RUN(test_stale_enqueue_null_is_noop());
 	RUN(test_stale_enqueue_preserves_old_config());

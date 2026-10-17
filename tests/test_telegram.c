@@ -13,6 +13,9 @@
 /* Test-only entry points from telegram.c (compiled with -DSHELLCLAW_TEST) */
 extern int telegram_parse_update_for_test(const char *json, channel_incoming_msg_t *out, long *update_id);
 extern void telegram_set_test_config(const config_t *cfg);
+extern int telegram_format_getupdates_url_for_test(char *url, size_t url_cap, const char *token,
+                                                   int timeout_sec, long offset);
+extern int telegram_response_ok_for_test(long http_code, const char *body);
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -191,6 +194,9 @@ static void test_parse_missing_from_field(void)
 		"{\"ok\":true,\"result\":[{"
 		"\"update_id\":400,"
 		"\"message\":{\"text\":\"no from\"}"
+		"},{"
+		"\"update_id\":401,"
+		"\"message\":{\"from\":{\"id\":42},\"text\":\"kept\"}"
 		"}]}";
 	config_t *cfg = load_test_config("/tmp/test_tg_nofrom.toml", "42");
 	MU_ASSERT(cfg != NULL, "load config");
@@ -200,11 +206,43 @@ static void test_parse_missing_from_field(void)
 	memset(&msg, 0, sizeof(msg));
 	long uid = 0;
 	int r = telegram_parse_update_for_test(json, &msg, &uid);
-	MU_ASSERT(r == -1, "missing 'from' returns -1");
+	/* Skip, but keep this update_id so the next poll can fetch 401.
+	 * Returning -1 left the offset unchanged and pinned the inbox. */
+	MU_ASSERT(r == 0, "missing 'from' is skipped");
+	MU_ASSERT(uid == 400, "offset stays on the skipped update");
+	MU_ASSERT(msg.text == NULL, "skipped update is not delivered");
 
 	channel_incoming_msg_clear(&msg);
 	config_free(cfg);
 	remove("/tmp/test_tg_nofrom.toml");
+}
+
+static void test_getupdates_url_requests_one_update(void)
+{
+	char url[512];
+	int rc = telegram_format_getupdates_url_for_test(url, sizeof(url), "tok", 1, 99);
+	MU_ASSERT(rc == 0, "getUpdates url built");
+	MU_ASSERT(strstr(url, "/bottok/getUpdates?") != NULL, "token and method in url");
+	MU_ASSERT(strstr(url, "offset=99") != NULL, "offset preserved");
+	MU_ASSERT(strstr(url, "limit=1") != NULL, "batch capped at one update");
+}
+
+static void test_send_response_requires_ok(void)
+{
+	const char *too_long = "{\"ok\":false,\"error_code\":400,"
+		"\"description\":\"Bad Request: message is too long\"}";
+	const char *accepted = "{\"ok\":true,\"result\":{\"message_id\":1}}";
+
+	MU_ASSERT(telegram_response_ok_for_test(400, too_long) == 0,
+		"HTTP 400 message-too-long is not delivery");
+	MU_ASSERT(telegram_response_ok_for_test(200, "{\"ok\":false}") == 0,
+		"HTTP 200 with ok false is not delivery");
+	MU_ASSERT(telegram_response_ok_for_test(200, "") == 0,
+		"empty body is not delivery");
+	MU_ASSERT(telegram_response_ok_for_test(429, "{\"ok\":false}") == 0,
+		"HTTP 429 is not delivery");
+	MU_ASSERT(telegram_response_ok_for_test(200, accepted) == 1,
+		"HTTP 200 with ok true is delivery");
 }
 
 static void test_vtable_fields_set(void)
@@ -227,6 +265,8 @@ int main(void)
 	MU_RUN(test_parse_photo_with_caption);
 	MU_RUN(test_parse_no_message_key);
 	MU_RUN(test_parse_missing_from_field);
+MU_RUN(test_getupdates_url_requests_one_update);
+	MU_RUN(test_send_response_requires_ok);
 	MU_RUN(test_vtable_fields_set);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
