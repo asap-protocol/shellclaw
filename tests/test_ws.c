@@ -268,6 +268,68 @@ static int test_pop_incoming_invalid_args(void)
 	return 0;
 }
 
+/* Counters live in the SHELLCLAW_WS_TEST build of ws.c. */
+extern int ws_test_writable_count(void);
+extern int ws_test_cancel_count(void);
+extern void ws_test_reset_wake_counts(void);
+
+/**
+ * Agent replies run on the main thread while lws_service runs on the gateway
+ * thread. The wake must be lws_cancel_service, and only the service-thread
+ * hook may call lws_callback_on_writable.
+ */
+static int test_send_wakes_service_thread(void)
+{
+	char buf[32];
+	size_t len;
+
+	ws_cleanup();
+	ws_test_reset_wake_counts();
+	ws_set_context((void *)(intptr_t)1);
+	ASSERT(ws_register_conn(11, (ws_conn_t)(intptr_t)11) == 0);
+	ASSERT(ws_send_to("webchat:11", "hello") == 0);
+	ASSERT(ws_test_cancel_count() == 1);
+	ASSERT(ws_test_writable_count() == 0);
+	ws_on_service_cancel();
+	ASSERT(ws_test_writable_count() == 1);
+	ASSERT(ws_dequeue_outgoing(11, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "hello") == 0);
+	ws_on_service_cancel();
+	ASSERT(ws_test_writable_count() == 1);
+	ws_set_context(NULL);
+	ws_cleanup();
+	return 0;
+}
+
+static int test_broadcast_wakes_once(void)
+{
+	ws_cleanup();
+	ws_test_reset_wake_counts();
+	ws_set_context((void *)(intptr_t)1);
+	ASSERT(ws_register_conn(12, (ws_conn_t)(intptr_t)12) == 0);
+	ASSERT(ws_register_conn(13, (ws_conn_t)(intptr_t)13) == 0);
+	ws_broadcast_text("status");
+	ASSERT(ws_test_cancel_count() == 1);
+	ASSERT(ws_test_writable_count() == 0);
+	ws_on_service_cancel();
+	ASSERT(ws_test_writable_count() == 2);
+	ws_set_context(NULL);
+	ws_cleanup();
+	return 0;
+}
+
+static int test_send_without_context_does_not_touch_lws(void)
+{
+	ws_cleanup();
+	ws_test_reset_wake_counts();
+	ASSERT(ws_register_conn(14, (ws_conn_t)(intptr_t)14) == 0);
+	ASSERT(ws_send_to("webchat:14", "queued") == 0);
+	ASSERT(ws_test_cancel_count() == 0);
+	ASSERT(ws_test_writable_count() == 0);
+	ws_cleanup();
+	return 0;
+}
+
 static int test_shutdown_stops_pop(void)
 {
 	char session[32];
@@ -276,6 +338,58 @@ static int test_shutdown_stops_pop(void)
 	ws_cleanup();
 	ws_shutdown_signal();
 	ASSERT(ws_pop_incoming(session, sizeof(session), text, sizeof(text), 50) == 0);
+	ws_cleanup();
+	return 0;
+}
+
+/**
+ * A frame queued before CLOSE must leave with the socket. Otherwise it
+ * sits on the shared outgoing list forever and, with enough disconnects,
+ * hits MAX_QUEUE so live clients can no longer send.
+ */
+static int test_unregister_drops_pending_outgoing(void)
+{
+	char buf[64];
+	size_t len;
+	int i;
+
+	ws_cleanup();
+	ASSERT(ws_register_conn(6, (ws_conn_t)(intptr_t)6) == 0);
+	ASSERT(ws_register_conn(7, (ws_conn_t)(intptr_t)7) == 0);
+	ASSERT(ws_send_to("webchat:7", "first-7") == 0);
+	ASSERT(ws_send_to("webchat:6", "for-6") == 0);
+	ASSERT(ws_send_to("webchat:7", "for-7") == 0);
+	ws_unregister_conn(6);
+	ASSERT(ws_has_pending_outgoing(6) == 0);
+	ASSERT(ws_has_pending_outgoing(7) == 1);
+	for (i = 0; i < 128; i++)
+		ASSERT(ws_send_to("webchat:6", "orphan") == 0);
+	ASSERT(ws_send_to("webchat:7", "still-live") == 0);
+	ASSERT(ws_dequeue_outgoing(7, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "first-7") == 0);
+	ASSERT(ws_dequeue_outgoing(7, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "for-7") == 0);
+	ASSERT(ws_dequeue_outgoing(7, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "still-live") == 0);
+	ws_cleanup();
+	return 0;
+}
+
+/** Replies to a session that was never connected must not fill MAX_QUEUE. */
+static int test_send_to_absent_conn_does_not_fill_queue(void)
+{
+	char buf[64];
+	size_t len;
+	int i;
+
+	ws_cleanup();
+	for (i = 0; i < 128; i++)
+		ASSERT(ws_send_to("webchat:99", "ghost") == 0);
+	ASSERT(ws_register_conn(8, (ws_conn_t)(intptr_t)8) == 0);
+	ASSERT(ws_send_to("webchat:8", "ok") == 0);
+	ASSERT(ws_dequeue_outgoing(8, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "ok") == 0);
+	ASSERT(ws_has_pending_outgoing(99) == 0);
 	ws_cleanup();
 	return 0;
 }
@@ -297,6 +411,11 @@ int main(void)
 	RUN(test_push_incoming_rejects_empty());
 	RUN(test_pop_incoming_invalid_args());
 	RUN(test_shutdown_stops_pop());
+RUN(test_unregister_drops_pending_outgoing());
+	RUN(test_send_to_absent_conn_does_not_fill_queue());
+	RUN(test_send_wakes_service_thread());
+	RUN(test_broadcast_wakes_once());
+	RUN(test_send_without_context_does_not_touch_lws());
 	printf("test_ws: all tests passed\n");
 	return 0;
 }

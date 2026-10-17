@@ -42,6 +42,8 @@ int ws_register_conn(int conn_id, ws_conn_t wsi);
 
 /**
  * Unregister a WebSocket connection. Called when connection closes.
+ * Drops outgoing frames still queued for @p conn_id so a closed session
+ * cannot fill the shared outbound queue.
  *
  * @param conn_id Connection ID.
  */
@@ -71,6 +73,9 @@ int ws_pop_incoming(char *session_id_out, size_t session_size,
 /**
  * Send text to a WebSocket connection by session_id.
  * Message is queued and sent from the lws thread. Session ID format: "webchat:<conn_id>".
+ * Frames targeted at an absent, unregistered, or closed socket (no live wsi) are
+ * dropped instead of queued and 0 is still returned, so a dead session cannot
+ * pin the shared outgoing queue.
  *
  * @param session_id Recipient session ID.
  * @param text       Text to send.
@@ -96,6 +101,17 @@ int ws_dequeue_outgoing(int conn_id, char *buf, size_t buf_size, size_t *len_out
  * Check if more outgoing messages pending for conn_id. Must be called from lws thread only.
  */
 int ws_has_pending_outgoing(int conn_id);
+
+/**
+ * Ask the service thread to flush queued WebChat frames.
+ * Call only from the libwebsockets thread, in
+ * LWS_CALLBACK_EVENT_WAIT_CANCELLED. lws_callback_on_writable() is not
+ * safe from the agent thread: libwebsockets 4.3 updates the poll set
+ * without the per-thread lock.
+ *
+ * Example: `case LWS_CALLBACK_EVENT_WAIT_CANCELLED: ws_on_service_cancel(); break;`
+ */
+void ws_on_service_cancel(void);
 
 /**
  * Get next connection ID for new connections.

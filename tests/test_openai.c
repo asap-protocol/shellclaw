@@ -103,6 +103,52 @@ static int test_init_and_chat_if_key_set(void)
 	return 0;
 }
 
+static int test_prefixed_claude_model_skips_without_http(void)
+{
+	const char *saved = getenv("OPENAI_API_KEY");
+	char *saved_copy = saved ? strdup(saved) : NULL;
+	config_t *cfg = NULL;
+	char errbuf[256];
+	provider_response_t response = {0};
+	const provider_t *p;
+	provider_message_t msg = {
+		.role = "user", .content = "Hi", .tool_calls = NULL,
+		.tool_calls_count = 0, .tool_use_id = NULL
+	};
+	FILE *f;
+	int chat_ret;
+
+	f = fopen(TMP_CONFIG, "w");
+	ASSERT(f != NULL);
+	fprintf(f, "[agent]\nmodel = \"anthropic/claude-sonnet-4-20250514\"\nmax_tokens = 256\n");
+	fprintf(f, "[memory]\ndb_path = \"/tmp/shellclaw_openai_test.db\"\n");
+	fprintf(f, "[providers.openai]\napi_key_env = \"OPENAI_API_KEY\"\n");
+	fclose(f);
+	ASSERT(setenv("OPENAI_API_KEY", "sk-test-not-a-real-key", 1) == 0);
+	ASSERT(config_load(TMP_CONFIG, &cfg, errbuf, sizeof(errbuf)) == 0);
+	p = provider_openai_get();
+	ASSERT(p != NULL);
+	ASSERT(p->init(cfg) == 0);
+	chat_ret = p->chat(&msg, 1, NULL, 0, &response);
+	p->cleanup();
+	config_free(cfg);
+	remove(TMP_CONFIG);
+	if (saved_copy) {
+		setenv("OPENAI_API_KEY", saved_copy, 1);
+		free(saved_copy);
+	} else {
+		unsetenv("OPENAI_API_KEY");
+	}
+	ASSERT(chat_ret == -1);
+	ASSERT(response.error != 0);
+	ASSERT(response.content != NULL);
+	ASSERT(strstr(response.content, "anthropic/claude-sonnet-4-20250514") != NULL);
+	ASSERT(strstr(response.content, "HTTP ") == NULL);
+	ASSERT(provider_error_allows_fallback_retry(response.content) == 1);
+	provider_response_clear(&response);
+	return 0;
+}
+
 #ifdef SHELLCLAW_TEST
 static int test_parse_malformed_json_sets_error(void)
 {
@@ -219,6 +265,7 @@ int main(void)
 	RUN(test_init_fails_without_api_key_in_env());
 	RUN(test_chat_fails_without_init());
 	RUN(test_init_and_chat_if_key_set());
+	RUN(test_prefixed_claude_model_skips_without_http());
 #ifdef SHELLCLAW_TEST
 	RUN(test_parse_malformed_json_sets_error());
 	RUN(test_parse_api_error_object_sets_error());

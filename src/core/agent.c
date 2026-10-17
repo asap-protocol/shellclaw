@@ -82,7 +82,145 @@ static int copy_printed_session_json(char *dst, size_t dst_size, char *printed,
 
 static const char SUMMARIZE_SYSTEM[] = "Summarize the following conversation in one short paragraph. Output only the summary, no preamble.";
 
-/** Summarize oldest messages when over max_ctx; replace with one summary + trailing. */
+/** Marker appended by summary_source_append_truncated when a line was cut. */
+static const char SUMMARY_TRUNC_MARKER[] = "[truncated]";
+
+/** Append one "role: content" line, or roll back if the whole line does not fit. */
+static int summary_source_append(char *buf, size_t cap, size_t *used,
+	const char *role, const char *content)
+{
+	int n;
+	if (!buf || !used || *used >= cap - 1)
+		return 0;
+	n = snprintf(buf + *used, cap - *used, "%s: %s\n",
+		role ? role : "user", content ? content : "");
+	if (n < 0 || (size_t)n >= cap - *used) {
+		buf[*used] = '\0';
+		return 0;
+	}
+	*used += (size_t)n;
+	return 1;
+}
+
+/** True when the line cannot fit even a fresh source, so no later pass can
+ *  ever summarize it whole either. */
+static int summary_line_never_fits(const char *role, const char *content)
+{
+	const char *r = role ? role : "user";
+	const char *c = content ? content : "";
+
+	/* summary_source_append refuses when the line plus its NUL exceeds the cap. */
+	return strlen(r) + 2 + strlen(c) + 1 >= SUMMARY_SOURCE_MAX;
+}
+
+/** Append one line with the content cut to fit, marking the cut, so a message
+ *  that can never fit whole still reaches the summarizer. Same atomicity:
+ *  the whole stub fits or nothing is written. */
+static int summary_source_append_truncated(char *buf, size_t cap, size_t *used,
+	const char *role, const char *content)
+{
+	const char *r = role ? role : "user";
+	const char *c = content ? content : "";
+	size_t remain;
+	size_t fixed;
+	size_t cut;
+	int n;
+
+	if (!buf || !used || *used + 1 >= cap)
+		return 0;
+	remain = cap - *used;
+	fixed = strlen(r) + 2 + strlen(SUMMARY_TRUNC_MARKER) + 1 + 1; /* ": " "\n" NUL */
+	if (remain <= fixed)
+		return 0;
+	cut = remain - fixed;
+	if (cut > strlen(c))
+		cut = strlen(c);
+	n = snprintf(buf + *used, remain, "%s: %.*s%s\n", r, (int)cut, c,
+		SUMMARY_TRUNC_MARKER);
+	if (n < 0 || (size_t)n >= remain) {
+		buf[*used] = '\0';
+		return 0;
+	}
+	*used += (size_t)n;
+	return 1;
+}
+
+/** True when the kept tail already starts with user, so a summary user turn would not alternate. */
+static int kept_tail_starts_with_user(const cJSON *root, int start)
+{
+	const cJSON *item;
+	const cJSON *role;
+
+	item = cJSON_GetArrayItem(root, start);
+	if (!item || !cJSON_IsObject(item))
+		return 0;
+	role = cJSON_GetObjectItem(item, "role");
+	return cJSON_IsString(role) && role->valuestring && strcmp(role->valuestring, "user") == 0;
+}
+
+/** Fold the summary into an existing user turn. A second user message 400s on Anthropic. */
+static int fold_summary_into_user(cJSON *item, const char *summary)
+{
+	const cJSON *content;
+	const char *old;
+	char *merged;
+	cJSON *node;
+	size_t old_len;
+	size_t sum_len;
+	size_t n;
+
+	content = cJSON_GetObjectItem(item, "content");
+	old = (content && cJSON_IsString(content) && content->valuestring) ? content->valuestring : "";
+	old_len = strlen(old);
+	sum_len = strlen(summary ? summary : "");
+	if (sum_len > SIZE_MAX - old_len - 3)
+		return -1;
+	n = sum_len + 2 + old_len + 1;
+	merged = malloc(n);
+	if (!merged)
+		return -1;
+	snprintf(merged, n, "%s\n\n%s", summary ? summary : "", old);
+	node = cJSON_CreateString(merged);
+	free(merged);
+	if (!node)
+		return -1;
+	if (cJSON_GetObjectItem(item, "content")) {
+		if (!cJSON_ReplaceItemInObject(item, "content", node)) {
+			cJSON_Delete(node);
+			return -1;
+		}
+		return 0;
+	}
+	if (!cJSON_AddItemToObject(item, "content", node)) {
+		cJSON_Delete(node);
+		return -1;
+	}
+	return 0;
+}
+
+static int append_summary_user(cJSON *arr, const char *summary)
+{
+	cJSON *obj;
+	cJSON *role;
+	cJSON *content;
+
+	obj = cJSON_CreateObject();
+	role = cJSON_CreateString("user");
+	content = cJSON_CreateString(summary ? summary : "");
+	if (!obj || !role || !content) {
+		cJSON_Delete(obj);
+		cJSON_Delete(role);
+		cJSON_Delete(content);
+		return -1;
+	}
+	cJSON_AddItemToObject(obj, "role", role);
+	cJSON_AddItemToObject(obj, "content", content);
+	cJSON_AddItemToArray(arr, obj);
+	return 0;
+}
+
+/** Summarize oldest messages when over max_ctx; replace with one summary + trailing.
+ *  Messages that do not fit in the summary source stay in the session. */
 static int compact_session_via_llm(const char *session_id, char *session_buf, size_t session_buf_size,
 	int msg_count, int max_ctx, const provider_t *provider)
 {
@@ -92,22 +230,42 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		if (root) cJSON_Delete(root);
 		return -1;
 	}
-	int to_summarize_n = msg_count - max_ctx;
+	/* Tail keeps max_ctx-1 messages, so the summary must include index
+	 * msg_count-max_ctx. Stopping one short drops that turn from SQLite. */
+	int to_summarize_n = msg_count - max_ctx + 1;
 	char *source_buf = malloc(SUMMARY_SOURCE_MAX);
 	if (!source_buf) { cJSON_Delete(root); return -1; }
 	source_buf[0] = '\0';
 	size_t used = 0;
-	for (int i = 0; i < to_summarize_n && used < SUMMARY_SOURCE_MAX - 1; i++) {
+	int next_unsummarized = to_summarize_n;
+	for (int i = 0; i < to_summarize_n; i++) {
 		const cJSON *item = cJSON_GetArrayItem(root, i);
-		if (!item || !cJSON_IsObject(item)) continue;
 		const char *role = "user";
 		const char *content = "";
-		const cJSON *r = cJSON_GetObjectItem(item, "role");
-		const cJSON *c = cJSON_GetObjectItem(item, "content");
+		const cJSON *r;
+		const cJSON *c;
+		if (!item || !cJSON_IsObject(item)) continue;
+		r = cJSON_GetObjectItem(item, "role");
+		c = cJSON_GetObjectItem(item, "content");
 		if (cJSON_IsString(r)) role = r->valuestring;
 		if (cJSON_IsString(c)) content = c->valuestring;
-		int n = snprintf(source_buf + used, SUMMARY_SOURCE_MAX - used, "%s: %s\n", role, content ? content : "");
-		if (n > 0 && (size_t)n < SUMMARY_SOURCE_MAX - used) used += (size_t)n;
+		if (!summary_source_append(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
+			/* A line that can never fit whole would abort with used==0
+			 * (first line) or keep the session above max_ctx forever
+			 * (later line); stub it so this pass still consumes it.
+			 * Lines that only lack room here stay raw for a later pass
+			 * via next_unsummarized. */
+			if (!summary_line_never_fits(role, content) ||
+			    !summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
+				next_unsummarized = i;
+				break;
+			}
+		}
+	}
+	if (used == 0) {
+		free(source_buf);
+		cJSON_Delete(root);
+		return -1;
 	}
 	provider_message_t summ_msgs[2] = {
 		{ .role = "system", .content = SUMMARIZE_SYSTEM, .tool_calls = NULL, .tool_calls_count = 0, .tool_use_id = NULL },
@@ -128,29 +286,51 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	summary_buf[sum_len] = '\0';
 	provider_response_clear(&resp);
 	cJSON *new_arr = cJSON_CreateArray();
-	if (!new_arr) { cJSON_Delete(root); return -1; }
-	cJSON *summ_obj = cJSON_CreateObject();
-	if (summ_obj) {
-		cJSON_AddItemToObject(summ_obj, "role", cJSON_CreateString("user"));
-		cJSON_AddItemToObject(summ_obj, "content", cJSON_CreateString(summary_buf));
-		cJSON_AddItemToArray(new_arr, summ_obj);
-	}
 	int keep = max_ctx - 1;
-	int start = msg_count - keep;
+	int start = (next_unsummarized < to_summarize_n)
+		? next_unsummarized : (msg_count - keep);
+	int merge;
+	int folded = 0;
 	if (start < 0) start = 0;
+	/* Tail can start on a user turn (odd max_context_messages, or a cut that
+	 * lands on user). Inserting another user role makes Anthropic reject the
+	 * session on this turn and every later one. */
+	merge = kept_tail_starts_with_user(root, start);
+	if (!new_arr) { cJSON_Delete(root); return -1; }
+	if (!merge && append_summary_user(new_arr, summary_buf) != 0) {
+		cJSON_Delete(new_arr);
+		cJSON_Delete(root);
+		return -1;
+	}
 	for (int i = start; i < msg_count; i++) {
 		const cJSON *item = cJSON_GetArrayItem(root, i);
-		if (item) {
-			cJSON *dup = cJSON_Duplicate(item, 1);
-			if (dup) cJSON_AddItemToArray(new_arr, dup);
+		cJSON *dup;
+		if (!item) continue;
+		dup = cJSON_Duplicate(item, 1);
+		if (!dup) continue;
+		if (merge && i == start) {
+			if (fold_summary_into_user(dup, summary_buf) != 0) {
+				cJSON_Delete(dup);
+				cJSON_Delete(new_arr);
+				cJSON_Delete(root);
+				return -1;
+			}
+			folded = 1;
 		}
+		cJSON_AddItemToArray(new_arr, dup);
+	}
+	if (merge && !folded) {
+		cJSON_Delete(new_arr);
+		cJSON_Delete(root);
+		return -1;
 	}
 	cJSON_Delete(root);
 	char *printed = cJSON_PrintUnformatted(new_arr);
 	cJSON_Delete(new_arr);
 	if (copy_printed_session_json(session_buf, session_buf_size, printed, session_id) != 0)
 		return -1;
-	session_save(session_id, session_buf);
+	/* Do not session_save here. A failed follow-up chat must leave the stored
+	 * transcript unchanged; agent_persist_session writes this buffer on success. */
 	return 0;
 }
 

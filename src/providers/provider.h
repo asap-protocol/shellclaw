@@ -81,6 +81,19 @@ int provider_parse_chat_completions_json(const char *response_body, provider_res
 /** Non-zero if router may try next chain entry: no `HTTP 4xx` in message, otherwise transport/5xx may retry. */
 int provider_error_allows_fallback_retry(const char *provider_error_content);
 
+/**
+ * Resolve @p model to the id @p backend should send.
+ *
+ * A `vendor/rest` id whose vendor matches @p backend returns the rest (a pointer
+ * into @p model). A known other cloud vendor, a bare Claude id on OpenAI, or a
+ * bare OpenAI id on Anthropic returns NULL. Callers must fail that case without
+ * an HTTP status: a 4xx stops the fallback chain.
+ *
+ * Example: provider_model_id_for_backend("anthropic/claude-sonnet-4-20250514", "anthropic")
+ * returns "claude-sonnet-4-20250514".
+ */
+const char *provider_model_id_for_backend(const char *model, const char *backend);
+
 void provider_router_active_backend_snapshot(char *dst, size_t dst_sz);
 void provider_router_last_error_snapshot(char *dst, size_t dst_sz);
 void provider_router_periodic_recovery_tick(time_t now_wall);
@@ -124,6 +137,10 @@ void provider_stub_b_set_chat_error_message(const char *message);
 
 /** Anthropic (Claude) provider. Messages API, tool_use. */
 const provider_t *provider_anthropic_get(void);
+/** After SIGHUP or dashboard reload: refresh model and max_tokens without re-init. */
+void provider_anthropic_set_live_config(const config_t *cfg);
+/** Config pointer Anthropic chat reads. NULL until init. For tests. */
+const config_t *anthropic_live_config_for_test(void);
 
 /** OpenAI provider. Chat Completions, tool_calls (function calling). */
 const provider_t *provider_openai_get(void);
@@ -134,7 +151,7 @@ void provider_openai_set_live_config(const config_t *cfg);
 const provider_t *provider_local_get(void);
 /** After SIGHUP reload: refresh live config reads without re-init (PRD §9 Q4). */
 void provider_local_set_live_config(const config_t *cfg);
-/** Lightweight GET probe via `/v1/models` or `/health`; used by init and router recovery. */
+/** Lightweight GET probe via `/v1/models` or `/health`; used by init, chat retry, and router recovery. */
 int provider_local_endpoint_reachable(const char *endpoint);
 /** After a successful recovery GET probe on local; clears init-time unreachable flag. */
 void provider_local_recovery_probe_succeeded(void);

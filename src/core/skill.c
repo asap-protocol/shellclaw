@@ -325,15 +325,39 @@ int skill_list_names(const config_t *cfg, char **names_out, int max_count)
 
 int skill_get_content(const config_t *cfg, const char *name, char *out_buf, size_t out_size)
 {
-	if (!cfg || !name || !out_buf || out_size == 0) return -1;
 	char path[MAX_PATH_LEN];
-	if (build_skill_path(cfg, name, path, sizeof(path)) != 0) return -1;
-	FILE *f = fopen(path, "r");
-	if (!f) return -1;
+	FILE *f;
+	long sz;
+	size_t used;
+
+	if (!cfg || !name || !out_buf || out_size == 0)
+		return -1;
+	if (build_skill_path(cfg, name, path, sizeof(path)) != 0)
+		return -1;
+	f = fopen(path, "r");
+	if (!f)
+		return -1;
+	if (fseek(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return -1;
+	}
+	sz = ftell(f);
+	/* Dashboard GET copies this buffer into the editor and PUT writes it
+	 * back. A short read must not look like the whole file. */
+	if (sz < 0 || (size_t)sz >= out_size) {
+		fclose(f);
+		return (sz < 0) ? -1 : -2;
+	}
+	if (fseek(f, 0, SEEK_SET) != 0) {
+		fclose(f);
+		return -1;
+	}
 	out_buf[0] = '\0';
-	size_t used = 0;
+	used = 0;
 	append_file_content(f, out_buf, out_size, &used);
 	fclose(f);
+	if (used != (size_t)sz)
+		return -2;
 	return 0;
 }
 

@@ -93,6 +93,15 @@ void session_delete_set_hook_for_test(void (*hook)(const char *session_id));
 void memory_get_row_counts_set_hook_for_test(void (*hook)(void));
 
 /**
+ * Test-only: invoke @p hook when a dashboard or cron-poll SQL entry runs.
+ * Pass NULL to clear. Used to assert those callers hold agent_lock()
+ * (SQLite is SQLITE_THREADSAFE=0).
+ *
+ * Example: memory_sqlite_entry_set_hook_for_test(probe); session_list(ids, 8);
+ */
+void memory_sqlite_entry_set_hook_for_test(void (*hook)(void));
+
+/**
  * List session IDs from the database.
  *
  * @param session_ids_out Array of pointers to receive session IDs; caller must free each.
