@@ -302,6 +302,7 @@ static void test_shell_trickle_output_hits_timeout(void)
 	struct timespec t0;
 	struct timespec t1;
 	long elapsed_ms;
+	int before;
 	int r;
 
 	snprintf(cfg_path, sizeof(cfg_path), "/tmp/sc_shell_to_%d.toml", (int)getpid());
@@ -311,11 +312,15 @@ static void test_shell_trickle_output_hits_timeout(void)
 	fclose(f);
 	MU_ASSERT(config_load(cfg_path, &cfg, errbuf, sizeof(errbuf)) == 0, "load timeout config");
 	tool_shell_set_config(cfg);
+	before = count_sleep_argv("9999");
+	MU_ASSERT(before >= 0, "can count sleep 9999 before trickle timeout");
 	memset(buf, 0, sizeof(buf));
 	signal(SIGALRM, trickle_timeout_watchdog);
 	alarm(4);
 	MU_ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0, "clock start");
-	r = t->execute("{\"command\":\"while true; do echo x; sleep 0.05; done\"}",
+	/* The background sleep sits in the command process group, so the
+	 * timeout path must group-kill it together with the trickling shell. */
+	r = t->execute("{\"command\":\"sleep 9999 & while true; do echo x; sleep 0.05; done\"}",
 	               buf, sizeof(buf));
 	alarm(0);
 	signal(SIGALRM, SIG_DFL);
@@ -328,6 +333,8 @@ static void test_shell_trickle_output_hits_timeout(void)
 	MU_ASSERT(r == 0, "trickle command returns");
 	MU_ASSERT(strstr(buf, "timed out") != NULL, "trickle command reports timeout");
 	MU_ASSERT(elapsed_ms < 3000, "trickle command stopped near the 1s timeout");
+	MU_ASSERT(sleep_argv_did_not_grow("9999", before),
+	          "timeout path killed the background sleep 9999");
 }
 
 static void test_shell_caps_output_kills_background_sleep(void)

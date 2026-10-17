@@ -334,7 +334,9 @@ static int test_timeout_kills_trickle_output(void)
 	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
 	signal(SIGALRM, trickle_timeout_watchdog);
 	alarm(4);
-	rc = sandbox_exec("while true; do echo x; sleep 0.05; done",
+	/* The background sleep is a grandchild in the command process group,
+	 * so the deadline kill must wipe it along with the trickling shell. */
+	rc = sandbox_exec("sleep 9999 & while true; do echo x; sleep 0.05; done",
 	                  out, sizeof(out), 400, NULL);
 	alarm(0);
 	signal(SIGALRM, SIG_DFL);
@@ -346,6 +348,22 @@ static int test_timeout_kills_trickle_output(void)
 	ASSERT(rc == 0);
 	ASSERT(strstr(out, "timed out") != NULL);
 	ASSERT(elapsed_ms < 2500);
+#ifdef __linux__
+	{
+		int tries;
+		for (tries = 0; tries < 20; tries++) {
+			if (!proc_cmdline_has("sleep 9999"))
+				break;
+			{
+				struct timespec ts;
+				ts.tv_sec = 0;
+				ts.tv_nsec = 50 * 1000 * 1000;
+				nanosleep(&ts, NULL);
+			}
+		}
+		ASSERT(proc_cmdline_has("sleep 9999") == 0);
+	}
+#endif
 	return 0;
 }
 
