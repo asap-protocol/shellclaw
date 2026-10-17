@@ -17,6 +17,7 @@
 static sqlite3 *g_db;
 static void (*g_session_delete_hook_for_test)(const char *session_id);
 static void (*g_memory_get_row_counts_hook_for_test)(void);
+static void (*g_sqlite_entry_hook_for_test)(void);
 
 void session_delete_set_hook_for_test(void (*hook)(const char *session_id))
 {
@@ -26,6 +27,17 @@ void session_delete_set_hook_for_test(void (*hook)(const char *session_id))
 void memory_get_row_counts_set_hook_for_test(void (*hook)(void))
 {
 	g_memory_get_row_counts_hook_for_test = hook;
+}
+
+void memory_sqlite_entry_set_hook_for_test(void (*hook)(void))
+{
+	g_sqlite_entry_hook_for_test = hook;
+}
+
+static void memory_sqlite_entry_probe(void)
+{
+	if (g_sqlite_entry_hook_for_test)
+		g_sqlite_entry_hook_for_test();
 }
 
 static const char *SCHEMA_MEMORIES =
@@ -202,6 +214,7 @@ int memory_save(const char *key, const char *content, const char *metadata)
 int memory_recall(const char *query, char *results, size_t max_len, int limit)
 {
 	if (!g_db || !results || max_len == 0 || !query) return -1;
+	memory_sqlite_entry_probe();
 	results[0] = '\0';
 	if (limit <= 0) limit = 10;
 	const char *sql = "SELECT content FROM memories_fts WHERE memories_fts MATCH ?1 ORDER BY rank LIMIT ?2";
@@ -279,6 +292,7 @@ int session_delete(const char *session_id)
 	if (g_session_delete_hook_for_test)
 		g_session_delete_hook_for_test(session_id);
 	if (!g_db || !session_id) return -1;
+	memory_sqlite_entry_probe();
 	const char *sql = "DELETE FROM sessions WHERE id = ?1";
 	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -291,6 +305,7 @@ int session_delete(const char *session_id)
 int session_list(char **session_ids_out, int max_count)
 {
 	if (!g_db || !session_ids_out || max_count <= 0) return -1;
+	memory_sqlite_entry_probe();
 	const char *sql = "SELECT id FROM sessions ORDER BY updated_at DESC";
 	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -398,6 +413,7 @@ int cron_job_create(const char *id, const char *schedule, const char *message,
                     const char *channel, const char *recipient, long long next_run, int enabled)
 {
 	if (!g_db || !id || !schedule || !message) return -1;
+	memory_sqlite_entry_probe();
 	/* fill_cron_job_row truncates id[128]; a longer id breaks the due cursor. */
 	if (strlen(id) >= sizeof(((cron_job_row_t *)0)->id)) return -1;
 	if (strlen(schedule) > (size_t)CRON_JOB_TEXT_MAX) return -1;
@@ -423,6 +439,7 @@ int cron_job_create(const char *id, const char *schedule, const char *message,
 int cron_job_delete(const char *id)
 {
 	if (!g_db || !id) return -1;
+	memory_sqlite_entry_probe();
 	const char *sql = "DELETE FROM cron_jobs WHERE id = ?1";
 	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -435,6 +452,7 @@ int cron_job_delete(const char *id)
 int cron_job_toggle(const char *id)
 {
 	if (!g_db || !id) return -1;
+	memory_sqlite_entry_probe();
 	const char *sql = "UPDATE cron_jobs SET enabled = 1 - enabled WHERE id = ?1";
 	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -460,6 +478,7 @@ int cron_job_update_next_run(const char *id, long long next_run)
 int cron_job_list(cron_job_row_t *out, int max_count)
 {
 	if (!g_db || !out || max_count <= 0) return -1;
+	memory_sqlite_entry_probe();
 	const char *sql = "SELECT id, schedule, message, channel, recipient, next_run, enabled "
 		"FROM cron_jobs ORDER BY next_run ASC, id ASC";
 	sqlite3_stmt *stmt = NULL;
@@ -485,6 +504,7 @@ int cron_job_list_due(long long now, cron_due_key_t *out, int max_count)
 	int count = 0;
 
 	if (!g_db || !out || max_count <= 0) return -1;
+	memory_sqlite_entry_probe();
 	sql = "SELECT id, next_run FROM cron_jobs WHERE next_run <= ?1 AND enabled = 1 "
 		"ORDER BY next_run ASC, id ASC";
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -551,6 +571,7 @@ int cron_job_get_by_id(const char *id, cron_job_row_t *out)
 	int ret = 0;
 
 	if (!g_db || !id || !out) return -1;
+	memory_sqlite_entry_probe();
 	sql = "SELECT id, schedule, message, channel, recipient, next_run, enabled FROM cron_jobs WHERE id = ?1";
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
 	sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT);

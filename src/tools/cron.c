@@ -6,10 +6,13 @@
 
 #include "tools/cron.h"
 #include "crypto/crypto.h"
+#include "core/agent.h"
 #include "core/memory.h"
 #include "channels/channel.h"
 #include "core/config.h"
 #include "cJSON.h"
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,14 +29,17 @@
 
 static int parse_field(const char *s, int *out, int min_val, int max_val)
 {
+	char *end = NULL;
+	long n;
 	if (!s || !out) return -1;
 	if (strcmp(s, "*") == 0) {
 		*out = -1;
 		return 0;
 	}
-	char *end = NULL;
-	long n = strtol(s, &end, 10);
-	if (end == s || n < min_val || n > max_val) return -1;
+	/* strtol stops at the first junk character. "1,15" would otherwise
+	 * match only day 1 and still schedule successfully. */
+	n = strtol(s, &end, 10);
+	if (!end || end == s || *end != '\0' || n < min_val || n > max_val) return -1;
 	*out = (int)n;
 	return 0;
 }
@@ -125,17 +131,38 @@ static long long cron_next_from_expr(const char *cron_part, long long now)
 	return -1;
 }
 
+/* Reject a span that does not fit in now+seconds. Signed wrap stores a past
+ * next_run, and ack recomputes the same sum, so the job stays due forever.
+ * A number that stops early (interval:60abc) is rejected too: strto* would
+ * otherwise accept the numeric prefix. */
+static int interval_next_run(const char *num, long long now, long long *next_out)
+{
+	char *end;
+	long long sec;
+
+	errno = 0;
+	sec = strtoll(num, &end, 10);
+	if (end == num || *end != '\0' || errno == ERANGE || sec <= 0)
+		return -1;
+	if (now < 0 || sec > LLONG_MAX - now)
+		return -1;
+	*next_out = now + sec;
+	return 0;
+}
+
 int cron_parse_next_run(const char *schedule, long long now, long long *next_out)
 {
 	if (!schedule || !next_out) return -1;
-	if (strncmp(schedule, CRON_PREFIX_INTERVAL, strlen(CRON_PREFIX_INTERVAL)) == 0) {
-		long sec = strtol(schedule + strlen(CRON_PREFIX_INTERVAL), NULL, 10);
-		if (sec <= 0) return -1;
-		*next_out = now + sec;
-		return 0;
-	}
+	if (strncmp(schedule, CRON_PREFIX_INTERVAL, strlen(CRON_PREFIX_INTERVAL)) == 0)
+		return interval_next_run(schedule + strlen(CRON_PREFIX_INTERVAL), now, next_out);
 	if (strncmp(schedule, CRON_PREFIX_AT, strlen(CRON_PREFIX_AT)) == 0) {
-		long long ts = (long long)strtoll(schedule + strlen(CRON_PREFIX_AT), NULL, 10);
+		const char *num = schedule + strlen(CRON_PREFIX_AT);
+		char *end = NULL;
+		long long ts;
+		/* A partial convert (at:2026-10-08 -> 2026) is already due, so the
+		 * one-shot fires on the next poll and ack deletes the future reminder. */
+		ts = strtoll(num, &end, 10);
+		if (!end || end == num || *end != '\0') return -1;
 		*next_out = ts;
 		return 0;
 	}
@@ -320,28 +347,38 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 {
 	cron_due_key_t keys[CRON_DUE_SCAN_MAX];
 	struct timespec mono;
-	long age = 0;
 	int n;
-	int i;
+	int wait_for_first = 0;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &mono) != 0)
 		memset(&mono, 0, sizeof(mono));
+	/* HTTP dashboard routes use this same connection (SQLITE_THREADSAFE=0).
+	 * Drop the lock before the re-offer sleep so that thread is not stalled. */
+	agent_lock();
 	n = cron_job_list_due(now, keys, CRON_DUE_SCAN_MAX);
-	if (n <= 0)
-		return 0;
-	for (i = 0; i < n; i++) {
-		if (!cron_due_is_returnable(keys[i].id, timeout_ms, &mono))
-			continue;
-		if (cron_job_get_by_id(keys[i].id, row) == 1)
-			return 1;
+	if (n > 0) {
+		for (int i = 0; i < n; i++) {
+			if (!cron_due_is_returnable(keys[i].id, timeout_ms, &mono))
+				continue;
+			if (cron_job_get_by_id(keys[i].id, row) == 1) {
+				agent_unlock();
+				return 1;
+			}
+		}
+		if (cron_job_get_by_id(keys[0].id, row) == 1)
+			wait_for_first = 1;
 	}
-	if (cron_job_get_by_id(keys[0].id, row) != 1)
+	agent_unlock();
+	if (!wait_for_first)
 		return 0;
 	/* An id that never fit in the table has no age, so wait_remaining would return immediately. */
-	if (cron_offer_age_ms(row->id, &mono, &age))
-		cron_wait_remaining(row->id, timeout_ms);
-	else
-		cron_sleep_ms((long)timeout_ms);
+	{
+		long age = 0;
+		if (cron_offer_age_ms(row->id, &mono, &age))
+			cron_wait_remaining(row->id, timeout_ms);
+		else
+			cron_sleep_ms((long)timeout_ms);
+	}
 	return 1;
 }
 
@@ -392,9 +429,16 @@ int cron_ack_delivery(const char *job_id)
 	}
 	now = (long long)time(NULL);
 	rc = cron_parse_next_run(row.schedule, now, &next);
-	cron_job_row_free(&row);
-	if (rc != 0)
+	if (rc != 0) {
+		/* A stored schedule the parser now rejects (e.g. a legacy comma
+		 * list) would otherwise snooze the job for a year with no trace;
+		 * log the job so the silent gap is diagnosable. */
+		fprintf(stderr,
+			"shellclaw: cron: job '%s' schedule '%s' rejected; next run snoozed +365d\n",
+			row.id, row.schedule);
 		next = now + 365LL * 24 * 3600;
+	}
+	cron_job_row_free(&row);
 	rc = cron_job_update_next_run(job_id, next);
 	if (rc == 0)
 		cron_offer_release(job_id);

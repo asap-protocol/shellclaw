@@ -280,6 +280,58 @@ static int test_shutdown_stops_pop(void)
 	return 0;
 }
 
+/**
+ * A frame queued before CLOSE must leave with the socket. Otherwise it
+ * sits on the shared outgoing list forever and, with enough disconnects,
+ * hits MAX_QUEUE so live clients can no longer send.
+ */
+static int test_unregister_drops_pending_outgoing(void)
+{
+	char buf[64];
+	size_t len;
+	int i;
+
+	ws_cleanup();
+	ASSERT(ws_register_conn(6, (ws_conn_t)(intptr_t)6) == 0);
+	ASSERT(ws_register_conn(7, (ws_conn_t)(intptr_t)7) == 0);
+	ASSERT(ws_send_to("webchat:7", "first-7") == 0);
+	ASSERT(ws_send_to("webchat:6", "for-6") == 0);
+	ASSERT(ws_send_to("webchat:7", "for-7") == 0);
+	ws_unregister_conn(6);
+	ASSERT(ws_has_pending_outgoing(6) == 0);
+	ASSERT(ws_has_pending_outgoing(7) == 1);
+	for (i = 0; i < 128; i++)
+		ASSERT(ws_send_to("webchat:6", "orphan") == 0);
+	ASSERT(ws_send_to("webchat:7", "still-live") == 0);
+	ASSERT(ws_dequeue_outgoing(7, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "first-7") == 0);
+	ASSERT(ws_dequeue_outgoing(7, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "for-7") == 0);
+	ASSERT(ws_dequeue_outgoing(7, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "still-live") == 0);
+	ws_cleanup();
+	return 0;
+}
+
+/** Replies to a session that was never connected must not fill MAX_QUEUE. */
+static int test_send_to_absent_conn_does_not_fill_queue(void)
+{
+	char buf[64];
+	size_t len;
+	int i;
+
+	ws_cleanup();
+	for (i = 0; i < 128; i++)
+		ASSERT(ws_send_to("webchat:99", "ghost") == 0);
+	ASSERT(ws_register_conn(8, (ws_conn_t)(intptr_t)8) == 0);
+	ASSERT(ws_send_to("webchat:8", "ok") == 0);
+	ASSERT(ws_dequeue_outgoing(8, buf, sizeof(buf), &len) == 1);
+	ASSERT(strcmp(buf, "ok") == 0);
+	ASSERT(ws_has_pending_outgoing(99) == 0);
+	ws_cleanup();
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_register_conn_full_table());
@@ -297,6 +349,8 @@ int main(void)
 	RUN(test_push_incoming_rejects_empty());
 	RUN(test_pop_incoming_invalid_args());
 	RUN(test_shutdown_stops_pop());
+	RUN(test_unregister_drops_pending_outgoing());
+	RUN(test_send_to_absent_conn_does_not_fill_queue());
 	printf("test_ws: all tests passed\n");
 	return 0;
 }
