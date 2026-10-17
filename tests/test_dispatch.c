@@ -468,8 +468,32 @@ static int test_handle_message_holds_agent_mutex(void)
 	return 0;
 }
 
+static int test_api_session_delete_holds_agent_mutex(void)
+{
+	const char *db_path = "build/test_dispatch_api_delete.db";
+	char history[128];
+
+	memory_cleanup();
+	remove(db_path);
+	ASSERT(memory_init(db_path) == 0);
+	ASSERT(session_save("webchat:9", "[{\"role\":\"user\",\"content\":\"secret\"}]") == 0);
+	g_agent_mutex_held_during_reset = 0;
+	session_delete_set_hook_for_test(reset_lock_probe);
+	ASSERT(dispatch_delete_session("webchat:9") == 0);
+	session_delete_set_hook_for_test(NULL);
+	ASSERT(g_agent_mutex_held_during_reset == 1);
+	ASSERT(agent_mutex_is_locked_for_test() == 0);
+	ASSERT(session_load("webchat:9", history, sizeof(history)) != 0);
+	ASSERT(dispatch_delete_session("") != 0);
+	ASSERT(dispatch_delete_session(NULL) != 0);
+	memory_cleanup();
+	remove(db_path);
+	return 0;
+}
+
 int main(void)
 {
+	RUN(test_api_session_delete_holds_agent_mutex());
 	RUN(test_reset_clears_session());
 	RUN(test_status_returns_version());
 	RUN(test_agent_failure_fallback_message());
