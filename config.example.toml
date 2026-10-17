@@ -2,6 +2,8 @@
 # Copy to ~/.shellclaw/config.toml and edit
 
 [agent]
+# Gateway-style vendor prefix. Anthropic receives the id after "anthropic/".
+# A foreign cloud id is skipped without HTTP 4xx so local fallback still runs.
 model = "anthropic/claude-sonnet-4-20250514"
 max_tokens = 4096
 temperature = 0.7

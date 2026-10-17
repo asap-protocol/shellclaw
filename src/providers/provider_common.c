@@ -67,6 +67,65 @@ char *provider_dup_str(const char *s)
 	return p;
 }
 
+static int id_has_prefix(const char *id, const char *prefix)
+{
+	size_t n = strlen(prefix);
+	return strncmp(id, prefix, n) == 0;
+}
+
+static int vendor_tag_is_cloud(const char *model, size_t vendor_len)
+{
+	if (vendor_len == 9U && strncmp(model, "anthropic", 9) == 0)
+		return 1;
+	if (vendor_len == 6U && strncmp(model, "openai", 6) == 0)
+		return 1;
+	return 0;
+}
+
+static int bare_id_is_openai_family(const char *model)
+{
+	if (id_has_prefix(model, "gpt-") || id_has_prefix(model, "chatgpt-"))
+		return 1;
+	if (id_has_prefix(model, "o1") || id_has_prefix(model, "o3"))
+		return 1;
+	return id_has_prefix(model, "o4");
+}
+
+static const char *bare_model_for_backend(const char *model, const char *backend)
+{
+	if (strcmp(backend, "openai") == 0 && id_has_prefix(model, "claude"))
+		return NULL;
+	if (strcmp(backend, "anthropic") == 0 && bare_id_is_openai_family(model))
+		return NULL;
+	return model;
+}
+
+static int vendor_matches_backend(const char *model, size_t vendor_len, const char *backend)
+{
+	if (strncmp(model, backend, vendor_len) != 0)
+		return 0;
+	return backend[vendor_len] == '\0';
+}
+
+/* NULL means skip. Sending the foreign id would be HTTP 4xx and stop fallback. */
+const char *provider_model_id_for_backend(const char *model, const char *backend)
+{
+	const char *slash;
+	size_t vendor_len;
+
+	if (!model || model[0] == '\0' || !backend || backend[0] == '\0')
+		return model;
+	slash = strchr(model, '/');
+	if (!slash || slash == model || slash[1] == '\0')
+		return bare_model_for_backend(model, backend);
+	vendor_len = (size_t)(slash - model);
+	if (vendor_matches_backend(model, vendor_len, backend))
+		return slash + 1;
+	if (vendor_tag_is_cloud(model, vendor_len))
+		return NULL;
+	return model;
+}
+
 int provider_error_allows_fallback_retry(const char *msg)
 {
 	const char *h;

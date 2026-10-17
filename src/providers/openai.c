@@ -10,6 +10,7 @@
 #include "providers/openai_compat.h"
 #include "providers/provider.h"
 #include "cJSON.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,10 +25,12 @@ static int build_and_send(const provider_message_t *messages, size_t message_cou
                           provider_response_t *response)
 {
 	const char *endpoint;
+	const char *configured;
 	const char *model;
 	int max_tokens;
 	double temperature_cfg;
 	char *body;
+	char errmsg[256];
 	int ret;
 	if (!s_oai_cfg) {
 		provider_set_error(response, "OpenAI provider not initialized");
@@ -36,11 +39,19 @@ static int build_and_send(const provider_message_t *messages, size_t message_cou
 	endpoint = config_provider_openai_endpoint(s_oai_cfg);
 	if (!endpoint || !endpoint[0])
 		endpoint = "https://api.openai.com/v1/chat/completions";
-	model = config_agent_model(s_oai_cfg);
+	configured = config_agent_model(s_oai_cfg);
+	if (!configured || configured[0] == '\0')
+		configured = "gpt-4o-mini";
+	model = provider_model_id_for_backend(configured, "openai");
+	if (!model) {
+		snprintf(errmsg, sizeof(errmsg),
+		         "OpenAI skipped: agent model \"%s\" is not an OpenAI id",
+		         configured);
+		provider_set_error(response, errmsg);
+		return -1;
+	}
 	max_tokens = config_agent_max_tokens(s_oai_cfg);
 	temperature_cfg = config_agent_temperature(s_oai_cfg);
-	if (!model)
-		model = "gpt-4o-mini";
 	body = openai_compat_build_chat_body(model, max_tokens, temperature_cfg, messages,
 	                                     message_count, tools, tool_count, response);
 	if (!body)
