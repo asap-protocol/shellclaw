@@ -5,6 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- WebChat `ws_send_to` drops a send whose session has no live `wsi` (still returning 0) and `ws_unregister_conn` drops frames still queued for the closing session, so ~64 abandoned replies cannot pin the shared outgoing queue at `MAX_QUEUE` (64) and stall every live client until restart.
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
 - Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
 - Dashboard config save and JSON patch validation use a unique temp plus `fsync`, and the live gateway config pointer is published once under `agent_lock`.
