@@ -5,6 +5,10 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Session compaction includes the boundary turn (index `msg_count - max_context_messages`) in the summary window, so the turn at the keep-tail boundary is not deleted without being summarized.
+- Session compaction keeps a message that does not fit the 64 KiB summary source, and everything after it, instead of skipping the long line and deleting it anyway.
+- Session compaction no longer persists the summarized transcript before the user turn finishes: a failed follow-up provider call leaves the raw stored session unchanged, and when the kept tail already starts with a user turn the summary is folded into that turn so consecutive user roles cannot break the next Anthropic call (supersedes #126).
+- Session compaction summarizes a message larger than the summary source as a truncated `[truncated]` stub, so a single oversized line can no longer abort the pass with an empty summary source or keep the session above `max_context_messages` forever.
 - WebChat `ws_send_to` drops a send whose session has no live `wsi` (still returning 0) and `ws_unregister_conn` drops frames still queued for the closing session, so ~64 abandoned replies cannot pin the shared outgoing queue at `MAX_QUEUE` (64) and stall every live client until restart.
 - `read_file` reads that do not fit the result buffer now fail with a JSON error instead of returning a clipped prefix, so a later `write_file` cannot persist a silently truncated file.
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
