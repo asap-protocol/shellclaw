@@ -16,6 +16,7 @@
 #define SHELLCLAW_SANDBOX_H
 
 #include <stddef.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,25 @@ typedef struct sandbox_config {
 } sandbox_config_t;
 
 /**
+ * Wall-clock milliseconds elapsed since @p start, or -1 when the monotonic
+ * clock cannot be read. Shared by the sandbox drain loop and the unsandboxed
+ * shell loop so steady output cannot bypass a timeout (#116).
+ *
+ * Example: long ms = monotonic_elapsed_ms(&start);
+ */
+long monotonic_elapsed_ms(const struct timespec *start);
+
+/**
+ * Poll slice for the remaining wall-clock deadline: the positive remainder
+ * of @p timeout_ms minus @p elapsed_ms, capped at @p slice_cap. Call only
+ * after checking @p elapsed_ms < @p timeout_ms; an expired deadline is not
+ * clamped here, so a post-deadline call can return a negative value.
+ *
+ * Example: poll_remain_ms(1000, 950, 100) returns 50.
+ */
+int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap);
+
+/**
  * Execute @p cmd inside an isolated child process and capture output.
  *
  * On Linux, enters a user namespace when needed, then unshares
@@ -65,6 +85,8 @@ typedef struct sandbox_config {
  * @param out        Buffer for captured stdout+stderr. Always NUL-terminated on success.
  * @param out_cap    Capacity of @p out (including NUL byte). Must be > 0.
  * @param timeout_ms Maximum wall-clock milliseconds before SIGKILL. 0 = default (10 000 ms).
+ *                   The timeout clock starts only after the isolation handshake,
+ *                   so slow namespace/Landlock setup is not counted.
  * @param cfg        Optional sandbox configuration. NULL = use built-in defaults.
  * @return           0 on success (command ran; check output for exit status text),
  *                   -1 on system error (pipe/fork/clone/isolation failure).
