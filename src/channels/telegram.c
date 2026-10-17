@@ -8,10 +8,12 @@
 #include "core/config.h"
 #include "cJSON.h"
 #include <curl/curl.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define TG_API_BASE "https://api.telegram.org/bot"
 #define TG_GET_UPDATES "getUpdates"
@@ -23,6 +25,10 @@
 #define RESP_BUF_INIT 4096
 /* Bot API sendMessage text limit. Longer agent replies are sent as several messages. */
 #define TG_TEXT_MAX 4096
+/* Telegram allows about 1 message per second per chat. dispatch caps replies at
+ * 32 KiB, so a long reply is up to 8 back-to-back sendMessage calls; pace them
+ * so the chat does not hit 429 mid-reply. Full retry_after parsing is deferred. */
+#define TG_CHUNK_PAUSE_MS 500
 
 struct telegram_ctx {
 	char *token;
@@ -374,12 +380,32 @@ static int telegram_post_chunk(const char *chat_id, const char *text)
 
 typedef struct {
 	const char *chat_id;
+	int posted_before;
 } tg_chunk_ctx_t;
+
+static void tg_sleep_ms(int ms)
+{
+	struct timespec ts;
+
+	if (ms <= 0)
+		return;
+	ts.tv_sec = (time_t)(ms / 1000);
+	ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+	while (nanosleep(&ts, &ts) == -1 && errno == EINTR)
+		;
+}
 
 static int tg_post_piece(const char *piece, void *userdata)
 {
-	const tg_chunk_ctx_t *ctx = (const tg_chunk_ctx_t *)userdata;
+	tg_chunk_ctx_t *ctx = (tg_chunk_ctx_t *)userdata;
 
+	/* Pause between consecutive chunks only (never before the first):
+	 * the chat rate is ~1 msg/s, so paced posts avoid a 429 aborting the
+	 * rest of the reply. Actually parsing parameters.retry_after from a
+	 * 429 body and sleeping exactly that long is deferred follow-up. */
+	if (ctx->posted_before)
+		tg_sleep_ms(TG_CHUNK_PAUSE_MS);
+	ctx->posted_before = 1;
 	return telegram_post_chunk(ctx->chat_id, piece);
 }
 
@@ -402,6 +428,7 @@ static int tg_send(const char *recipient, const char *text,
 	if (chat_id[0] == '\0')
 		return -1;
 	ctx.chat_id = chat_id;
+	ctx.posted_before = 0;
 	if (channel_send_chunked(text, TG_TEXT_MAX, tg_post_piece, &ctx, &fail) != 0) {
 		/* At-least-once delivery: dispatch skips the cron ack when send
 		 * fails, so a re-run repeats already-delivered chunks. Log where
