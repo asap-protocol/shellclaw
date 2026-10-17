@@ -63,8 +63,11 @@ int skill_list_names(const config_t *cfg, char **names_out, int max_count);
  * @param cfg             Configuration (uses config_skills_dir).
  * @param name            Skill name (file base name).
  * @param out_buf         Buffer to receive content.
- * @param out_size        Size of out_buf.
- * @return 0 on success, -1 if not found or error.
+ * @param out_size        Size of out_buf. Must hold the whole file plus a NUL.
+ * @return 0 on success, -2 if the file does not fit in out_buf, -1 if not found or error.
+ *
+ * Example: skill_get_content(cfg, "deploy", buf, sizeof(buf)) == -2 means the
+ * caller must not treat buf as the skill body.
  */
 int skill_get_content(const config_t *cfg, const char *name, char *out_buf, size_t out_size);
 
