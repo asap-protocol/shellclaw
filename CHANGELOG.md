@@ -4,8 +4,6 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-25
-
 ### Fixed
 - Provider model ids keep their vendor prefix in config but are stripped per backend before the request: `anthropic/claude-...` no longer reaches the Anthropic API (HTTP 4xx) or OpenAI after a 5xx, so the fallback chain runs through to local.
 - WebChat writes are moved off the agent thread: frames are queued and the lws service thread is woken (`lws_cancel_service`), marking writable only from `EVENT_WAIT_CANCELLED`, which stops the poll-set race against a closing socket.
@@ -27,6 +25,10 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - Session compaction summarizes a message larger than the summary source as a truncated `[truncated]` stub, so a single oversized line can no longer abort the pass with an empty summary source or keep the session above `max_context_messages` forever.
 - WebChat `ws_send_to` drops a send whose session has no live `wsi` (still returning 0) and `ws_unregister_conn` drops frames still queued for the closing session, so ~64 abandoned replies cannot pin the shared outgoing queue at `MAX_QUEUE` (64) and stall every live client until restart.
 - `read_file` reads that do not fit the result buffer now fail with a JSON error instead of returning a clipped prefix, so a later `write_file` cannot persist a silently truncated file.
+
+## [1.0.0] - 2026-09-25
+
+### Fixed
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
 - Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
 - Dashboard config save and JSON patch validation use a unique temp plus `fsync`, and the live gateway config pointer is published once under `agent_lock`.
