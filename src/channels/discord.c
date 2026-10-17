@@ -862,25 +862,13 @@ static int discord_recipient_channel_id(const char *recipient, char *out, size_t
 	return 0;
 }
 
-static int discord_send(const char *recipient, const char *text,
-                        const channel_attachment_t *attachments, size_t att_count)
+static int discord_post_text(const char *channel_id, const char *text, const char *auth_hdr)
 {
-	struct discord_ctx *dc = &g_dc;
-	char channel_id[DISCORD_CHANNEL_ID_CAP];
 	cJSON *root;
 	char *json_body;
 	char url[DISCORD_URL_CAP];
-	char auth_hdr[DISCORD_AUTH_HDR_CAP];
 	int attempt;
-	(void)attachments;
-	if (att_count > 0)
-		return -1;
-	if (!dc->token || !recipient || !text || text[0] == '\0')
-		return -1;
-	if (strlen(text) > (size_t)DISCORD_MSG_MAX_LEN)
-		return -1;
-	if (discord_recipient_channel_id(recipient, channel_id, sizeof(channel_id)) != 0)
-		return -1;
+
 	root = cJSON_CreateObject();
 	if (!root)
 		return -1;
@@ -890,10 +878,6 @@ static int discord_send(const char *recipient, const char *text,
 	if (!json_body)
 		return -1;
 	if (snprintf(url, sizeof(url), DISCORD_API_MSG_URL, channel_id) >= (int)sizeof(url)) {
-		free(json_body);
-		return -1;
-	}
-	if (snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bot %s", dc->token) >= (int)sizeof(auth_hdr)) {
 		free(json_body);
 		return -1;
 	}
@@ -949,7 +933,52 @@ static int discord_send(const char *recipient, const char *text,
 		free(json_body);
 		return -1;
 	}
+	free(json_body);
 	return -1;
+}
+
+struct discord_chunk_ctx {
+	char channel_id[DISCORD_CHANNEL_ID_CAP];
+	char auth_hdr[DISCORD_AUTH_HDR_CAP];
+};
+
+static int discord_post_piece(const char *piece, void *userdata)
+{
+	const struct discord_chunk_ctx *ctx = (const struct discord_chunk_ctx *)userdata;
+
+	return discord_post_text(ctx->channel_id, piece, ctx->auth_hdr);
+}
+
+static int discord_send(const char *recipient, const char *text,
+                        const channel_attachment_t *attachments, size_t att_count)
+{
+	struct discord_chunk_ctx ctx;
+	struct discord_ctx *dc = &g_dc;
+	channel_chunk_fail_t fail;
+
+	(void)attachments;
+	if (att_count > 0)
+		return -1;
+	if (!dc->token || !recipient || !text || text[0] == '\0')
+		return -1;
+	/* A single REST message is capped at 2000 characters, so a longer
+	 * reply is delivered as several messages. */
+	if (discord_recipient_channel_id(recipient, ctx.channel_id, sizeof(ctx.channel_id)) != 0)
+		return -1;
+	if (snprintf(ctx.auth_hdr, sizeof(ctx.auth_hdr), "Authorization: Bot %s", dc->token) >=
+	    (int)sizeof(ctx.auth_hdr))
+		return -1;
+	if (channel_send_chunked(text, (size_t)DISCORD_MSG_MAX_LEN, discord_post_piece, &ctx,
+	                         &fail) != 0) {
+		/* At-least-once delivery: dispatch skips the cron ack when send
+		 * fails, so a re-run repeats already-delivered chunks. Log where
+		 * the reply stopped so the duplicate boundary is traceable. */
+		fprintf(stderr,
+		        "shellclaw: discord: send failed at chunk %zu (byte offset %zu)\n",
+		        fail.index, fail.offset);
+		return -1;
+	}
+	return 0;
 }
 
 static void discord_cleanup(void)

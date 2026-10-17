@@ -1,6 +1,6 @@
 /**
  * @file channel_common.c
- * @brief Shared channel utilities: channel_incoming_msg_clear, channel registry.
+ * @brief Shared channel utilities: chunked send, incoming msg clear, registry.
  */
 
 #include "channels/channel.h"
@@ -29,6 +29,75 @@ const channel_t *channel_get_by_name(const char *name)
 			return g_registered[i].ch;
 	}
 	return NULL;
+}
+
+size_t channel_outbound_chunk_len(const char *text, size_t max_bytes)
+{
+	size_t len;
+	size_t n;
+
+	if (!text || max_bytes == 0)
+		return 0;
+	len = strlen(text);
+	if (len <= max_bytes)
+		return len;
+	/* Walk back over UTF-8 continuation bytes so the cut sits on a boundary. */
+	n = max_bytes;
+	while (n > 0 && ((unsigned char)text[n] & 0xC0) == 0x80)
+		n--;
+	return n > 0 ? n : max_bytes;
+}
+
+int channel_send_chunked(const char *text, size_t max_bytes,
+                         channel_chunk_post_fn post, void *ctx,
+                         channel_chunk_fail_t *fail)
+{
+	char *piece;
+	const char *cursor;
+	size_t index;
+
+	if (fail) {
+		fail->index = 0;
+		fail->offset = 0;
+	}
+	if (!text || max_bytes == 0 || !post)
+		return -1;
+	/* One reused, always-NUL-terminated piece buffer: platform posts take
+	 * plain C strings, so the chunk copy lives here instead of per caller. */
+	piece = malloc(max_bytes + 1);
+	if (!piece)
+		return -1;
+	cursor = text;
+	index = 0;
+	while (cursor[0] != '\0') {
+		size_t n = channel_outbound_chunk_len(cursor, max_bytes);
+
+		if (n == 0 || n > max_bytes) {
+			/* Fail-safe only: chunk_len guarantees 0 < n <= max_bytes
+			 * for non-empty cursor, so a future bounds bug stops the
+			 * send instead of walking past the piece buffer. */
+			if (fail) {
+				fail->index = index;
+				fail->offset = (size_t)(cursor - text);
+			}
+			free(piece);
+			return -1;
+		}
+		memcpy(piece, cursor, n);
+		piece[n] = '\0';
+		if (post(piece, ctx) != 0) {
+			if (fail) {
+				fail->index = index;
+				fail->offset = (size_t)(cursor - text);
+			}
+			free(piece);
+			return -1;
+		}
+		cursor += n;
+		index++;
+	}
+	free(piece);
+	return 0;
 }
 
 void channel_incoming_msg_clear(channel_incoming_msg_t *msg)

@@ -5,6 +5,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Telegram `getUpdates` requests a single update per poll and skips a message without a numeric sender id, so a backlog larger than the 256 KiB read buffer (or a channel/anonymous post) no longer pins the poll offset and stalls the inbox.
+- Telegram `sendMessage` delivery is verified from the HTTP status code and the `ok` body field, so an API refusal (HTTP 400/429) is no longer reported as a successful send and acknowledged as delivered.
+- Long Telegram and Discord replies are chunked to the platform limits (4096/2000 bytes, UTF-8 boundary-safe) through the shared `channel_send_chunked` helper, so a reply over the cap is delivered as several messages instead of failing the whole send; chunk posts are paced for the ~1 msg/s Telegram chat rate, and a failed mid-reply post logs its chunk index and byte offset.
 - Live config reload reaches the Anthropic provider (`provider_anthropic_set_live_config`, guarded like OpenAI), so dashboard/SIGHUP reloads update model and `max_tokens` instead of staying on the config captured at init.
 - Parallel tool results are grouped into one `user` message (one `tool_result` block per call, per the Messages API contract), fixing Anthropic 400s on parallel tool calls.
 - The local provider re-probes on the next request after an unreachable startup, at most once every 15 seconds, so a down `llama-server` no longer costs synchronous curl probes on every agent turn.
