@@ -287,6 +287,174 @@ static int test_parallel_tool_results_share_one_user_message(void)
 	return 0;
 }
 
+/** Old path unregressed: one tool result still yields exactly one user message. */
+static int test_single_tool_result_one_user_message(void)
+{
+	provider_tool_call_t calls[1] = {
+		{.id = "toolu_a", .name = "shell", .arguments = "{\"command\":\"pwd\"}"},
+	};
+	provider_message_t messages[3];
+	char *json;
+	cJSON *arr;
+	cJSON *user;
+	cJSON *role;
+	cJSON *content;
+	cJSON *block;
+
+	memset(messages, 0, sizeof(messages));
+	messages[0].role = "user";
+	messages[0].content = "run pwd";
+	messages[1].role = "assistant";
+	messages[1].content = "";
+	messages[1].tool_calls = calls;
+	messages[1].tool_calls_count = 1;
+	messages[2].role = "user";
+	messages[2].content = "out-a";
+	messages[2].tool_use_id = "toolu_a";
+	json = anthropic_messages_json_for_test(messages, 3);
+	ASSERT(json != NULL);
+	arr = cJSON_Parse(json);
+	cJSON_free(json);
+	ASSERT(arr != NULL && cJSON_IsArray(arr));
+	ASSERT(cJSON_GetArraySize(arr) == 3);
+	user = cJSON_GetArrayItem(arr, 2);
+	role = user ? cJSON_GetObjectItem(user, "role") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "user") == 0);
+	content = user ? cJSON_GetObjectItem(user, "content") : NULL;
+	ASSERT(cJSON_IsArray(content) && cJSON_GetArraySize(content) == 1);
+	block = cJSON_GetArrayItem(content, 0);
+	role = block ? cJSON_GetObjectItem(block, "tool_use_id") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "toolu_a") == 0);
+	cJSON_Delete(arr);
+	return 0;
+}
+
+/** Grouping must stop at the first message without a tool_use_id. */
+static int test_tool_results_stop_at_plain_user_message(void)
+{
+	provider_tool_call_t calls[2] = {
+		{.id = "toolu_a", .name = "shell", .arguments = "{\"command\":\"pwd\"}"},
+		{.id = "toolu_b", .name = "read_file", .arguments = "{\"path\":\"a.txt\"}"},
+	};
+	provider_message_t messages[5];
+	char *json;
+	cJSON *arr;
+	cJSON *user;
+	cJSON *role;
+	cJSON *content;
+	cJSON *block;
+
+	memset(messages, 0, sizeof(messages));
+	messages[0].role = "user";
+	messages[0].content = "do both";
+	messages[1].role = "assistant";
+	messages[1].content = "";
+	messages[1].tool_calls = calls;
+	messages[1].tool_calls_count = 2;
+	messages[2].role = "user";
+	messages[2].content = "out-a";
+	messages[2].tool_use_id = "toolu_a";
+	messages[3].role = "user";
+	messages[3].content = "out-b";
+	messages[3].tool_use_id = "toolu_b";
+	messages[4].role = "user";
+	messages[4].content = "what now?";
+	json = anthropic_messages_json_for_test(messages, 5);
+	ASSERT(json != NULL);
+	arr = cJSON_Parse(json);
+	cJSON_free(json);
+	ASSERT(arr != NULL && cJSON_IsArray(arr));
+	ASSERT(cJSON_GetArraySize(arr) == 4);
+	user = cJSON_GetArrayItem(arr, 2);
+	role = user ? cJSON_GetObjectItem(user, "role") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "user") == 0);
+	content = user ? cJSON_GetObjectItem(user, "content") : NULL;
+	ASSERT(cJSON_IsArray(content) && cJSON_GetArraySize(content) == 2);
+	block = cJSON_GetArrayItem(content, 0);
+	role = block ? cJSON_GetObjectItem(block, "tool_use_id") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "toolu_a") == 0);
+	block = cJSON_GetArrayItem(content, 1);
+	role = block ? cJSON_GetObjectItem(block, "tool_use_id") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "toolu_b") == 0);
+	/* The plain user message after the results stays its own message. */
+	user = cJSON_GetArrayItem(arr, 3);
+	role = user ? cJSON_GetObjectItem(user, "role") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "user") == 0);
+	content = user ? cJSON_GetObjectItem(user, "content") : NULL;
+	ASSERT(cJSON_IsString(content) && strcmp(content->valuestring, "what now?") == 0);
+	cJSON_Delete(arr);
+	return 0;
+}
+
+/** Results of a second round must not merge across the assistant message. */
+static int test_tool_results_do_not_merge_across_assistant_rounds(void)
+{
+	provider_tool_call_t calls_a[1] = {
+		{.id = "toolu_a", .name = "shell", .arguments = "{\"command\":\"pwd\"}"},
+	};
+	provider_tool_call_t calls_c[1] = {
+		{.id = "toolu_c", .name = "read_file", .arguments = "{\"path\":\"b.txt\"}"},
+	};
+	provider_message_t messages[5];
+	char *json;
+	cJSON *arr;
+	cJSON *assistant;
+	cJSON *user;
+	cJSON *role;
+	cJSON *content;
+	cJSON *block;
+
+	memset(messages, 0, sizeof(messages));
+	messages[0].role = "user";
+	messages[0].content = "start";
+	messages[1].role = "assistant";
+	messages[1].content = "";
+	messages[1].tool_calls = calls_a;
+	messages[1].tool_calls_count = 1;
+	messages[2].role = "user";
+	messages[2].content = "out-a";
+	messages[2].tool_use_id = "toolu_a";
+	messages[3].role = "assistant";
+	messages[3].content = "";
+	messages[3].tool_calls = calls_c;
+	messages[3].tool_calls_count = 1;
+	messages[4].role = "user";
+	messages[4].content = "out-c";
+	messages[4].tool_use_id = "toolu_c";
+	json = anthropic_messages_json_for_test(messages, 5);
+	ASSERT(json != NULL);
+	arr = cJSON_Parse(json);
+	cJSON_free(json);
+	ASSERT(arr != NULL && cJSON_IsArray(arr));
+	ASSERT(cJSON_GetArraySize(arr) == 5);
+	/* Round one result message: exactly its own block. */
+	user = cJSON_GetArrayItem(arr, 2);
+	role = user ? cJSON_GetObjectItem(user, "role") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "user") == 0);
+	content = user ? cJSON_GetObjectItem(user, "content") : NULL;
+	ASSERT(cJSON_IsArray(content) && cJSON_GetArraySize(content) == 1);
+	/* The second assistant round keeps its own assistant message. */
+	assistant = cJSON_GetArrayItem(arr, 3);
+	role = assistant ? cJSON_GetObjectItem(assistant, "role") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "assistant") == 0);
+	content = assistant ? cJSON_GetObjectItem(assistant, "content") : NULL;
+	ASSERT(cJSON_IsArray(content) && cJSON_GetArraySize(content) == 1);
+	block = cJSON_GetArrayItem(content, 0);
+	role = block ? cJSON_GetObjectItem(block, "id") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "toolu_c") == 0);
+	/* Round two result lands in its own user message. */
+	user = cJSON_GetArrayItem(arr, 4);
+	role = user ? cJSON_GetObjectItem(user, "role") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "user") == 0);
+	content = user ? cJSON_GetObjectItem(user, "content") : NULL;
+	ASSERT(cJSON_IsArray(content) && cJSON_GetArraySize(content) == 1);
+	block = cJSON_GetArrayItem(content, 0);
+	role = block ? cJSON_GetObjectItem(block, "tool_use_id") : NULL;
+	ASSERT(cJSON_IsString(role) && strcmp(role->valuestring, "toolu_c") == 0);
+	cJSON_Delete(arr);
+	return 0;
+}
+
 static int test_parse_tool_realloc_failure_is_error(void)
 {
 	char body[1024];
@@ -323,6 +491,9 @@ int main(void)
 	RUN(test_parse_text_past_initial_cap());
 	RUN(test_parse_six_tool_use_blocks());
 	RUN(test_parallel_tool_results_share_one_user_message());
+	RUN(test_single_tool_result_one_user_message());
+	RUN(test_tool_results_stop_at_plain_user_message());
+	RUN(test_tool_results_do_not_merge_across_assistant_rounds());
 	RUN(test_parse_text_realloc_failure_is_error());
 	RUN(test_parse_tool_realloc_failure_is_error());
 #endif
