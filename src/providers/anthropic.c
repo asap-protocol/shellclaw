@@ -11,6 +11,7 @@
 #include "cJSON.h"
 #include <curl/curl.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,10 +27,36 @@ static const config_t *s_anth_cfg;
 
 #ifdef SHELLCLAW_TEST
 static int s_fail_next_reallocs;
+static int s_anth_test_skip_http;
+static char s_anth_test_model[160];
 
 void anthropic_test_fail_next_reallocs(int n)
 {
 	s_fail_next_reallocs = n < 0 ? 0 : n;
+}
+
+void anthropic_test_set_skip_http(int skip)
+{
+	s_anth_test_skip_http = skip ? 1 : 0;
+}
+
+const char *anthropic_test_last_request_model(void)
+{
+	return s_anth_test_model;
+}
+
+static void anth_test_store_model(const char *model)
+{
+	size_t n;
+
+	s_anth_test_model[0] = '\0';
+	if (!model)
+		return;
+	n = strlen(model);
+	if (n >= sizeof(s_anth_test_model))
+		n = sizeof(s_anth_test_model) - 1U;
+	memcpy(s_anth_test_model, model, n);
+	s_anth_test_model[n] = '\0';
 }
 #endif
 
@@ -374,14 +401,40 @@ static int build_and_send(const provider_message_t *messages, size_t message_cou
                           const provider_tool_def_t *tools, size_t tool_count,
                           provider_response_t *response)
 {
+	const char *configured;
+	const char *model;
+	int max_tokens;
+	char errmsg[256];
+	cJSON *root;
 	if (!s_anth_cfg) { provider_set_error(response, "Anthropic provider not initialized"); return -1; }
-	cJSON *root = cJSON_CreateObject();
+	configured = config_agent_model(s_anth_cfg);
+	if (!configured || configured[0] == '\0')
+		configured = "claude-3-5-sonnet-20241022";
+	model = provider_model_id_for_backend(configured, "anthropic");
+	if (!model) {
+		snprintf(errmsg, sizeof(errmsg),
+		         "Anthropic skipped: agent model \"%s\" is not an Anthropic id",
+		         configured);
+		provider_set_error(response, errmsg);
+		return -1;
+	}
+	root = cJSON_CreateObject();
 	if (!root) { provider_set_error(response, "Out of memory"); return -1; }
-	const char *model = config_agent_model(s_anth_cfg);
-	int max_tokens = config_agent_max_tokens(s_anth_cfg);
-	if (!model) model = "claude-3-5-sonnet-20241022";
+	max_tokens = config_agent_max_tokens(s_anth_cfg);
 	if (max_tokens <= 0) max_tokens = 4096;
 	cJSON_AddItemToObject(root, "model", cJSON_CreateString(model));
+#ifdef SHELLCLAW_TEST
+	if (s_anth_test_skip_http) {
+		anth_test_store_model(model);
+		cJSON_Delete(root);
+		response->content = provider_dup_str("");
+		if (!response->content) {
+			provider_set_error(response, "Out of memory");
+			return -1;
+		}
+		return 0;
+	}
+#endif
 	cJSON_AddItemToObject(root, "max_tokens", cJSON_CreateNumber(max_tokens));
 	for (size_t i = 0; i < message_count; i++) {
 		if (messages[i].role && strcmp(messages[i].role, "system") == 0) {
