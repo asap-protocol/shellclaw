@@ -82,6 +82,9 @@ static int copy_printed_session_json(char *dst, size_t dst_size, char *printed,
 
 static const char SUMMARIZE_SYSTEM[] = "Summarize the following conversation in one short paragraph. Output only the summary, no preamble.";
 
+/** Marker appended by summary_source_append_truncated when a line was cut. */
+static const char SUMMARY_TRUNC_MARKER[] = "[truncated]";
+
 /** Append one "role: content" line, or roll back if the whole line does not fit. */
 static int summary_source_append(char *buf, size_t cap, size_t *used,
 	const char *role, const char *content)
@@ -92,6 +95,49 @@ static int summary_source_append(char *buf, size_t cap, size_t *used,
 	n = snprintf(buf + *used, cap - *used, "%s: %s\n",
 		role ? role : "user", content ? content : "");
 	if (n < 0 || (size_t)n >= cap - *used) {
+		buf[*used] = '\0';
+		return 0;
+	}
+	*used += (size_t)n;
+	return 1;
+}
+
+/** True when the line cannot fit even a fresh source, so no later pass can
+ *  ever summarize it whole either. */
+static int summary_line_never_fits(const char *role, const char *content)
+{
+	const char *r = role ? role : "user";
+	const char *c = content ? content : "";
+
+	/* summary_source_append refuses when the line plus its NUL exceeds the cap. */
+	return strlen(r) + 2 + strlen(c) + 1 >= SUMMARY_SOURCE_MAX;
+}
+
+/** Append one line with the content cut to fit, marking the cut, so a message
+ *  that can never fit whole still reaches the summarizer. Same atomicity:
+ *  the whole stub fits or nothing is written. */
+static int summary_source_append_truncated(char *buf, size_t cap, size_t *used,
+	const char *role, const char *content)
+{
+	const char *r = role ? role : "user";
+	const char *c = content ? content : "";
+	size_t remain;
+	size_t fixed;
+	size_t cut;
+	int n;
+
+	if (!buf || !used || *used + 1 >= cap)
+		return 0;
+	remain = cap - *used;
+	fixed = strlen(r) + 2 + strlen(SUMMARY_TRUNC_MARKER) + 1 + 1; /* ": " "\n" NUL */
+	if (remain <= fixed)
+		return 0;
+	cut = remain - fixed;
+	if (cut > strlen(c))
+		cut = strlen(c);
+	n = snprintf(buf + *used, remain, "%s: %.*s%s\n", r, (int)cut, c,
+		SUMMARY_TRUNC_MARKER);
+	if (n < 0 || (size_t)n >= remain) {
 		buf[*used] = '\0';
 		return 0;
 	}
@@ -204,11 +250,19 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		if (cJSON_IsString(r)) role = r->valuestring;
 		if (cJSON_IsString(c)) content = c->valuestring;
 		if (!summary_source_append(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
-			next_unsummarized = i;
-			break;
+			/* A line that can never fit whole would abort with used==0
+			 * (first line) or keep the session above max_ctx forever
+			 * (later line); stub it so this pass still consumes it.
+			 * Lines that only lack room here stay raw for a later pass
+			 * via next_unsummarized. */
+			if (!summary_line_never_fits(role, content) ||
+			    !summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
+				next_unsummarized = i;
+				break;
+			}
 		}
 	}
-	if (used == 0 || next_unsummarized == 0) {
+	if (used == 0) {
 		free(source_buf);
 		cJSON_Delete(root);
 		return -1;
