@@ -5,6 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Provider model ids keep their vendor prefix in config but are stripped per backend before the request: `anthropic/claude-...` no longer reaches the Anthropic API (HTTP 4xx) or OpenAI after a 5xx, so the fallback chain runs through to local.
 - Live config reload reaches the Anthropic provider (`provider_anthropic_set_live_config`, guarded like OpenAI), so dashboard/SIGHUP reloads update model and `max_tokens` instead of staying on the config captured at init.
 - Parallel tool results are grouped into one `user` message (one `tool_result` block per call, per the Messages API contract), fixing Anthropic 400s on parallel tool calls.
 - The local provider re-probes on the next request after an unreachable startup, at most once every 15 seconds, so a down `llama-server` no longer costs synchronous curl probes on every agent turn.
