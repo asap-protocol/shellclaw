@@ -366,7 +366,16 @@ cleanup:
 }
 
 static int compaction_call_count;
-static int compaction_init(const config_t *cfg) { (void)cfg; compaction_call_count = 0; return 0; }
+static int compaction_source_has_boundary;
+static int compaction_source_truncated;
+static int compaction_init(const config_t *cfg)
+{
+	(void)cfg;
+	compaction_call_count = 0;
+	compaction_source_has_boundary = 0;
+	compaction_source_truncated = 0;
+	return 0;
+}
 static int compaction_chat(const provider_message_t *messages, size_t message_count,
 	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
 {
@@ -377,6 +386,11 @@ static int compaction_chat(const provider_message_t *messages, size_t message_co
 	response->tool_calls_count = 0;
 	compaction_call_count++;
 	if (compaction_call_count == 1) {
+		const char *src = (message_count >= 2 && messages[1].content) ? messages[1].content : "";
+		/* msg_10 is the boundary turn: the summary window must include it;
+		 * the kept tail starts at msg_11. */
+		compaction_source_has_boundary = strstr(src, "msg_10\n") != NULL;
+		compaction_source_truncated = strstr(src, "[truncated]") != NULL;
 		response->content = strdup("Summary of earlier conversation.");
 		return 0;
 	}
@@ -442,6 +456,8 @@ static int test_context_compaction_when_history_exceeds_max(void)
 	}
 	if (!found_summary) goto cleanup;
 	if (!found_tail) goto cleanup;
+	/* Boundary message must be in the summary source; the tail starts at msg_11. */
+	if (!compaction_source_has_boundary) goto cleanup;
 	failed = 0;
 cleanup:
 	config_free(cfg);
@@ -451,6 +467,549 @@ cleanup_early:
 	memory_cleanup();
 	return failed;
 }
+
+/* A message that fits a fresh source but not the space left by earlier lines
+ * must stay in the session. Deleting it loses history the model never saw. */
+static int test_compaction_keeps_message_that_does_not_fit_summary(void)
+{
+	enum { HEAD = 30 * 1024, BIG = 5 * 1024, JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *head_a = NULL;
+	char *head_b = NULL;
+	char *big = NULL;
+	const char *db_path = "build/test_agent_compact_fit.db";
+	const char *config_path = "build/test_agent_compact_fit.toml";
+	size_t off;
+	int i;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	memory_cleanup();
+	compaction_call_count = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	head_a = malloc((size_t)HEAD + 1);
+	head_b = malloc((size_t)HEAD + 1);
+	big = malloc((size_t)BIG + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !head_a || !head_b || !big || !loaded)
+		goto cleanup;
+	memset(head_a, 'a', (size_t)HEAD);
+	memcpy(head_a + HEAD - 10, "HEAD_A_END", 10);
+	head_a[HEAD] = '\0';
+	memset(head_b, 'b', (size_t)HEAD);
+	memcpy(head_b + HEAD - 10, "HEAD_B_END", 10);
+	head_b[HEAD] = '\0';
+	memset(big, 'A', (size_t)BIG);
+	memcpy(big + BIG - 12, "BIG_KEEP_END", 12);
+	big[BIG] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"{\"role\":\"user\",\"content\":\"%s\"}", head_a);
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"user\",\"content\":\"%s\"}", head_b);
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"user\",\"content\":\"%s\"}", big);
+	for (i = 3; i < 6; i++) {
+		off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+			",{\"role\":\"user\",\"content\":\"m%d\"}", i);
+	}
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:compactfit", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 4\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, "cli:compactfit", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (session_load("cli:compactfit", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (strstr(loaded, "BIG_KEEP_END") == NULL) {
+		fprintf(stderr,
+			"FAIL: compacted session dropped the message that did not fit the summary\n");
+		goto cleanup;
+	}
+	if (strstr(loaded, "Summary of earlier") == NULL) {
+		fprintf(stderr, "FAIL: expected a summary of the messages that did fit\n");
+		goto cleanup;
+	}
+	if (strstr(loaded, "HEAD_A_END") != NULL || strstr(loaded, "HEAD_B_END") != NULL) {
+		fprintf(stderr, "FAIL: head messages that fit the summary were kept raw\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(head_a);
+	free(head_b);
+	free(big);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+static int count_session_messages(const char *json)
+{
+	cJSON *root;
+	int n;
+
+	root = cJSON_Parse(json);
+	if (!root || !cJSON_IsArray(root)) {
+		if (root)
+			cJSON_Delete(root);
+		return -1;
+	}
+	n = cJSON_GetArraySize(root);
+	cJSON_Delete(root);
+	return n;
+}
+
+/* An oversized FIRST line used to abort compaction with an empty source, so
+ * the session never shrank again and every turn retried in vain. The line now
+ * reaches the summarizer as a truncated stub and the session keeps shrinking. */
+static int test_compaction_progresses_when_first_message_is_oversized(void)
+{
+	enum { OVERSIZE = 65 * 1024, JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *big = NULL;
+	const char *db_path = "build/test_agent_compact_stall_first.db";
+	const char *config_path = "build/test_agent_compact_stall_first.toml";
+	size_t off;
+	int i;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	memory_cleanup();
+	compaction_call_count = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	big = malloc((size_t)OVERSIZE + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !big || !loaded)
+		goto cleanup;
+	memset(big, 'A', (size_t)OVERSIZE);
+	memcpy(big + OVERSIZE - 11, "STALL_A_END", 11);
+	big[OVERSIZE] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"{\"role\":\"user\",\"content\":\"%s\"}", big);
+	for (i = 1; i < 6; i++) {
+		off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+			",{\"role\":\"user\",\"content\":\"m%d\"}", i);
+	}
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:stallfirst", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 4\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, "cli:stallfirst", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (compaction_call_count < 2) {
+		fprintf(stderr, "FAIL: compaction aborted before the summarizer call\n");
+		goto cleanup;
+	}
+	if (!compaction_source_truncated) {
+		fprintf(stderr,
+			"FAIL: oversized first line did not reach the summary as a truncated stub\n");
+		goto cleanup;
+	}
+	if (session_load("cli:stallfirst", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (strstr(loaded, "STALL_A_END") != NULL) {
+		fprintf(stderr, "FAIL: oversized first line is still raw instead of summarized\n");
+		goto cleanup;
+	}
+	if (strstr(loaded, "Summary of earlier") == NULL) {
+		fprintf(stderr, "FAIL: expected a summary of the truncated oversized turn\n");
+		goto cleanup;
+	}
+	/* A follow-up turn must finish shrinking the session down to max_ctx. */
+	if (agent_run(cfg, "cli:stallfirst", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (session_load("cli:stallfirst", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (count_session_messages(loaded) > 4 + 2) {
+		fprintf(stderr, "FAIL: session never shrinks back to max_ctx after the oversized turn\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(big);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+/* An oversized LATER line used to be kept raw with everything after it, so
+ * new_count stayed above max_ctx forever. The truncated stub now consumes it
+ * and this pass brings the session back down to max_ctx. */
+static int test_compaction_progresses_when_later_message_is_oversized(void)
+{
+	enum { OVERSIZE = 65 * 1024, JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *big = NULL;
+	const char *db_path = "build/test_agent_compact_stall_later.db";
+	const char *config_path = "build/test_agent_compact_stall_later.toml";
+	size_t off;
+	int i;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	memory_cleanup();
+	compaction_call_count = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	big = malloc((size_t)OVERSIZE + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !big || !loaded)
+		goto cleanup;
+	memset(big, 'A', (size_t)OVERSIZE);
+	memcpy(big + OVERSIZE - 11, "STALL_B_END", 11);
+	big[OVERSIZE] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"{\"role\":\"user\",\"content\":\"alpha_small\"}");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"user\",\"content\":\"%s\"}", big);
+	for (i = 2; i < 6; i++) {
+		off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+			",{\"role\":\"user\",\"content\":\"m%d\"}", i);
+	}
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:stalllater", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 4\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, "cli:stalllater", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (!compaction_source_truncated) {
+		fprintf(stderr,
+			"FAIL: oversized later line did not reach the summary as a truncated stub\n");
+		goto cleanup;
+	}
+	if (session_load("cli:stalllater", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (strstr(loaded, "STALL_B_END") != NULL) {
+		fprintf(stderr, "FAIL: oversized later line is still raw instead of summarized\n");
+		goto cleanup;
+	}
+	if (strstr(loaded, "Summary of earlier") == NULL) {
+		fprintf(stderr, "FAIL: expected a summary of the truncated oversized turn\n");
+		goto cleanup;
+	}
+	if (count_session_messages(loaded) > 4 + 2) {
+		fprintf(stderr, "FAIL: session is not back to max_ctx after the oversized turn\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(big);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+static int save_alternating_session(const char *session_id, int count)
+{
+	char *json;
+	size_t cap;
+	size_t off = 0;
+	int i;
+	int rc;
+
+	cap = (size_t)count * 80u + 2u;
+	json = malloc(cap);
+	if (!json)
+		return -1;
+	off += (size_t)snprintf(json + off, cap - off, "[");
+	for (i = 0; i < count; i++) {
+		const char *role = (i % 2 == 0) ? "user" : "assistant";
+		int n = snprintf(json + off, cap - off,
+			"%s{\"role\":\"%s\",\"content\":\"msg_%d\"}",
+			i ? "," : "", role, i);
+		if (n < 0 || (size_t)n >= cap - off) {
+			free(json);
+			return -1;
+		}
+		off += (size_t)n;
+	}
+	if (off + 1 >= cap) {
+		free(json);
+		return -1;
+	}
+	json[off++] = ']';
+	json[off] = '\0';
+	rc = session_save(session_id, json);
+	free(json);
+	return rc;
+}
+
+static int json_roles_alternate_from_user(const char *json)
+{
+	cJSON *root;
+	int n;
+	int i;
+	const char *prev = NULL;
+
+	root = cJSON_Parse(json);
+	if (!root || !cJSON_IsArray(root)) {
+		if (root)
+			cJSON_Delete(root);
+		return 0;
+	}
+	n = cJSON_GetArraySize(root);
+	if (n <= 0) {
+		cJSON_Delete(root);
+		return 0;
+	}
+	for (i = 0; i < n; i++) {
+		cJSON *item = cJSON_GetArrayItem(root, i);
+		cJSON *role = item ? cJSON_GetObjectItem(item, "role") : NULL;
+		const char *r = (role && cJSON_IsString(role) && role->valuestring) ? role->valuestring : "";
+		if (i == 0 && strcmp(r, "user") != 0) {
+			cJSON_Delete(root);
+			return 0;
+		}
+		if (prev && strcmp(prev, r) == 0) {
+			cJSON_Delete(root);
+			return 0;
+		}
+		prev = r;
+	}
+	cJSON_Delete(root);
+	return 1;
+}
+
+static int compact_fail_calls;
+static int compact_fail_init(const config_t *cfg)
+{
+	(void)cfg;
+	compact_fail_calls = 0;
+	return 0;
+}
+static int compact_fail_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	(void)messages;
+	(void)message_count;
+	(void)tools;
+	(void)tool_count;
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	response->error = 0;
+	compact_fail_calls++;
+	if (compact_fail_calls == 1) {
+		response->content = strdup("Summary of earlier conversation.");
+		return 0;
+	}
+	provider_set_error(response, "mock provider error");
+	return -1;
+}
+static void compact_fail_cleanup(void) {}
+static const provider_t compact_fail_provider = {
+	.name = "compact_fail",
+	.init = compact_fail_init,
+	.chat = compact_fail_chat,
+	.cleanup = compact_fail_cleanup,
+};
+
+/* Summary is computed before the user turn. Saving it immediately deletes the
+ * raw transcript when the follow-up chat fails and the turn is not stored. */
+static int test_compaction_failure_keeps_original_session(void)
+{
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *loaded = NULL;
+	const char *db_path = "build/test_agent_compact_fail.db";
+	const char *config_path = "build/test_agent_compact_fail.toml";
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	memory_cleanup();
+	compact_fail_calls = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	if (save_alternating_session("cli:compactfail", 50) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 40\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	loaded = malloc(128 * 1024);
+	if (!loaded)
+		goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, "cli:compactfail", "hi", &compact_fail_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) == 0)
+		goto cleanup;
+	if (strstr(response_buf, "mock provider error") == NULL)
+		goto cleanup;
+	if (session_load("cli:compactfail", loaded, 128 * 1024) != 0)
+		goto cleanup;
+	if (strstr(loaded, "\"content\":\"msg_0\"") == NULL) {
+		fprintf(stderr, "FAIL: failed turn replaced the stored transcript\n");
+		goto cleanup;
+	}
+	if (strstr(loaded, "Summary of earlier") != NULL) {
+		fprintf(stderr, "FAIL: summary was saved even though the turn failed\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+/* Odd max_context_messages cuts the tail on a user turn. A separate summary
+ * user message then makes every later Anthropic call a 400. */
+static int test_compaction_merges_summary_when_tail_starts_with_user(void)
+{
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *loaded = NULL;
+	const char *db_path = "build/test_agent_compact_roles.db";
+	const char *config_path = "build/test_agent_compact_roles.toml";
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+	size_t i;
+
+	memory_cleanup();
+	compaction_call_count = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	if (save_alternating_session("cli:compactroles", 8) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 5\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	loaded = malloc(64 * 1024);
+	if (!loaded)
+		goto cleanup;
+	response_buf[0] = '\0';
+	spy_roles_clear();
+	if (agent_run(cfg, "cli:compactroles", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (compaction_call_count < 2)
+		goto cleanup;
+	if (spy_message_count < 6 || spy_message_count > SPY_SLOTS)
+		goto cleanup;
+	if (!spy_roles[0] || strcmp(spy_roles[0], "system") != 0)
+		goto cleanup;
+	if (!spy_roles[1] || strcmp(spy_roles[1], "user") != 0)
+		goto cleanup;
+	if (strstr(spy_content[1], "Summary of earlier") == NULL ||
+	    strstr(spy_content[1], "msg_4") == NULL) {
+		fprintf(stderr, "FAIL: summary was not folded into the leading user turn\n");
+		goto cleanup;
+	}
+	for (i = 2; i < spy_message_count; i++) {
+		if (!spy_roles[i] || strcmp(spy_roles[i], spy_roles[i - 1]) == 0) {
+			fprintf(stderr, "FAIL: compacted history has consecutive roles\n");
+			goto cleanup;
+		}
+	}
+	if (session_load("cli:compactroles", loaded, 64 * 1024) != 0)
+		goto cleanup;
+	if (strstr(loaded, "Summary of earlier") == NULL || strstr(loaded, "msg_4") == NULL)
+		goto cleanup;
+	if (strstr(loaded, "\"content\":\"msg_0\"") != NULL) {
+		fprintf(stderr, "FAIL: successful turn did not persist compaction\n");
+		goto cleanup;
+	}
+	if (!json_roles_alternate_from_user(loaded)) {
+		fprintf(stderr, "FAIL: persisted session roles do not alternate\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
 
 static int test_local_offline_note_when_active_is_local(void)
 {
@@ -1186,6 +1745,11 @@ int main(void)
 	RUN(test_react_loop_preserves_prior_tool_results());
 	RUN(test_session_persisted_after_exchange());
 	RUN(test_context_compaction_when_history_exceeds_max());
+	RUN(test_compaction_keeps_message_that_does_not_fit_summary());
+	RUN(test_compaction_progresses_when_first_message_is_oversized());
+	RUN(test_compaction_progresses_when_later_message_is_oversized());
+	RUN(test_compaction_failure_keeps_original_session());
+	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());
 	RUN(test_session_overflow_does_not_corrupt_history());
