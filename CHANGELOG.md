@@ -5,6 +5,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Telegram `getUpdates` requests a single update per poll and skips a message without a numeric sender id, so a backlog larger than the 256 KiB read buffer (or a channel/anonymous post) no longer pins the poll offset and stalls the inbox.
+- Telegram `sendMessage` delivery is verified from the HTTP status code and the `ok` body field, so an API refusal (HTTP 400/429) is no longer reported as a successful send and acknowledged as delivered.
+- Long Telegram and Discord replies are chunked to the platform limits (4096/2000 bytes, UTF-8 boundary-safe) through the shared `channel_send_chunked` helper, so a reply over the cap is delivered as several messages instead of failing the whole send; chunk posts are paced for the ~1 msg/s Telegram chat rate, and a failed mid-reply post logs its chunk index and byte offset.
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
 - Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
 - Dashboard config save and JSON patch validation use a unique temp plus `fsync`, and the live gateway config pointer is published once under `agent_lock`.
