@@ -397,8 +397,6 @@ static void skill_get_send(const char *name, const char *content, char *buf, siz
 {
 	cJSON *obj;
 	char *printed;
-	char limit_desc[64];
-
 	obj = cJSON_CreateObject();
 	if (!obj) {
 		json_error(buf, size, status, 500, "Internal error");
@@ -414,6 +412,7 @@ static void skill_get_send(const char *name, const char *content, char *buf, siz
 	}
 	/* A cut-off 200 body parses as empty in the dashboard and Save wipes the file. */
 	if (strlen(printed) >= size) {
+		char limit_desc[64];
 		free(printed);
 		snprintf(limit_desc, sizeof(limit_desc), "%zu byte response buffer", size);
 		skill_too_large(buf, size, status, name, limit_desc);
@@ -426,7 +425,6 @@ static void skill_get_send(const char *name, const char *content, char *buf, siz
 static void handle_skill_get(const config_t *cfg, const char *name, char *buf, size_t size, int *status)
 {
 	char *content;
-	char limit_desc[64];
 	int rc;
 
 	content = malloc(SKILL_CONTENT_MAX);
@@ -438,6 +436,7 @@ static void handle_skill_get(const config_t *cfg, const char *name, char *buf, s
 	if (rc != 0) {
 		free(content);
 		if (rc == -2) {
+			char limit_desc[64];
 			snprintf(limit_desc, sizeof(limit_desc), "%d byte edit buffer",
 			         SKILL_CONTENT_MAX - 1);
 			skill_too_large(buf, size, status, name, limit_desc);
