@@ -40,13 +40,26 @@ The primary goals are: prevent sandboxed shell commands from escaping to host de
 | Surface | Mechanism | Notes |
 |---------|-----------|-------|
 | Shell (sandbox on) | `fork()` + user ns when needed + `unshare(CLONE_NEWNS \| CLONE_NEWNET \| CLONE_NEWPID)` + fork for PID 1 + Landlock workspace bound + `prctl(PR_SET_NO_NEW_PRIVS)` + secret-free environment | Fail-closed if namespaces or Landlock cannot apply. The command child keeps `PATH`, locale, `TERM`, `TZ`, and `HOME` set to the workspace. Host API keys and bot tokens are not inherited. Isolation uses a control pipe, not `sh` exit 122/123. See [Linux sandbox (Jetson)](#linux-sandbox-jetson) |
-| Shell (sandbox off) | Plain `fork()` + substring fallback blocklist | **Not** a security boundary; stderr warning |
+| Shell (sandbox off) | Plain `fork()` + substring fallback blocklist | **Not** a security boundary; the full host environment is inherited — `printenv` works there (see [Command environment model](#command-environment-model)); stderr warning |
 | Allowlist | Substring blocklist + workspace containment (ancestor walk, quoted/embedded `/` `~`, `$HOME`/`$PWD`, `file:` URLs, relative names) | Defense-in-depth string scan; Landlock is the kernel host-FS bound |
 | Landlock | Ruleset on configured `workspace_path` (RW workspace + traverse-only `/` + RO `/bin` `/usr` `/lib` and `/etc/ssl/certs` only; RW `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/tty` without `IOCTL_DEV`). Child `fchdir`s the workspace before `restrict_self`. A failed `landlock_add_rule` fails the ruleset closed. | Primary host-FS gate; `/` is `READ_DIR` only so `/etc/passwd` stays closed. `/etc/ssl/private` is not granted. Blocks symlink and `chr(47)+` host reads |
 | cgroups v2 | `memory.max`, `cpu.max`; isolator writes `cgroup.procs` before the command fork | Best-effort; non-fatal if cgroup write fails |
 | Hardware GPIO/I2C | libgpiod / `i2c-dev` in agent process | Not exposed inside shell namespace |
 
 Implementation: [`src/sandbox/sandbox.c`](../src/sandbox/sandbox.c), [`src/sandbox/allowlist.c`](../src/sandbox/allowlist.c).
+
+### Command environment model
+
+The two shell paths differ in environment exposure as much as in isolation, so the model is stated explicitly:
+
+| Path | Environment the command sees | `printenv` inside the command |
+|------|------------------------------|------------------------------|
+| Sandboxed (`sandbox.enabled = true`) | Scrubbed whitelist only: `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, and `TZ` keep their host values when set, and `HOME` is set to the configured workspace (when one is set). Everything else is dropped (`clearenv` before `exec`). | Only the whitelist: provider keys, bot tokens, and loader variables are gone. |
+| Unsandboxed fallback (`sandbox.enabled = false`, the default when the key is omitted) | The full agent (host) environment is inherited. | Works — it prints the agent's environment, secrets included. Intentional: this path is reduced isolation, not a security boundary; a stderr warning is printed per command. |
+
+Jetson-relevant variables that deliberately do **not** pass into the sandbox: `LD_LIBRARY_PATH` and all other `LD_*` (including `LD_PRELOAD`), `CUDA_HOME` and other `CUDA_*`, `TMPDIR`, `SSL_CERT_FILE`, and proxy variables (`http_proxy`, `https_proxy`, `no_proxy`, …). Sandboxed workloads that rely on them must set them per command (for example `LD_LIBRARY_PATH=… cmd`); there is no `[sandbox]` passthrough list in v1.0. Tool paths that genuinely need host setup (camera capture) run argv-only `execvp` in the agent process, outside the shell sandbox.
+
+Implementation: [`src/sandbox/sandbox_env.c`](../src/sandbox/sandbox_env.c).
 
 ---
 

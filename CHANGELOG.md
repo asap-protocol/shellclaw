@@ -5,6 +5,8 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- Sandboxed shell commands no longer inherit the agent environment: the command process keeps only `PATH`, locale (`LANG`, `LC_ALL`, `LC_CTYPE`), `TERM`, `TZ`, and `HOME` (set to the workspace), so a prompt-injected `printenv` cannot read provider API keys or bot tokens. `LD_*`, `CUDA_*`, and proxy variables are dropped before `exec`; see the environment model in `docs/SECURITY.md` (#109).
+- The shell command timeout is enforced against a monotonic wall clock on both the sandboxed and the unsandboxed paths, so a command that keeps stdout trickling can no longer outlive `shell_timeout_sec` and hold the agent lock until the output buffer fills (#116).
 - Cron re-offer waits the full timeout when a due id could not be stored in the 16-slot table, and an ack frees that slot so the next due job can be delivered and then backed off.
 - Landlock device grants stay `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/tty` without `IOCTL_DEV`. A failed `landlock_add_rule` fails the ruleset closed.
 - Dashboard config save and JSON patch validation use a unique temp plus `fsync`, and the live gateway config pointer is published once under `agent_lock`.
