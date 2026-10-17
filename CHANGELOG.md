@@ -5,6 +5,7 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 ## [Unreleased]
 
 ### Fixed
+- WebChat writes are moved off the agent thread: frames are queued and the lws service thread is woken (`lws_cancel_service`), marking writable only from `EVENT_WAIT_CANCELLED`, which stops the poll-set race against a closing socket.
 - Sandboxed shell commands no longer inherit the agent environment: the command process keeps only `PATH`, locale (`LANG`, `LC_ALL`, `LC_CTYPE`), `TERM`, `TZ`, and `HOME` (set to the workspace), so a prompt-injected `printenv` cannot read provider API keys or bot tokens. `LD_*`, `CUDA_*`, and proxy variables are dropped before `exec`; see the environment model in `docs/SECURITY.md` (#109).
 - The shell command timeout is enforced against a monotonic wall clock on both the sandboxed and the unsandboxed paths, so a command that keeps stdout trickling can no longer outlive `shell_timeout_sec` and hold the agent lock until the output buffer fills (#116).
 - Telegram `getUpdates` requests a single update per poll and skips a message without a numeric sender id, so a backlog larger than the 256 KiB read buffer (or a channel/anonymous post) no longer pins the poll offset and stalls the inbox.
