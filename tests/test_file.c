@@ -569,7 +569,8 @@ static void test_read_rejects_file_larger_than_result_buffer(void)
 	char notes_path[PATH_MAX];
 	char config_path[PATH_MAX];
 	char args[PATH_MAX + 64];
-	char buf[32];
+	/* Large enough for the ~49-byte error JSON, still smaller than the 64-byte file. */
+	char buf[56];
 	char exact[8];
 	FILE *f;
 	config_t *cfg;
@@ -591,7 +592,9 @@ static void test_read_rejects_file_larger_than_result_buffer(void)
 	t = tool_file_get();
 	snprintf(args, sizeof(args), "{\"operation\":\"read_file\",\"path\":\"%s\"}", notes_path);
 	MU_ASSERT(t->execute(args, buf, sizeof(buf)) == -1, "oversize read fails");
-	MU_ASSERT(strstr(buf, "error") != NULL, "oversize read reports an error");
+	MU_ASSERT(strstr(buf, "\"error\":\"file exceeds result buffer\"") != NULL,
+		"oversize read reports the refuse-to-truncate error");
+	MU_ASSERT(strstr(buf, "\"bytes\":64") != NULL, "error reports the file size");
 	MU_ASSERT(strstr(buf, "AAAAAAAAAAAAAAAA") == NULL, "oversize read is not a raw prefix");
 	f = fopen(notes_path, "w");
 	MU_ASSERT(f != NULL, "rewrite exact-fit notes.md");
@@ -599,6 +602,13 @@ static void test_read_rejects_file_larger_than_result_buffer(void)
 	fclose(f);
 	MU_ASSERT(t->execute(args, exact, sizeof(exact)) == 0, "exact-fit read succeeds");
 	MU_ASSERT(strcmp(exact, "0123456") == 0, "exact-fit read returns the whole file");
+	/* One over the boundary: size == max_len must fail, not clip (max_len - 1 covered above). */
+	f = fopen(notes_path, "w");
+	MU_ASSERT(f != NULL, "rewrite one-over notes.md");
+	fputs("01234567", f);
+	fclose(f);
+	MU_ASSERT(t->execute(args, exact, sizeof(exact)) == -1, "one-over read fails");
+	MU_ASSERT(strstr(exact, "error") != NULL, "one-over read reports an error, not a prefix");
 	config_free(cfg);
 	unlink(config_path);
 	unlink(notes_path);
