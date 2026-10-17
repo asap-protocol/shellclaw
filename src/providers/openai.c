@@ -30,7 +30,6 @@ static int build_and_send(const provider_message_t *messages, size_t message_cou
 	int max_tokens;
 	double temperature_cfg;
 	char *body;
-	char errmsg[256];
 	int ret;
 	if (!s_oai_cfg) {
 		provider_set_error(response, "OpenAI provider not initialized");
@@ -44,6 +43,7 @@ static int build_and_send(const provider_message_t *messages, size_t message_cou
 		configured = "gpt-4o-mini";
 	model = provider_model_id_for_backend(configured, "openai");
 	if (!model) {
+		char errmsg[256];
 		snprintf(errmsg, sizeof(errmsg),
 		         "OpenAI skipped: agent model \"%s\" is not an OpenAI id",
 		         configured);
