@@ -163,6 +163,9 @@ void http_stop(void)
 		g_ctx->thread = 0;
 	}
 	if (g_ctx->lws_ctx) {
+		/* Drop the pointer before destroy so a late send cannot
+		 * lws_cancel_service a freed context. */
+		ws_set_context(NULL);
 		lws_context_destroy(g_ctx->lws_ctx);
 		g_ctx->lws_ctx = NULL;
 	}

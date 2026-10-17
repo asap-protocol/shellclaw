@@ -12,7 +12,9 @@
  * procfs, applies Landlock, sets PR_SET_PDEATHSIG, and closes fds >= 3
  * so a timeout SIGKILL of the isolator cannot leave the command under
  * host init. The isolator joins its cgroup before the command fork so
- * memory.max and cpu.max apply to sh -c. Limits degrade if unavailable.
+ * memory.max and cpu.max apply to sh -c. The command process then
+ * replaces the inherited environment so provider keys and bot tokens
+ * are not readable via printenv. Limits degrade if unavailable.
  *
  * Non-Linux path: plain fork() + execl(); a warning is emitted to stderr.
  */
@@ -20,6 +22,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "sandbox/sandbox.h"
+#include "sandbox/sandbox_env.h"
 #include "sandbox/sandbox_landlock.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -107,36 +110,90 @@ static void cgroup_remove(const char *base, const char *name)
 
 #endif /* __linux__ */
 
-static size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms)
+/* Sandbox unit tests link drain_pipe as a global under
+ * SHELLCLAW_SANDBOX_TEST (CR-21 provider-test pattern). CI runners revoke
+ * user namespaces, so the sandbox_exec success-path tests skip there and
+ * the wall-clock deadline loop would otherwise stay uncovered. */
+#ifdef SHELLCLAW_SANDBOX_TEST
+#define SANDBOX_UNIT
+#else
+#define SANDBOX_UNIT static
+#endif
+
+/* Docs in sandbox.h. */
+long monotonic_elapsed_ms(const struct timespec *start)
 {
+    struct timespec now;
+    long ms;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    ms = (now.tv_sec - start->tv_sec) * 1000L
+        + (now.tv_nsec - start->tv_nsec) / 1000000L;
+    return ms < 0 ? 0 : ms;
+}
+
+int poll_remain_ms(int timeout_ms, long elapsed_ms, int slice_cap)
+{
+    long remain;
+
+    remain = (long)timeout_ms - elapsed_ms;
+    if (remain > slice_cap)
+        return slice_cap;
+    return (int)remain;
+}
+
+/*
+ * Stop at timeout_ms of wall time, not idle poll time. A writer that keeps
+ * the pipe readable otherwise never advances the old counter, so the agent
+ * stays blocked until cap fills.
+ */
+SANDBOX_UNIT size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, int *hit_deadline)
+{
+    struct timespec start;
     size_t total = 0;
-    int elapsed_ms = 0;
     char chunk[512];
-    if (cap == 0) return 0;
-    while (total < cap - 1 && elapsed_ms < timeout_ms) {
+
+    if (hit_deadline)
+        *hit_deadline = 0;
+    if (cap == 0)
+        return 0;
+    /* Unchecked on purpose: CLOCK_MONOTONIC failure is not a realistic case
+     * (vDSO). If it ever failed, monotonic_elapsed_ms keeps returning -1,
+     * the deadline never fires, and poll slices stay bounded. */
+    (void)clock_gettime(CLOCK_MONOTONIC, &start);
+    while (total < cap - 1) {
         struct pollfd pfd;
+        long elapsed_ms;
         int slice;
         int r;
         ssize_t n;
+
+        elapsed_ms = monotonic_elapsed_ms(&start);
+        if (elapsed_ms >= (long)timeout_ms) {
+            if (hit_deadline)
+                *hit_deadline = 1;
+            break;
+        }
+        slice = poll_remain_ms(timeout_ms, elapsed_ms, PIPE_POLL_SLICE_MS);
         pfd.fd = fd;
         pfd.events = POLLIN;
         pfd.revents = 0;
-        slice = timeout_ms - elapsed_ms;
-        if (slice > PIPE_POLL_SLICE_MS) slice = PIPE_POLL_SLICE_MS;
         r = poll(&pfd, 1, slice);
         if (r < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             break;
         }
-        if (r == 0) {
-            elapsed_ms += slice;
+        if (r == 0)
             continue;
-        }
         n = read(fd, chunk, sizeof(chunk));
-        if (n <= 0) break;
+        if (n <= 0)
+            break;
         {
             size_t add = (size_t)n;
-            if (total + add >= cap - 1) add = cap - 1 - total;
+            if (total + add >= cap - 1)
+                add = cap - 1 - total;
             memcpy(buf + total, chunk, add);
             total += add;
         }
@@ -446,6 +503,7 @@ int sandbox_exec(const char *cmd, char *out, size_t out_cap,
 #endif
         close(errpipe[1]);
         close_inherited_fds();
+        sandbox_scrub_command_environment(workspace);
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
@@ -467,9 +525,14 @@ int sandbox_exec(const char *cmd, char *out, size_t out_cap,
             return report_isolation_failure(out, out_cap, iso);
         }
     }
-    total = drain_pipe(pipefd[0], out, out_cap, timeout_ms);
-    close(pipefd[0]);
-    timed_out = reap_child(pid, NULL);
+    {
+        int drain_deadline = 0;
+        total = drain_pipe(pipefd[0], out, out_cap, timeout_ms, &drain_deadline);
+        close(pipefd[0]);
+        timed_out = reap_child(pid, NULL);
+        if (drain_deadline)
+            timed_out = 1;
+    }
     if (timed_out && total < out_cap - 40)
         snprintf(out + total, out_cap - total, "\n[Sandbox: command timed out after %d ms]",
                  timeout_ms);
