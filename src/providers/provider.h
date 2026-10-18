@@ -84,9 +84,11 @@ int provider_error_allows_fallback_retry(const char *provider_error_content);
 /**
  * Resolve @p model to the id @p backend should send.
  *
- * A `vendor/rest` id whose vendor matches @p backend returns the rest (a pointer
- * into @p model). A known other cloud vendor, a bare Claude id on OpenAI, or a
- * bare OpenAI id on Anthropic returns NULL. Callers must fail that case without
+ * A `vendor/rest` id whose vendor matches @p backend (case-insensitively, like
+ * the router's provider names) returns the rest (a pointer into @p model). Any
+ * other vendor prefix (other cloud vendors, gateways, malformed `vendor/`,
+ * leading `/`, extra slashes), a bare Claude id on OpenAI, or a bare OpenAI id
+ * on Anthropic returns NULL. Callers must fail that case without
  * an HTTP status: a 4xx stops the fallback chain.
  *
  * Example: provider_model_id_for_backend("anthropic/claude-sonnet-4-20250514", "anthropic")

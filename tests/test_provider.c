@@ -67,11 +67,38 @@ static int test_model_id_for_backend(void)
 	return 0;
 }
 
+static int test_model_id_for_backend_edge_cases(void)
+{
+	const char *multi_slash = "openrouter/anthropic/claude-3";
+	const char *other_vendor = "meta-llama/llama-3-70b";
+	const char *stripped;
+
+	/* Multi-slash and unknown vendors belong to no backend: skip (NULL) so
+	 * the fallback chain moves on instead of a 4xx that stops it. */
+	ASSERT(provider_model_id_for_backend(multi_slash, "anthropic") == NULL);
+	ASSERT(provider_model_id_for_backend(multi_slash, "openai") == NULL);
+	ASSERT(provider_model_id_for_backend(other_vendor, "anthropic") == NULL);
+	ASSERT(provider_model_id_for_backend(other_vendor, "openai") == NULL);
+	/* Empty vendor or id segment: the raw id would 400; skip instead. */
+	ASSERT(provider_model_id_for_backend("anthropic/", "anthropic") == NULL);
+	ASSERT(provider_model_id_for_backend("openai/", "openai") == NULL);
+	ASSERT(provider_model_id_for_backend("/foo", "anthropic") == NULL);
+	ASSERT(provider_model_id_for_backend("/foo", "openai") == NULL);
+	/* Vendor tag matching is case-insensitive like the provider router. */
+	stripped = provider_model_id_for_backend("Anthropic/claude-x", "anthropic");
+	ASSERT(stripped != NULL && strcmp(stripped, "claude-x") == 0);
+	ASSERT(provider_model_id_for_backend("Anthropic/claude-x", "openai") == NULL);
+	stripped = provider_model_id_for_backend("OpenAI/gpt-4o", "openai");
+	ASSERT(stripped != NULL && strcmp(stripped, "gpt-4o") == 0);
+	return 0;
+}
+
 int main(void)
 {
 	if (test_stub_provider_vtable() != 0) return 1;
 	if (test_provider_set_error_null_response() != 0) return 1;
 	if (test_model_id_for_backend() != 0) return 1;
+	if (test_model_id_for_backend_edge_cases() != 0) return 1;
 	printf("test_provider: all tests passed\n");
 	return 0;
 }
