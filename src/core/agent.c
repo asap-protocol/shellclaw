@@ -250,16 +250,19 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		if (cJSON_IsString(r)) role = r->valuestring;
 		if (cJSON_IsString(c)) content = c->valuestring;
 		if (!summary_source_append(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
-			/* A line that can never fit whole would abort with used==0
-			 * (first line) or keep the session above max_ctx forever
-			 * (later line); stub it so this pass still consumes it.
-			 * Lines that only lack room here stay raw for a later pass
-			 * via next_unsummarized. */
-			if (!summary_line_never_fits(role, content) ||
-			    !summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
-				next_unsummarized = i;
-				break;
-			}
+			/* Stub a never-fit line only against an empty source. Leftover
+			 * room after earlier lines is a sliver: the stub still counts as
+			 * the whole message, and the unread tail is deleted. Defer so
+			 * this pass summarizes the prefix and the next pass stubs the
+			 * line at the full 64 KiB. A never-fit first line still has to
+			 * be stubbed here, or used==0 aborts compaction and the session
+			 * never shrinks. Lines that fit a fresh source stay raw. */
+			if (used == 0 &&
+			    summary_line_never_fits(role, content) &&
+			    summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX, &used, role, content))
+				continue;
+			next_unsummarized = i;
+			break;
 		}
 	}
 	if (used == 0) {

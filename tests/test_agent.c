@@ -681,21 +681,31 @@ cleanup_early:
 	return failed;
 }
 
-/* An oversized LATER line used to be kept raw with everything after it, so
- * new_count stayed above max_ctx forever. The truncated stub now consumes it
- * and this pass brings the session back down to max_ctx. */
+/* A later line that cannot fit a fresh 64 KiB source must not be stubbed into
+ * whatever sliver the earlier lines left. That stub is treated as the whole
+ * message, so the unread tail is deleted. The prefix is summarized first; a
+ * later pass stubs the oversized line against an empty source, and the
+ * session still shrinks back to max_ctx. */
 static int test_compaction_progresses_when_later_message_is_oversized(void)
 {
-	enum { OVERSIZE = 65 * 1024, JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
+	enum {
+		PRE_SIZE = 50 * 1024,
+		OVERSIZE = 65 * 1024,
+		JSON_CAP = 192 * 1024,
+		LOAD_CAP = 128 * 1024
+	};
 	int failed = 1;
+	int shrunk = 0;
 	config_t *cfg = NULL;
 	char *session_json = NULL;
 	char *loaded = NULL;
+	char *pre = NULL;
 	char *big = NULL;
 	const char *db_path = "build/test_agent_compact_stall_later.db";
 	const char *config_path = "build/test_agent_compact_stall_later.toml";
 	size_t off;
 	int i;
+	int nmsg;
 	char response_buf[4096];
 	char errbuf[256];
 	FILE *cf;
@@ -705,17 +715,21 @@ static int test_compaction_progresses_when_later_message_is_oversized(void)
 	if (memory_init(db_path) != 0)
 		goto cleanup_early;
 	session_json = malloc(JSON_CAP);
+	pre = malloc((size_t)PRE_SIZE + 1);
 	big = malloc((size_t)OVERSIZE + 1);
 	loaded = malloc(LOAD_CAP);
-	if (!session_json || !big || !loaded)
+	if (!session_json || !pre || !big || !loaded)
 		goto cleanup;
-	memset(big, 'A', (size_t)OVERSIZE);
+	memset(pre, 'P', (size_t)PRE_SIZE);
+	memcpy(pre + PRE_SIZE - 7, "PRE_END", 7);
+	pre[PRE_SIZE] = '\0';
+	memset(big, 'B', (size_t)OVERSIZE);
 	memcpy(big + OVERSIZE - 11, "STALL_B_END", 11);
 	big[OVERSIZE] = '\0';
 	off = 0;
 	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
 	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
-		"{\"role\":\"user\",\"content\":\"alpha_small\"}");
+		"{\"role\":\"user\",\"content\":\"%s\"}", pre);
 	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
 		",{\"role\":\"user\",\"content\":\"%s\"}", big);
 	for (i = 2; i < 6; i++) {
@@ -736,32 +750,48 @@ static int test_compaction_progresses_when_later_message_is_oversized(void)
 	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
 		goto cleanup;
 	response_buf[0] = '\0';
-	if (agent_run(cfg, "cli:stalllater", "hi", &compaction_provider, NULL, 0,
-		      response_buf, sizeof(response_buf)) != 0)
-		goto cleanup;
-	if (!compaction_source_truncated) {
+	for (i = 0; i < 8; i++) {
+		if (agent_run(cfg, "cli:stalllater", "hi", &compaction_provider, NULL, 0,
+			      response_buf, sizeof(response_buf)) != 0)
+			goto cleanup;
+		if (session_load("cli:stalllater", loaded, LOAD_CAP) != 0)
+			goto cleanup;
+		nmsg = count_session_messages(loaded);
+		if (i == 0) {
+			if (strstr(loaded, "STALL_B_END") == NULL) {
+				fprintf(stderr,
+					"FAIL: oversized later line was deleted after a %d-byte predecessor filled the summary\n",
+					PRE_SIZE);
+				goto cleanup;
+			}
+			if (strstr(loaded, "PRE_END") != NULL) {
+				fprintf(stderr,
+					"FAIL: predecessor that fit the summary was kept raw\n");
+				goto cleanup;
+			}
+			if (strstr(loaded, "Summary of earlier") == NULL) {
+				fprintf(stderr,
+					"FAIL: expected a summary of the predecessor, not a sliver of the oversized line\n");
+				goto cleanup;
+			}
+		}
+		if (strstr(loaded, "STALL_B_END") == NULL && nmsg <= 4 + 2) {
+			shrunk = 1;
+			break;
+		}
+	}
+	if (!shrunk) {
+		nmsg = count_session_messages(loaded);
 		fprintf(stderr,
-			"FAIL: oversized later line did not reach the summary as a truncated stub\n");
-		goto cleanup;
-	}
-	if (session_load("cli:stalllater", loaded, LOAD_CAP) != 0)
-		goto cleanup;
-	if (strstr(loaded, "STALL_B_END") != NULL) {
-		fprintf(stderr, "FAIL: oversized later line is still raw instead of summarized\n");
-		goto cleanup;
-	}
-	if (strstr(loaded, "Summary of earlier") == NULL) {
-		fprintf(stderr, "FAIL: expected a summary of the truncated oversized turn\n");
-		goto cleanup;
-	}
-	if (count_session_messages(loaded) > 4 + 2) {
-		fprintf(stderr, "FAIL: session is not back to max_ctx after the oversized turn\n");
+			"FAIL: oversized later line never left the session or count stayed at %d\n",
+			nmsg);
 		goto cleanup;
 	}
 	failed = 0;
 cleanup:
 	config_free(cfg);
 	free(session_json);
+	free(pre);
 	free(big);
 	free(loaded);
 cleanup_early:
