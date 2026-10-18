@@ -271,18 +271,17 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 			    summary_line_never_fits(role, content) &&
 			    summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX, &used, role, content))
 				continue;
-			/* A never-fit line that is not a user turn and sits directly
-			 * behind the only line this pass consumed would leave the
-			 * count unchanged: the tail starts on it, a user summary is
-			 * prepended in front of it, and the next pass sees the same
-			 * pair again - the wrapper always counts toward used, so no
-			 * pass ever reaches the only-empty stub and the count only
-			 * grows until SESSION_JSON_MAX stops the saves. Fold this
-			 * pass's summary into the line instead: the count shrinks
-			 * and the next pass starts on the line with an empty source,
-			 * so it gets the full 64 KiB stub (see the tail build). */
-			if (i == 1 && strcmp(role, "user") != 0 &&
-			    summary_line_never_fits(role, content))
+			/* A non-user line directly behind the only line this pass consumed would
+			 * leave the count unchanged: the tail starts on it, a user summary
+			 * is prepended in front of it, and the next pass sees the same
+			 * pair again - the wrapper always counts toward used, so no pass
+			 * ever reaches the only-empty stub and the count only grows until
+			 * SESSION_JSON_MAX stops the saves. That holds for a never-fit
+			 * line and for one that merely fits a fresh source but not the
+			 * wrapped remainder, so any non-user line stopping the pass at
+			 * index 1 folds: the count shrinks now and the next pass handles
+			 * the folded line against a fresh source. */
+			if (i == 1 && strcmp(role, "user") != 0)
 				fold_into_oversized = 1;
 			next_unsummarized = i;
 			break;

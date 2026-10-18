@@ -1131,6 +1131,123 @@ cleanup_early:
  * == 0), that wrapper always counts toward used, so the only-empty stub never
  * fires and the count never shrinks again. This seeds the exact state a
  * merge==0 partial pass leaves behind and requires convergence anyway. */
+/* A line that fits a fresh source but not behind the summary wrapper used
+ * to miss the fold (it is not "never-fit"), take the old prepend path and
+ * freeze the session: every pass rebuilt [summary, bigA] and the count
+ * only grew. Any non-user line that stops the pass at index 1 must fold. */
+static int test_compaction_folds_assistant_line_that_fits_a_fresh_source(void)
+{
+	enum { OVERSIZE = 65500, JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	int shrunk = 0;
+	int shrink_turn = 99;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *big = NULL;
+	const char *db_path = "build/test_agent_compact_band_assistant.db";
+	const char *config_path = "build/test_agent_compact_band_assistant.toml";
+	size_t off;
+	int i;
+	int nmsg;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	memory_cleanup();
+	compaction_call_count = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	big = malloc((size_t)OVERSIZE + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !big || !loaded)
+		goto cleanup;
+	memset(big, 'A', (size_t)OVERSIZE);
+	memcpy(big + OVERSIZE - 8, "ASST_END", 8);
+	big[OVERSIZE] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"{\"role\":\"user\",\"content\":\"Summary of earlier turns.\"}");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"assistant\",\"content\":\"%s\"}", big);
+	for (i = 2; i < 6; i++) {
+		off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+			",{\"role\":\"user\",\"content\":\"m%d\"}", i);
+	}
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:bandasst", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 4\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	for (i = 0; i < 4 && !shrunk; i++) {
+		if (agent_run(cfg, "cli:bandasst", "hi", &compaction_provider, NULL, 0,
+			      response_buf, sizeof(response_buf)) != 0)
+			goto cleanup;
+		if (session_load("cli:bandasst", loaded, LOAD_CAP) != 0)
+			goto cleanup;
+		nmsg = count_session_messages(loaded);
+		if (i == 0) {
+			if (strstr(loaded, "ASST_END") == NULL) {
+				fprintf(stderr,
+					"FAIL: band line was stubbed into a sliver instead of deferred\n");
+				goto cleanup;
+			}
+		}
+		if (strstr(loaded, "ASST_END") == NULL && nmsg <= 4 + 2) {
+			shrunk = 1;
+			shrink_turn = i;
+		}
+	}
+	if (!shrunk) {
+		nmsg = count_session_messages(loaded);
+		fprintf(stderr,
+			"FAIL: band assistant line stalled compaction (count %d after 4 turns)\n",
+			nmsg);
+		goto cleanup;
+	}
+	if (shrink_turn > 2) {
+		fprintf(stderr,
+			"FAIL: compaction needed turn %d, expected convergence by turn 3\n",
+			shrink_turn + 1);
+		goto cleanup;
+	}
+	if (agent_run(cfg, "cli:bandasst", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (session_load("cli:bandasst", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (count_session_messages(loaded) > 4 + 2) {
+		fprintf(stderr, "FAIL: session never shrinks back to max_ctx after the band turn\n");
+		goto cleanup;
+	}
+	if (!compaction_spy_sent_summary()) {
+		fprintf(stderr, "FAIL: summary of the band case is outside the sent window\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(big);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
 static int test_compaction_progresses_when_assistant_message_is_oversized(void)
 {
 	enum { OVERSIZE = 65 * 1024, JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
@@ -2223,6 +2340,7 @@ int main(void)
 	RUN(test_compaction_progresses_when_later_message_is_oversized());
 	RUN(test_compaction_stub_ends_on_utf8_boundary_when_oversized());
 	RUN(test_compaction_gives_oversized_line_full_buffer_on_next_pass());
+	RUN(test_compaction_folds_assistant_line_that_fits_a_fresh_source());
 	RUN(test_compaction_progresses_when_assistant_message_is_oversized());
 	RUN(test_compaction_failure_keeps_original_session());
 	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
