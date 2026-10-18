@@ -89,16 +89,16 @@ void ws_set_context(void *ctx)
 }
 
 /* Cross-thread wake. lws_cancel_service is the call that is safe off the
- * service thread; the writable mark happens in ws_on_service_cancel. */
+ * service thread; the writable mark happens in ws_on_service_cancel.
+ * Cancel while g_mutex is held: with an unlocked copy, http_stop can run
+ * ws_set_context(NULL) and destroy the context before the cancel lands.
+ * lws_cancel_service only writes a pipe byte, so calling it locked is safe. */
 static void ws_wake_service(void)
 {
-	struct lws_context *ctx;
-
 	pthread_mutex_lock(&g_mutex);
-	ctx = g_lws_ctx;
+	if (g_lws_ctx)
+		lws_cancel_service(g_lws_ctx);
 	pthread_mutex_unlock(&g_mutex);
-	if (ctx)
-		lws_cancel_service(ctx);
 }
 
 void ws_on_service_cancel(void)

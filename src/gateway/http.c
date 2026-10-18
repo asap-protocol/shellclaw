@@ -140,7 +140,6 @@ int http_start(const config_t *cfg, struct auth_ctx *auth_ctx, const char *confi
 		free(ctx);
 		return -1;
 	}
-	ws_set_context(ctx->lws_ctx);
 	g_ctx = ctx;
 	if (pthread_create(&ctx->thread, NULL, http_thread_fn, ctx) != 0) {
 		lws_context_destroy(ctx->lws_ctx);
@@ -149,6 +148,10 @@ int http_start(const config_t *cfg, struct auth_ctx *auth_ctx, const char *confi
 		g_ctx = NULL;
 		return -1;
 	}
+	/* Publish only after the thread is running: the failure path above
+	 * destroys the context, so publishing first would leave g_lws_ctx
+	 * pointing at freed memory. */
+	ws_set_context(ctx->lws_ctx);
 	return 0;
 }
 
