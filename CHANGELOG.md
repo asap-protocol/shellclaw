@@ -4,6 +4,8 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-18
+
 ### Fixed
 - Provider model ids keep their vendor prefix in config but are resolved per backend: matched prefixes are stripped (case-insensitive) and foreign or malformed ones (`meta-llama/...`, `anthropic/`, `/foo`) skip to the next backend instead of an HTTP 4xx, so the fallback chain runs through to local; a custom OpenAI `endpoint` (e.g. OpenRouter) receives the configured id verbatim.
 - WebChat writes are moved off the agent thread: frames are queued and the lws service thread is woken (`lws_cancel_service`), marking writable only from `EVENT_WAIT_CANCELLED`, which stops the poll-set race against a closing socket.
@@ -161,7 +163,8 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 - CLI and Telegram channels; Anthropic and OpenAI providers.
 - Shell, file, and web search tools; skill loading from markdown.
 
-[Unreleased]: https://github.com/asap-protocol/shellclaw/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/asap-protocol/shellclaw/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/asap-protocol/shellclaw/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/asap-protocol/shellclaw/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/asap-protocol/shellclaw/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/asap-protocol/shellclaw/compare/v0.2.0...v0.3.0
