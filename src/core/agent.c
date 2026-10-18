@@ -257,23 +257,19 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		if (cJSON_IsString(r)) role = r->valuestring;
 		if (cJSON_IsString(c)) content = c->valuestring;
 		if (!summary_source_append(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
-			/* A line that can never fit whole must be stubbed when the
-			 * source is still (mostly) empty: the first line has to be
-			 * stubbed or the source stays empty and compaction returns
-			 * -1 on every turn. Once earlier lines already consumed the
-			 * buffer, a stub would see only the bytes left over and
-			 * destroy the line in the summary, so leave it raw via
-			 * next_unsummarized; the next pass starts it near the top of
-			 * a fresh source and gives it (almost) the whole buffer. A
-			 * line that merely lacks room here is left raw the same way. */
-			int stubbed = summary_line_never_fits(role, content) &&
-			              used <= SUMMARY_SOURCE_MAX / 2 &&
-			              summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX,
-			                                              &used, role, content);
-			if (!stubbed) {
-				next_unsummarized = i;
-				break;
-			}
+			/* Stub a never-fit line only against an empty source. Leftover
+			 * room after earlier lines is a sliver: the stub still counts as
+			 * the whole message, and the unread tail is deleted. Defer so
+			 * this pass summarizes the prefix and the next pass stubs the
+			 * line at the full 64 KiB. A never-fit first line still has to
+			 * be stubbed here, or used==0 aborts compaction and the session
+			 * never shrinks. Lines that fit a fresh source stay raw. */
+			if (used == 0 &&
+			    summary_line_never_fits(role, content) &&
+			    summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX, &used, role, content))
+				continue;
+			next_unsummarized = i;
+			break;
 		}
 	}
 	if (used == 0) {
