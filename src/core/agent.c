@@ -135,6 +135,13 @@ static int summary_source_append_truncated(char *buf, size_t cap, size_t *used,
 	cut = remain - fixed;
 	if (cut > strlen(c))
 		cut = strlen(c);
+	/* The cut is a byte count, so it can land inside a multibyte UTF-8
+	 * codepoint. Back it up while the first dropped byte is a continuation
+	 * byte: invalid UTF-8 in the stub makes providers reject the summarizer
+	 * request, and compaction then returns -1 on every turn for that
+	 * session. */
+	while (cut > 0 && ((unsigned char)c[cut] & 0xC0) == 0x80)
+		cut--;
 	n = snprintf(buf + *used, remain, "%s: %.*s%s\n", r, (int)cut, c,
 		SUMMARY_TRUNC_MARKER);
 	if (n < 0 || (size_t)n >= remain) {
@@ -250,13 +257,20 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		if (cJSON_IsString(r)) role = r->valuestring;
 		if (cJSON_IsString(c)) content = c->valuestring;
 		if (!summary_source_append(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
-			/* A line that can never fit whole would abort with used==0
-			 * (first line) or keep the session above max_ctx forever
-			 * (later line); stub it so this pass still consumes it.
-			 * Lines that only lack room here stay raw for a later pass
-			 * via next_unsummarized. */
-			if (!summary_line_never_fits(role, content) ||
-			    !summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
+			/* A line that can never fit whole must be stubbed when the
+			 * source is still (mostly) empty: the first line has to be
+			 * stubbed or the source stays empty and compaction returns
+			 * -1 on every turn. Once earlier lines already consumed the
+			 * buffer, a stub would see only the bytes left over and
+			 * destroy the line in the summary, so leave it raw via
+			 * next_unsummarized; the next pass starts it near the top of
+			 * a fresh source and gives it (almost) the whole buffer. A
+			 * line that merely lacks room here is left raw the same way. */
+			int stubbed = summary_line_never_fits(role, content) &&
+			              used <= SUMMARY_SOURCE_MAX / 2 &&
+			              summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX,
+			                                              &used, role, content);
+			if (!stubbed) {
 				next_unsummarized = i;
 				break;
 			}

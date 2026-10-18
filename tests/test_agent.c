@@ -365,15 +365,21 @@ cleanup:
 	return failed;
 }
 
+/* Cap for the captured summarizer source: one full summary source buffer. */
+#define COMPACTION_SOURCE_CAP (64 * 1024)
 static int compaction_call_count;
 static int compaction_source_has_boundary;
 static int compaction_source_truncated;
+/* Latest summarizer request source; kept for stub-width and UTF-8 boundary
+ * assertions. agent_run never calls provider init, so tests reset it. */
+static char compaction_last_source[COMPACTION_SOURCE_CAP];
 static int compaction_init(const config_t *cfg)
 {
 	(void)cfg;
 	compaction_call_count = 0;
 	compaction_source_has_boundary = 0;
 	compaction_source_truncated = 0;
+	compaction_last_source[0] = '\0';
 	return 0;
 }
 static int compaction_chat(const provider_message_t *messages, size_t message_count,
@@ -385,10 +391,19 @@ static int compaction_chat(const provider_message_t *messages, size_t message_co
 	response->tool_calls = NULL;
 	response->tool_calls_count = 0;
 	compaction_call_count++;
-	if (compaction_call_count == 1) {
-		const char *src = (message_count >= 2 && messages[1].content) ? messages[1].content : "";
-		/* msg_10 is the boundary turn: the summary window must include it;
-		 * the kept tail starts at msg_11. */
+	/* Summarizer request shape: [system, user-source]. Main chats in the
+	 * compaction tests always carry a seeded history, so they never match.
+	 * Keyed on shape, not call index: later turns summarize again too. */
+	if (message_count == 2 && messages[0].role && strcmp(messages[0].role, "system") == 0 &&
+	    messages[1].content) {
+		const char *src = messages[1].content;
+		size_t src_len = strlen(src);
+		if (src_len >= COMPACTION_SOURCE_CAP)
+			src_len = COMPACTION_SOURCE_CAP - 1;
+		memcpy(compaction_last_source, src, src_len);
+		compaction_last_source[src_len] = '\0';
+		/* msg_10 is the boundary turn: the summary window must include
+		 * it; the kept tail starts at msg_11. */
 		compaction_source_has_boundary = strstr(src, "msg_10\n") != NULL;
 		compaction_source_truncated = strstr(src, "[truncated]") != NULL;
 		response->content = strdup("Summary of earlier conversation.");
@@ -583,6 +598,62 @@ static int count_session_messages(const char *json)
 	return n;
 }
 
+/* True when every byte from start up to end (exclusive) forms complete,
+ * well-formed UTF-8 sequences, i.e. the cut at end sits on a codepoint
+ * boundary. */
+static int utf8_complete_up_to(const char *start, const char *end)
+{
+	const char *p = start;
+	while (p < end) {
+		unsigned char b = (unsigned char)*p;
+		int extra;
+		int k;
+		if (b < 0x80)
+			extra = 0;
+		else if ((b & 0xE0) == 0xC0)
+			extra = 1;
+		else if ((b & 0xF0) == 0xE0)
+			extra = 2;
+		else if ((b & 0xF8) == 0xF0)
+			extra = 3;
+		else
+			return 0;
+		if (end - p <= extra)
+			return 0; /* a sequence crosses the cut */
+		p++;
+		for (k = 0; k < extra; k++, p++)
+			if ((((unsigned char)*p) & 0xC0) != 0x80)
+				return 0;
+	}
+	return p == end;
+}
+
+/* True when the latest main chat through compaction_provider sent the
+ * compaction summary inside the context window. */
+static int compaction_spy_sent_summary(void)
+{
+	int found_summary = 0;
+	int j;
+	for (j = 0; j < SPY_SLOTS && j < (int)spy_message_count; j++)
+		if (strstr(spy_content[j], "Summary of earlier") != NULL)
+			found_summary = 1;
+	return found_summary;
+}
+
+/* Longest run of 'B' bytes in the last captured summarizer source. */
+static size_t compaction_source_max_b_run(void)
+{
+	size_t best = 0;
+	size_t run = 0;
+	const char *p;
+	for (p = compaction_last_source; *p != '\0'; p++) {
+		run = (*p == 'B') ? run + 1 : 0;
+		if (run > best)
+			best = run;
+	}
+	return best;
+}
+
 /* An oversized FIRST line used to abort compaction with an empty source, so
  * the session never shrank again and every turn retried in vain. The line now
  * reaches the summarizer as a truncated stub and the session keeps shrinking. */
@@ -666,6 +737,12 @@ static int test_compaction_progresses_when_first_message_is_oversized(void)
 		goto cleanup;
 	if (count_session_messages(loaded) > 4 + 2) {
 		fprintf(stderr, "FAIL: session never shrinks back to max_ctx after the oversized turn\n");
+		goto cleanup;
+	}
+	/* Once the count is back at max_ctx the summary sits inside the sent
+	 * window (parse_session_into_messages keeps the last max_ctx). */
+	if (!compaction_spy_sent_summary()) {
+		fprintf(stderr, "FAIL: summary of the oversized turn is outside the sent window\n");
 		goto cleanup;
 	}
 	failed = 0;
@@ -758,10 +835,257 @@ static int test_compaction_progresses_when_later_message_is_oversized(void)
 		fprintf(stderr, "FAIL: session is not back to max_ctx after the oversized turn\n");
 		goto cleanup;
 	}
+	/* The pass after a partial pass must keep making progress, and once the
+	 * count is back at max_ctx the summary sits inside the sent window. */
+	if (agent_run(cfg, "cli:stalllater", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (session_load("cli:stalllater", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (count_session_messages(loaded) > 4 + 2) {
+		fprintf(stderr, "FAIL: the pass after the oversized turn did not keep shrinking\n");
+		goto cleanup;
+	}
+	if (!compaction_spy_sent_summary()) {
+		fprintf(stderr, "FAIL: summary of the oversized turn is outside the sent window\n");
+		goto cleanup;
+	}
 	failed = 0;
 cleanup:
 	config_free(cfg);
 	free(session_json);
+	free(big);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+/* The stub cut is a byte count; when it lands inside a multibyte UTF-8
+ * codepoint the summarizer is sent invalid UTF-8, a provider rejects the
+ * request and compaction returns -1 on every turn for that session. The stub
+ * must end on a codepoint boundary instead. */
+static int test_compaction_stub_ends_on_utf8_boundary_when_oversized(void)
+{
+	enum { SEQ_BYTES = 4, CRAB_SEQS = 16400, OVERSIZE = SEQ_BYTES * CRAB_SEQS,
+		JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *big = NULL;
+	const char *crab = "\xF0\x9F\xA6\x80"; /* U+1F980 CRAB, a 4-byte sequence */
+	const char *marker;
+	const char *db_path = "build/test_agent_compact_utf8.db";
+	const char *config_path = "build/test_agent_compact_utf8.toml";
+	size_t off;
+	int i;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+	memory_cleanup();
+	compaction_call_count = 0;
+	compaction_last_source[0] = '\0';
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	big = malloc((size_t)OVERSIZE + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !big || !loaded)
+		goto cleanup;
+	for (i = 0; i < CRAB_SEQS; i++)
+		memcpy(big + (size_t)i * SEQ_BYTES, crab, SEQ_BYTES);
+	big[OVERSIZE] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"{\"role\":\"user\",\"content\":\"%s\"}", big);
+	for (i = 1; i < 6; i++) {
+		off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+			",{\"role\":\"user\",\"content\":\"m%d\"}", i);
+	}
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:utf8cut", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 4\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, "cli:utf8cut", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (compaction_call_count < 2) {
+		fprintf(stderr, "FAIL: compaction aborted before the summarizer call\n");
+		goto cleanup;
+	}
+	marker = strstr(compaction_last_source, "[truncated]");
+	if (!marker) {
+		fprintf(stderr, "FAIL: oversized multibyte line produced no truncated stub\n");
+		goto cleanup;
+	}
+	if (!utf8_complete_up_to(compaction_last_source, marker)) {
+		fprintf(stderr, "FAIL: truncated stub ends inside a UTF-8 codepoint\n");
+		goto cleanup;
+	}
+	/* A follow-up turn must keep shrinking the session. */
+	if (agent_run(cfg, "cli:utf8cut", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (session_load("cli:utf8cut", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (count_session_messages(loaded) > 4 + 2) {
+		fprintf(stderr, "FAIL: session never shrinks after the multibyte oversized turn\n");
+		goto cleanup;
+	}
+	if (!compaction_spy_sent_summary()) {
+		fprintf(stderr, "FAIL: summary of the multibyte turn is outside the sent window\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(big);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+/* An oversized line arriving after the source is nearly full used to be
+ * stubbed into whatever bytes were left, destroying its content in the
+ * summary. It must stay raw (next_unsummarized) so the next pass stubs it
+ * from (almost) the whole buffer, and the turn after that finishes the
+ * shrink back to max_ctx. */
+static int test_compaction_gives_oversized_line_full_buffer_on_next_pass(void)
+{
+	enum { HEAD_PAD = 34 * 1024, OVERSIZE = 66 * 1024, FULL_STUB_MIN = 60 * 1024,
+		JSON_CAP = 120 * 1024, LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *head = NULL;
+	char *big = NULL;
+	const char *db_path = "build/test_agent_compact_fullbuff.db";
+	const char *config_path = "build/test_agent_compact_fullbuff.toml";
+	size_t off;
+	int i;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+	memory_cleanup();
+	compaction_call_count = 0;
+	compaction_last_source[0] = '\0';
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	head = malloc((size_t)HEAD_PAD + 1);
+	big = malloc((size_t)OVERSIZE + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !head || !big || !loaded)
+		goto cleanup;
+	memset(head, 'A', (size_t)HEAD_PAD);
+	memcpy(head + HEAD_PAD - 8, "HEAD_END", 8);
+	head[HEAD_PAD] = '\0';
+	memset(big, 'B', (size_t)OVERSIZE);
+	memcpy(big + OVERSIZE - 11, "BIGASST_END", 11);
+	big[OVERSIZE] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"{\"role\":\"user\",\"content\":\"%s\"}", head);
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"assistant\",\"content\":\"%s\"}", big);
+	for (i = 2; i < 6; i++) {
+		off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+			",{\"role\":\"user\",\"content\":\"m%d\"}", i);
+	}
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:fullbuff", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 4\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, "cli:fullbuff", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	/* Pass 1: the head line consumed most of the source, so the oversized
+	 * assistant line must stay raw; a stub would only see the left-over
+	 * bytes. With the count untouched this is the merge == 0 partial pass. */
+	if (strstr(compaction_last_source, "[truncated]") != NULL) {
+		fprintf(stderr, "FAIL: pass 1 stubbed the oversized line into the left-over bytes\n");
+		goto cleanup;
+	}
+	if (session_load("cli:fullbuff", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (strstr(loaded, "BIGASST_END") == NULL) {
+		fprintf(stderr, "FAIL: pass 1 destroyed the oversized message instead of keeping it raw\n");
+		goto cleanup;
+	}
+	if (count_session_messages(loaded) != 6 + 2) {
+		fprintf(stderr, "FAIL: partial pass changed the count, expected unchanged\n");
+		goto cleanup;
+	}
+	/* Pass 2: the oversized line starts near the top of a fresh source, so
+	 * its stub sees (almost) the whole buffer. */
+	if (agent_run(cfg, "cli:fullbuff", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (strstr(compaction_last_source, "[truncated]") == NULL) {
+		fprintf(stderr, "FAIL: next pass produced no stub for the oversized line\n");
+		goto cleanup;
+	}
+	if (compaction_source_max_b_run() < FULL_STUB_MIN) {
+		fprintf(stderr, "FAIL: next pass stubbed only %zu bytes of the oversized line\n",
+			compaction_source_max_b_run());
+		goto cleanup;
+	}
+	if (session_load("cli:fullbuff", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (strstr(loaded, "BIGASST_END") != NULL) {
+		fprintf(stderr, "FAIL: oversized line survived the pass that had room for its stub\n");
+		goto cleanup;
+	}
+	/* The pass after that finishes the shrink and keeps the summary inside
+	 * the sent window. */
+	if (agent_run(cfg, "cli:fullbuff", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (session_load("cli:fullbuff", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (count_session_messages(loaded) > 4 + 2) {
+		fprintf(stderr, "FAIL: session never shrinks back to max_ctx after the oversized turn\n");
+		goto cleanup;
+	}
+	if (!compaction_spy_sent_summary()) {
+		fprintf(stderr, "FAIL: summary of the oversized turns is outside the sent window\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(head);
 	free(big);
 	free(loaded);
 cleanup_early:
@@ -1748,6 +2072,8 @@ int main(void)
 	RUN(test_compaction_keeps_message_that_does_not_fit_summary());
 	RUN(test_compaction_progresses_when_first_message_is_oversized());
 	RUN(test_compaction_progresses_when_later_message_is_oversized());
+	RUN(test_compaction_stub_ends_on_utf8_boundary_when_oversized());
+	RUN(test_compaction_gives_oversized_line_full_buffer_on_next_pass());
 	RUN(test_compaction_failure_keeps_original_session());
 	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
 	RUN(test_local_offline_note_when_active_is_local());
