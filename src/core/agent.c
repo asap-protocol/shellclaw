@@ -165,8 +165,10 @@ static int kept_tail_starts_with_user(const cJSON *root, int start)
 	return cJSON_IsString(role) && role->valuestring && strcmp(role->valuestring, "user") == 0;
 }
 
-/** Fold the summary into an existing user turn. A second user message 400s on Anthropic. */
-static int fold_summary_into_user(cJSON *item, const char *summary)
+/** Fold the summary into the first kept message: a user turn (a second user
+ *  message 400s on Anthropic) or the oversized line a partial pass broke on,
+ *  so the next pass starts on it with an empty source for the full stub. */
+static int fold_summary_into_message(cJSON *item, const char *summary)
 {
 	const cJSON *content;
 	const char *old;
@@ -245,6 +247,7 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	source_buf[0] = '\0';
 	size_t used = 0;
 	int next_unsummarized = to_summarize_n;
+	int fold_into_oversized = 0;
 	for (int i = 0; i < to_summarize_n; i++) {
 		const cJSON *item = cJSON_GetArrayItem(root, i);
 		const char *role = "user";
@@ -257,23 +260,31 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		if (cJSON_IsString(r)) role = r->valuestring;
 		if (cJSON_IsString(c)) content = c->valuestring;
 		if (!summary_source_append(source_buf, SUMMARY_SOURCE_MAX, &used, role, content)) {
-			/* A line that can never fit whole must be stubbed when the
-			 * source is still (mostly) empty: the first line has to be
-			 * stubbed or the source stays empty and compaction returns
-			 * -1 on every turn. Once earlier lines already consumed the
-			 * buffer, a stub would see only the bytes left over and
-			 * destroy the line in the summary, so leave it raw via
-			 * next_unsummarized; the next pass starts it near the top of
-			 * a fresh source and gives it (almost) the whole buffer. A
-			 * line that merely lacks room here is left raw the same way. */
-			int stubbed = summary_line_never_fits(role, content) &&
-			              used <= SUMMARY_SOURCE_MAX / 2 &&
-			              summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX,
-			                                              &used, role, content);
-			if (!stubbed) {
-				next_unsummarized = i;
-				break;
-			}
+			/* Stub a never-fit line only against an empty source. Leftover
+			 * room after earlier lines is a sliver: the stub still counts as
+			 * the whole message, and the unread tail is deleted. Defer so
+			 * this pass summarizes the prefix and the next pass stubs the
+			 * line at the full 64 KiB. A never-fit first line still has to
+			 * be stubbed here, or used==0 aborts compaction and the session
+			 * never shrinks. Lines that fit a fresh source stay raw. */
+			if (used == 0 &&
+			    summary_line_never_fits(role, content) &&
+			    summary_source_append_truncated(source_buf, SUMMARY_SOURCE_MAX, &used, role, content))
+				continue;
+			/* A non-user line directly behind the only line this pass consumed would
+			 * leave the count unchanged: the tail starts on it, a user summary
+			 * is prepended in front of it, and the next pass sees the same
+			 * pair again - the wrapper always counts toward used, so no pass
+			 * ever reaches the only-empty stub and the count only grows until
+			 * SESSION_JSON_MAX stops the saves. That holds for a never-fit
+			 * line and for one that merely fits a fresh source but not the
+			 * wrapped remainder, so any non-user line stopping the pass at
+			 * index 1 folds: the count shrinks now and the next pass handles
+			 * the folded line against a fresh source. */
+			if (i == 1 && strcmp(role, "user") != 0)
+				fold_into_oversized = 1;
+			next_unsummarized = i;
+			break;
 		}
 	}
 	if (used == 0) {
@@ -308,10 +319,12 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	if (start < 0) start = 0;
 	/* Tail can start on a user turn (odd max_context_messages, or a cut that
 	 * lands on user). Inserting another user role makes Anthropic reject the
-	 * session on this turn and every later one. */
+	 * session on this turn and every later one. fold_into_oversized breaks on
+	 * that rule for the line that stopped the pass: it is not a user turn, so
+	 * the summary folds into it instead of a prepended wrapper (see the loop). */
 	merge = kept_tail_starts_with_user(root, start);
 	if (!new_arr) { cJSON_Delete(root); return -1; }
-	if (!merge && append_summary_user(new_arr, summary_buf) != 0) {
+	if (!merge && !fold_into_oversized && append_summary_user(new_arr, summary_buf) != 0) {
 		cJSON_Delete(new_arr);
 		cJSON_Delete(root);
 		return -1;
@@ -322,8 +335,8 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		if (!item) continue;
 		dup = cJSON_Duplicate(item, 1);
 		if (!dup) continue;
-		if (merge && i == start) {
-			if (fold_summary_into_user(dup, summary_buf) != 0) {
+		if ((merge || fold_into_oversized) && i == start) {
+			if (fold_summary_into_message(dup, summary_buf) != 0) {
 				cJSON_Delete(dup);
 				cJSON_Delete(new_arr);
 				cJSON_Delete(root);
@@ -333,7 +346,7 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		}
 		cJSON_AddItemToArray(new_arr, dup);
 	}
-	if (merge && !folded) {
+	if ((merge || fold_into_oversized) && !folded) {
 		cJSON_Delete(new_arr);
 		cJSON_Delete(root);
 		return -1;
