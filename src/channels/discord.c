@@ -970,9 +970,15 @@ static int discord_send(const char *recipient, const char *text,
 		return -1;
 	if (channel_send_chunked(text, (size_t)DISCORD_MSG_MAX_LEN, discord_post_piece, &ctx,
 	                         &fail) != 0) {
-		/* At-least-once delivery: dispatch skips the cron ack when send
-		 * fails, so a re-run repeats already-delivered chunks. Log where
-		 * the reply stopped so the duplicate boundary is traceable. */
+		/* Retry semantics depend on the source (see maybe_ack_cron in
+		 * dispatch.c): cron is at-least-once — its ack is skipped while
+		 * send fails, so a cron re-run repeats chunks 0..k-1 as
+		 * duplicates. On this interactive channel discord_poll has
+		 * already popped the message from the gateway queue when the
+		 * reply is sent, so a failed chunk is lost: the user keeps a
+		 * partial reply and there is no automatic retry. Log the
+		 * failure point so a loss (or the cron duplicate boundary) is
+		 * traceable. */
 		fprintf(stderr,
 		        "shellclaw: discord: send failed at chunk %zu (byte offset %zu)\n",
 		        fail.index, fail.offset);

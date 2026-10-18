@@ -16,6 +16,7 @@ extern void telegram_set_test_config(const config_t *cfg);
 extern int telegram_format_getupdates_url_for_test(char *url, size_t url_cap, const char *token,
                                                    int timeout_sec, long offset);
 extern int telegram_response_ok_for_test(long http_code, const char *body);
+extern int telegram_retry_after_sec_for_test(const char *body);
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -245,6 +246,34 @@ static void test_send_response_requires_ok(void)
 		"HTTP 200 with ok true is delivery");
 }
 
+static void test_429_retry_after_parsed_and_capped(void)
+{
+	const char *limited =
+		"{\"ok\":false,\"error_code\":429,"
+		"\"description\":\"Too Many Requests: retry after 5\","
+		"\"parameters\":{\"retry_after\":5}}";
+	const char *flooded =
+		"{\"ok\":false,\"error_code\":429,"
+		"\"description\":\"Too Many Requests: retry after 3600\","
+		"\"parameters\":{\"retry_after\":3600}}";
+	const char *no_params = "{\"ok\":false,\"error_code\":429}";
+	const char *negative =
+		"{\"ok\":false,\"error_code\":429,\"parameters\":{\"retry_after\":-3}}";
+
+	MU_ASSERT(telegram_retry_after_sec_for_test(limited) == 5,
+		"retry_after 5 parsed as 5 seconds");
+	MU_ASSERT(telegram_retry_after_sec_for_test(flooded) == 30,
+		"retry_after capped at 30 seconds");
+	MU_ASSERT(telegram_retry_after_sec_for_test(no_params) == 0,
+		"429 without parameters yields no wait");
+	MU_ASSERT(telegram_retry_after_sec_for_test(negative) == 0,
+		"negative retry_after ignored");
+	MU_ASSERT(telegram_retry_after_sec_for_test("not json") == 0,
+		"invalid body yields no wait");
+	MU_ASSERT(telegram_retry_after_sec_for_test("") == 0,
+		"empty body yields no wait");
+}
+
 static void test_vtable_fields_set(void)
 {
 	const channel_t *ch = channel_telegram_get();
@@ -267,6 +296,7 @@ int main(void)
 	MU_RUN(test_parse_missing_from_field);
 MU_RUN(test_getupdates_url_requests_one_update);
 	MU_RUN(test_send_response_requires_ok);
+	MU_RUN(test_429_retry_after_parsed_and_capped);
 	MU_RUN(test_vtable_fields_set);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;

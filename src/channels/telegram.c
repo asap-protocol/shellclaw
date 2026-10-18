@@ -27,8 +27,13 @@
 #define TG_TEXT_MAX 4096
 /* Telegram allows about 1 message per second per chat. dispatch caps replies at
  * 32 KiB, so a long reply is up to 8 back-to-back sendMessage calls; pace them
- * so the chat does not hit 429 mid-reply. Full retry_after parsing is deferred. */
+ * so the chat does not hit 429 mid-reply. A 429 that still slips through is
+ * retried once honoring parameters.retry_after (telegram_perform_post). */
 #define TG_CHUNK_PAUSE_MS 500
+/* Telegram 429 bodies ask for parameters.retry_after seconds, which can be a
+ * long flood-limit window; cap the wait so one rate-limited chat cannot pin
+ * the poll loop. */
+#define TG_429_WAIT_CAP_SEC 30
 
 struct telegram_ctx {
 	char *token;
@@ -313,6 +318,40 @@ static int telegram_response_ok(long http_code, const char *body)
 	return 1;
 }
 
+/* Rate-limit recovery: a Telegram 429 body carries parameters.retry_after in
+ * seconds. Returns 0 when the body has no usable value, and clamps the wait to
+ * TG_429_WAIT_CAP_SEC so a long flood limit cannot stall the poll loop. */
+static int telegram_retry_after_sec(const char *body)
+{
+	cJSON *root;
+	cJSON *params;
+	cJSON *retry_after;
+	int wait_sec = 0;
+
+	if (!body || body[0] == '\0')
+		return 0;
+	root = cJSON_Parse(body);
+	if (!root || !cJSON_IsObject(root)) {
+		if (root)
+			cJSON_Delete(root);
+		return 0;
+	}
+	params = cJSON_GetObjectItem(root, "parameters");
+	retry_after = (params && cJSON_IsObject(params)) ?
+	    cJSON_GetObjectItemCaseSensitive(params, "retry_after") : NULL;
+	/* Guard the sign too: a negative retry_after must wait 0, not wrap. */
+	if (cJSON_IsNumber(retry_after) && retry_after->valuedouble > 0.0)
+		wait_sec = (int)(retry_after->valuedouble + 0.5);
+	cJSON_Delete(root);
+	if (wait_sec > TG_429_WAIT_CAP_SEC)
+		wait_sec = TG_429_WAIT_CAP_SEC;
+	return wait_sec;
+}
+
+/* Forward declaration: the 429 retry below needs the pacing sleep defined with
+ * tg_post_piece (same forward-declaration pattern as discord_jitter_ms). */
+static void tg_sleep_ms(int ms);
+
 static int telegram_perform_post(CURL *curl, const char *url, const char *postfields)
 {
 	tg_buf_t resp;
@@ -331,6 +370,20 @@ static int telegram_perform_post(CURL *curl, const char *url, const char *postfi
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
 	if (tg_curl_perform(curl, "sendMessage") == 0) {
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+		if (!telegram_response_ok(http_code, resp.buf) && http_code == 429) {
+			/* 429 is the one recoverable failure: wait the requested
+			 * retry_after and send the same chunk once more, so a
+			 * paced reply survives a stray rate limit. A second 429
+			 * falls through as a normal rejection. */
+			int wait_sec = telegram_retry_after_sec(resp.buf);
+
+			if (wait_sec > 0)
+				tg_sleep_ms(wait_sec * 1000);
+			resp.len = 0;
+			resp.buf[0] = '\0';
+			if (tg_curl_perform(curl, "sendMessage retry") == 0)
+				curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+		}
 		if (telegram_response_ok(http_code, resp.buf))
 			ret = 0;
 		else
@@ -400,9 +453,9 @@ static int tg_post_piece(const char *piece, void *userdata)
 	tg_chunk_ctx_t *ctx = (tg_chunk_ctx_t *)userdata;
 
 	/* Pause between consecutive chunks only (never before the first):
-	 * the chat rate is ~1 msg/s, so paced posts avoid a 429 aborting the
-	 * rest of the reply. Actually parsing parameters.retry_after from a
-	 * 429 body and sleeping exactly that long is deferred follow-up. */
+	 * the chat rate is ~1 msg/s, so paced posts avoid a 429 aborting
+	 * the rest of the reply. A 429 that still slips through is retried
+	 * once in telegram_perform_post honoring parameters.retry_after. */
 	if (ctx->posted_before)
 		tg_sleep_ms(TG_CHUNK_PAUSE_MS);
 	ctx->posted_before = 1;
@@ -430,9 +483,14 @@ static int tg_send(const char *recipient, const char *text,
 	ctx.chat_id = chat_id;
 	ctx.posted_before = 0;
 	if (channel_send_chunked(text, TG_TEXT_MAX, tg_post_piece, &ctx, &fail) != 0) {
-		/* At-least-once delivery: dispatch skips the cron ack when send
-		 * fails, so a re-run repeats already-delivered chunks. Log where
-		 * the reply stopped so the duplicate boundary is traceable. */
+		/* Retry semantics depend on the source (see maybe_ack_cron in
+		 * dispatch.c): cron is at-least-once — its ack is skipped while
+		 * send fails, so a cron re-run repeats chunks 0..k-1 as
+		 * duplicates. On this interactive channel last_update_id has
+		 * already advanced past the user's message when the reply is
+		 * sent, so a failed chunk is lost: the user keeps a partial
+		 * reply and there is no automatic retry. Log the failure point
+		 * so a loss (or the cron duplicate boundary) is traceable. */
 		fprintf(stderr,
 		        "shellclaw: telegram: sendMessage failed at chunk %zu (byte offset %zu)\n",
 		        fail.index, fail.offset);
@@ -488,5 +546,10 @@ void telegram_set_test_config(const config_t *cfg)
 int telegram_response_ok_for_test(long http_code, const char *body)
 {
 	return telegram_response_ok(http_code, body);
+}
+
+int telegram_retry_after_sec_for_test(const char *body)
+{
+	return telegram_retry_after_sec(body);
 }
 #endif
