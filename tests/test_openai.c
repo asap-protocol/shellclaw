@@ -17,6 +17,8 @@
 
 #ifdef SHELLCLAW_TEST
 extern int openai_parse_response_for_test(const char *json, provider_response_t *response);
+extern void openai_test_set_skip_http(int skip);
+extern const char *openai_test_last_request_model(void);
 #endif
 
 static const char *TMP_CONFIG = "/tmp/shellclaw_test_openai_config.toml";
@@ -256,6 +258,61 @@ static int test_build_chat_body_serializes_tool_calls(void)
 	cJSON_free(body);
 	return 0;
 }
+
+/* An OpenAI-compatible gateway (e.g. OpenRouter via a custom [providers.openai]
+ * endpoint) routes on the vendor prefix, so it needs the configured id
+ * verbatim: the per-backend mapping (strip "openai/", skip "anthropic/...")
+ * applies only to the default api.openai.com endpoint. */
+static int test_custom_endpoint_keeps_vendor_prefixed_model(void)
+{
+	static const char *const models[] = {
+		"anthropic/claude-sonnet-4-20250514",
+		"openai/gpt-4o",
+	};
+	const char *saved = getenv("OPENAI_API_KEY");
+	char *saved_copy = saved ? strdup(saved) : NULL;
+	config_t *cfg = NULL;
+	char errbuf[256];
+	provider_response_t response = {0};
+	const provider_t *p;
+	provider_message_t msg = {
+		.role = "user", .content = "Hi", .tool_calls = NULL,
+		.tool_calls_count = 0, .tool_use_id = NULL
+	};
+	int chat_ret;
+
+	ASSERT(setenv("OPENAI_API_KEY", "sk-test-not-a-real-key", 1) == 0);
+	openai_test_set_skip_http(1);
+	p = provider_openai_get();
+	ASSERT(p != NULL);
+	for (size_t i = 0; i < sizeof(models) / sizeof(models[0]); i++) {
+		FILE *f = fopen(TMP_CONFIG, "w");
+		ASSERT(f != NULL);
+		fprintf(f, "[agent]\nmodel = \"%s\"\nmax_tokens = 256\n", models[i]);
+		fprintf(f, "[memory]\ndb_path = \"/tmp/shellclaw_openai_test.db\"\n");
+		fprintf(f, "[providers.openai]\napi_key_env = \"OPENAI_API_KEY\"\n");
+		fprintf(f, "endpoint = \"https://openrouter.example/api/v1/chat/completions\"\n");
+		fclose(f);
+		ASSERT(config_load(TMP_CONFIG, &cfg, errbuf, sizeof(errbuf)) == 0);
+		ASSERT(p->init(cfg) == 0);
+		chat_ret = p->chat(&msg, 1, NULL, 0, &response);
+		ASSERT(chat_ret == 0);
+		ASSERT(response.error == 0);
+		ASSERT(strcmp(openai_test_last_request_model(), models[i]) == 0);
+		p->cleanup();
+		config_free(cfg);
+		remove(TMP_CONFIG);
+		provider_response_clear(&response);
+	}
+	openai_test_set_skip_http(0);
+	if (saved_copy) {
+		setenv("OPENAI_API_KEY", saved_copy, 1);
+		free(saved_copy);
+	} else {
+		unsetenv("OPENAI_API_KEY");
+	}
+	return 0;
+}
 #endif
 
 int main(void)
@@ -273,6 +330,7 @@ int main(void)
 	RUN(test_parse_valid_message_returns_content());
 	RUN(test_parse_null_json_returns_error());
 	RUN(test_build_chat_body_serializes_tool_calls());
+	RUN(test_custom_endpoint_keeps_vendor_prefixed_model());
 #endif
 	printf("test_openai: all tests passed\n");
 	return 0;
