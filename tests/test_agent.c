@@ -1060,8 +1060,9 @@ static int test_compaction_gives_oversized_line_full_buffer_on_next_pass(void)
 		      response_buf, sizeof(response_buf)) != 0)
 		goto cleanup;
 	/* Pass 1: the head line consumed most of the source, so the oversized
-	 * assistant line must stay raw; a stub would only see the left-over
-	 * bytes. With the count untouched this is the merge == 0 partial pass. */
+	 * assistant line must stay whole; a stub would only see the left-over
+	 * bytes. The merge == 0 partial pass now folds its summary into the
+	 * line (the head is consumed too), so the count shrinks by one. */
 	if (strstr(compaction_last_source, "[truncated]") != NULL) {
 		fprintf(stderr, "FAIL: pass 1 stubbed the oversized line into the left-over bytes\n");
 		goto cleanup;
@@ -1069,11 +1070,11 @@ static int test_compaction_gives_oversized_line_full_buffer_on_next_pass(void)
 	if (session_load("cli:fullbuff", loaded, LOAD_CAP) != 0)
 		goto cleanup;
 	if (strstr(loaded, "BIGASST_END") == NULL) {
-		fprintf(stderr, "FAIL: pass 1 destroyed the oversized message instead of keeping it raw\n");
+		fprintf(stderr, "FAIL: pass 1 destroyed the oversized message instead of keeping it whole\n");
 		goto cleanup;
 	}
-	if (count_session_messages(loaded) != 6 + 2) {
-		fprintf(stderr, "FAIL: partial pass changed the count, expected unchanged\n");
+	if (count_session_messages(loaded) != 5 + 2) {
+		fprintf(stderr, "FAIL: partial pass did not fold its summary into the oversized line\n");
 		goto cleanup;
 	}
 	/* Pass 2: the oversized line starts near the top of a fresh source, so
@@ -1116,6 +1117,124 @@ cleanup:
 	config_free(cfg);
 	free(session_json);
 	free(head);
+	free(big);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+/* An oversized ASSISTANT line cannot reach the head of the session the way a
+ * user line can: a partial pass prepends a user summary in front of it (merge
+ * == 0), that wrapper always counts toward used, so the only-empty stub never
+ * fires and the count never shrinks again. This seeds the exact state a
+ * merge==0 partial pass leaves behind and requires convergence anyway. */
+static int test_compaction_progresses_when_assistant_message_is_oversized(void)
+{
+	enum { OVERSIZE = 65 * 1024, JSON_CAP = 96 * 1024, LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	int shrunk = 0;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *big = NULL;
+	const char *db_path = "build/test_agent_compact_stall_assistant.db";
+	const char *config_path = "build/test_agent_compact_stall_assistant.toml";
+	size_t off;
+	int i;
+	int nmsg;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	memory_cleanup();
+	compaction_call_count = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	big = malloc((size_t)OVERSIZE + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !big || !loaded)
+		goto cleanup;
+	memset(big, 'A', (size_t)OVERSIZE);
+	memcpy(big + OVERSIZE - 8, "ASST_END", 8);
+	big[OVERSIZE] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "[");
+	/* The state a merge == 0 partial pass leaves behind: a summary user
+	 * line in front of an oversized assistant line. */
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"{\"role\":\"user\",\"content\":\"Summary of earlier turns.\"}");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"assistant\",\"content\":\"%s\"}", big);
+	for (i = 2; i < 6; i++) {
+		off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+			",{\"role\":\"user\",\"content\":\"m%d\"}", i);
+	}
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off, "]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:stallasst", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 4\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	for (i = 0; i < 8; i++) {
+		if (agent_run(cfg, "cli:stallasst", "hi", &compaction_provider, NULL, 0,
+			      response_buf, sizeof(response_buf)) != 0)
+			goto cleanup;
+		if (session_load("cli:stallasst", loaded, LOAD_CAP) != 0)
+			goto cleanup;
+		nmsg = count_session_messages(loaded);
+		if (i == 0) {
+			/* The first partial pass must keep the oversized line
+			 * whole: only a later pass with an empty source may
+			 * stub it, never the leftover sliver. */
+			if (strstr(loaded, "ASST_END") == NULL) {
+				fprintf(stderr,
+					"FAIL: oversized assistant line was stubbed into a sliver, not deferred\n");
+				goto cleanup;
+			}
+		}
+		if (strstr(loaded, "ASST_END") == NULL && nmsg <= 4 + 2) {
+			shrunk = 1;
+			break;
+		}
+	}
+	if (!shrunk) {
+		nmsg = count_session_messages(loaded);
+		fprintf(stderr,
+			"FAIL: oversized assistant line never left the session or count stayed at %d\n",
+			nmsg);
+		goto cleanup;
+	}
+	/* Once the count is back at max_ctx the summary stays inside the sent
+	 * window. */
+	if (agent_run(cfg, "cli:stallasst", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (session_load("cli:stallasst", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (count_session_messages(loaded) > 4 + 2) {
+		fprintf(stderr, "FAIL: session never shrinks back to max_ctx after the assistant turn\n");
+		goto cleanup;
+	}
+	if (!compaction_spy_sent_summary()) {
+		fprintf(stderr, "FAIL: summary of the assistant turn is outside the sent window\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
 	free(big);
 	free(loaded);
 cleanup_early:
@@ -2104,6 +2223,7 @@ int main(void)
 	RUN(test_compaction_progresses_when_later_message_is_oversized());
 	RUN(test_compaction_stub_ends_on_utf8_boundary_when_oversized());
 	RUN(test_compaction_gives_oversized_line_full_buffer_on_next_pass());
+	RUN(test_compaction_progresses_when_assistant_message_is_oversized());
 	RUN(test_compaction_failure_keeps_original_session());
 	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
 	RUN(test_local_offline_note_when_active_is_local());
