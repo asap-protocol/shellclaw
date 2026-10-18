@@ -10,20 +10,52 @@
 #include "providers/openai_compat.h"
 #include "providers/provider.h"
 #include "cJSON.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define REQUEST_TIMEOUT_SEC 120
 #define CONNECT_TIMEOUT_SEC 30
+#define OPENAI_DEFAULT_ENDPOINT "https://api.openai.com/v1/chat/completions"
 
 static char *s_oai_api_key;
 static const config_t *s_oai_cfg;
+
+#ifdef SHELLCLAW_TEST
+static int s_oai_test_skip_http;
+static char s_oai_test_model[160];
+
+void openai_test_set_skip_http(int skip)
+{
+	s_oai_test_skip_http = skip ? 1 : 0;
+}
+
+const char *openai_test_last_request_model(void)
+{
+	return s_oai_test_model;
+}
+
+static void oai_test_store_model(const char *model)
+{
+	size_t n;
+
+	s_oai_test_model[0] = '\0';
+	if (!model)
+		return;
+	n = strlen(model);
+	if (n >= sizeof(s_oai_test_model))
+		n = sizeof(s_oai_test_model) - 1U;
+	memcpy(s_oai_test_model, model, n);
+	s_oai_test_model[n] = '\0';
+}
+#endif
 
 static int build_and_send(const provider_message_t *messages, size_t message_count,
                           const provider_tool_def_t *tools, size_t tool_count,
                           provider_response_t *response)
 {
 	const char *endpoint;
+	const char *configured;
 	const char *model;
 	int max_tokens;
 	double temperature_cfg;
@@ -35,12 +67,39 @@ static int build_and_send(const provider_message_t *messages, size_t message_cou
 	}
 	endpoint = config_provider_openai_endpoint(s_oai_cfg);
 	if (!endpoint || !endpoint[0])
-		endpoint = "https://api.openai.com/v1/chat/completions";
-	model = config_agent_model(s_oai_cfg);
+		endpoint = OPENAI_DEFAULT_ENDPOINT;
+	configured = config_agent_model(s_oai_cfg);
+	if (!configured || configured[0] == '\0')
+		configured = "gpt-4o-mini";
+	/* Stripping "openai/..." or skipping another vendor's prefix is a fix for
+	 * the real OpenAI API, which has no slash ids. An OpenAI-compatible
+	 * gateway (e.g. OpenRouter via a custom endpoint) routes on the vendor
+	 * prefix, so it needs the configured id verbatim. */
+	if (strcmp(endpoint, OPENAI_DEFAULT_ENDPOINT) == 0)
+		model = provider_model_id_for_backend(configured, "openai");
+	else
+		model = configured;
+	if (!model) {
+		char errmsg[256];
+		snprintf(errmsg, sizeof(errmsg),
+		         "OpenAI skipped: agent model \"%s\" is not an OpenAI id",
+		         configured);
+		provider_set_error(response, errmsg);
+		return -1;
+	}
+#ifdef SHELLCLAW_TEST
+	if (s_oai_test_skip_http) {
+		oai_test_store_model(model);
+		response->content = provider_dup_str("");
+		if (!response->content) {
+			provider_set_error(response, "Out of memory");
+			return -1;
+		}
+		return 0;
+	}
+#endif
 	max_tokens = config_agent_max_tokens(s_oai_cfg);
 	temperature_cfg = config_agent_temperature(s_oai_cfg);
-	if (!model)
-		model = "gpt-4o-mini";
 	body = openai_compat_build_chat_body(model, max_tokens, temperature_cfg, messages,
 	                                     message_count, tools, tool_count, response);
 	if (!body)

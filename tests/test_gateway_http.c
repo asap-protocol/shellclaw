@@ -1179,7 +1179,73 @@ static int test_api_skill_create_delete(const char *token)
 	ASSERT(code == 200 || code == 201);
 	free(body);
 	body = NULL;
+	r = http_get_auth(gw_url("/api/skills/test_integration_skill"), token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "Test skill for integration") != NULL);
+	free(body);
+	body = NULL;
 	r = http_delete_auth(gw_url("/api/skills/test_integration_skill"), token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200);
+	free(body);
+	return 0;
+}
+
+/* A skill larger than the edit buffer must not come back as HTTP 200.
+ * The dashboard saves whatever GET returned, which used to drop the tail. */
+static int test_api_skill_get_refuses_oversize(const char *token)
+{
+	enum { BODY_N = 40000 };
+	const char *tail = "SKILL_TAIL_KEEP";
+	char *content;
+	char *json;
+	char path[256];
+	char disk[32];
+	long code;
+	char *body = NULL;
+	FILE *f;
+	size_t tail_len;
+	size_t json_cap;
+	int n;
+	int r;
+
+	tail_len = strlen(tail);
+	content = malloc((size_t)BODY_N + 1);
+	ASSERT(content != NULL);
+	memset(content, 'B', (size_t)BODY_N);
+	memcpy(content + (size_t)BODY_N - tail_len, tail, tail_len);
+	content[BODY_N] = '\0';
+	json_cap = (size_t)BODY_N + 64;
+	json = malloc(json_cap);
+	ASSERT(json != NULL);
+	n = snprintf(json, json_cap, "{\"name\":\"big_skill\",\"content\":\"%s\"}", content);
+	ASSERT(n > 0 && (size_t)n < json_cap);
+	r = http_post_auth(gw_url("/api/skills"), token, json, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 200 || code == 201);
+	free(body);
+	body = NULL;
+	r = http_get_auth(gw_url("/api/skills/big_skill"), token, &code, &body);
+	ASSERT(r == 0);
+	ASSERT(code == 413);
+	ASSERT(body != NULL);
+	ASSERT(strstr(body, "big_skill") != NULL);
+	ASSERT(strstr(body, "exceeds") != NULL);
+	free(body);
+	snprintf(path, sizeof(path), "%s/.shellclaw/skills/big_skill.md", g_test_home);
+	f = fopen(path, "r");
+	ASSERT(f != NULL);
+	ASSERT(fseek(f, -((long)tail_len), SEEK_END) == 0);
+	ASSERT(fread(disk, 1, tail_len, f) == tail_len);
+	disk[tail_len] = '\0';
+	fclose(f);
+	ASSERT(strcmp(disk, tail) == 0);
+	free(content);
+	free(json);
+	body = NULL;
+	r = http_delete_auth(gw_url("/api/skills/big_skill"), token, &code, &body);
 	ASSERT(r == 0);
 	ASSERT(code == 200);
 	free(body);
@@ -1728,6 +1794,10 @@ int main(int argc, char **argv)
 		if (test_api_context_snapshot_get(token) != 0) { fprintf(stderr, "test_api_context_snapshot_get failed\n"); failed++; }
 		if (test_api_skills_list(token) != 0) { fprintf(stderr, "test_api_skills_list failed\n"); failed++; }
 		if (test_api_skill_create_delete(token) != 0) { fprintf(stderr, "test_api_skill_create_delete failed\n"); failed++; }
+		if (test_api_skill_get_refuses_oversize(token) != 0) {
+			fprintf(stderr, "test_api_skill_get_refuses_oversize failed\n");
+			failed++;
+		}
 		if (test_api_memory(token) != 0) { fprintf(stderr, "test_api_memory failed\n"); failed++; }
 		if (test_api_cron_list(token) != 0) { fprintf(stderr, "test_api_cron_list failed\n"); failed++; }
 		if (test_api_cron_create_delete(token) != 0) { fprintf(stderr, "test_api_cron_create_delete failed\n"); failed++; }

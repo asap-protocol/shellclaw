@@ -8,7 +8,31 @@
 #ifdef SHELLCLAW_WS_TEST
 struct lws;
 struct lws_context;
-static void lws_callback_on_writable(struct lws *wsi) { (void)wsi; }
+static int g_ws_test_writable_count;
+static int g_ws_test_cancel_count;
+static void lws_callback_on_writable(struct lws *wsi)
+{
+	(void)wsi;
+	g_ws_test_writable_count++;
+}
+static void lws_cancel_service(struct lws_context *ctx)
+{
+	(void)ctx;
+	g_ws_test_cancel_count++;
+}
+int ws_test_writable_count(void)
+{
+	return g_ws_test_writable_count;
+}
+int ws_test_cancel_count(void)
+{
+	return g_ws_test_cancel_count;
+}
+void ws_test_reset_wake_counts(void)
+{
+	g_ws_test_writable_count = 0;
+	g_ws_test_cancel_count = 0;
+}
 #else
 #include "gateway/lws_compat.h"
 #include <libwebsockets.h>
@@ -59,7 +83,48 @@ static struct lws_context *g_lws_ctx;
 
 void ws_set_context(void *ctx)
 {
+	pthread_mutex_lock(&g_mutex);
 	g_lws_ctx = (struct lws_context *)ctx;
+	pthread_mutex_unlock(&g_mutex);
+}
+
+/* Cross-thread wake. lws_cancel_service is the call that is safe off the
+ * service thread; the writable mark happens in ws_on_service_cancel.
+ * Cancel while g_mutex is held: with an unlocked copy, http_stop can run
+ * ws_set_context(NULL) and destroy the context before the cancel lands.
+ * lws_cancel_service only writes a pipe byte, so calling it locked is safe. */
+static void ws_wake_service(void)
+{
+	pthread_mutex_lock(&g_mutex);
+	if (g_lws_ctx)
+		lws_cancel_service(g_lws_ctx);
+	pthread_mutex_unlock(&g_mutex);
+}
+
+void ws_on_service_cancel(void)
+{
+	struct lws *wake[MAX_CONNECTIONS];
+	int n = 0;
+	int i;
+
+	pthread_mutex_lock(&g_mutex);
+	for (i = 0; i < MAX_CONNECTIONS; i++) {
+		ws_msg_t *msg;
+		int conn_id;
+
+		if (!g_conns[i].wsi)
+			continue;
+		conn_id = g_conns[i].conn_id;
+		for (msg = g_outgoing_head; msg; msg = msg->next) {
+			if (msg->conn_id != conn_id)
+				continue;
+			wake[n++] = (struct lws *)g_conns[i].wsi;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_mutex);
+	for (i = 0; i < n; i++)
+		lws_callback_on_writable(wake[i]);
 }
 
 int ws_next_conn_id(void)
@@ -83,16 +148,92 @@ int ws_register_conn(int conn_id, ws_conn_t wsi)
 	return registered ? 0 : -1;
 }
 
+static void ws_free_outgoing(ws_msg_t *m)
+{
+	if (!m)
+		return;
+	free(m->text);
+	free(m);
+}
+
+static ws_msg_t *ws_msg_new(int conn_id, const char *text)
+{
+	ws_msg_t *m;
+
+	m = malloc(sizeof(*m));
+	if (!m)
+		return NULL;
+	m->conn_id = conn_id;
+	m->text = strdup(text);
+	m->next = NULL;
+	if (!m->text) {
+		free(m);
+		return NULL;
+	}
+	return m;
+}
+
+/** Drop every queued frame for @p conn_id. Caller holds g_mutex. */
+static void ws_drop_outgoing_locked(int conn_id)
+{
+	ws_msg_t *prev = NULL;
+	ws_msg_t *p = g_outgoing_head;
+
+	while (p) {
+		ws_msg_t *next = p->next;
+		if (p->conn_id != conn_id) {
+			prev = p;
+			p = next;
+			continue;
+		}
+		if (prev)
+			prev->next = next;
+		else
+			g_outgoing_head = next;
+		if (g_outgoing_tail == p)
+			g_outgoing_tail = prev;
+		g_outgoing_count--;
+		ws_free_outgoing(p);
+		p = next;
+	}
+}
+
+static ws_conn_t ws_find_wsi_locked(int conn_id)
+{
+	int i;
+
+	for (i = 0; i < MAX_CONNECTIONS; i++) {
+		if (g_conns[i].wsi && g_conns[i].conn_id == conn_id)
+			return g_conns[i].wsi;
+	}
+	return NULL;
+}
+
+static void ws_enqueue_outgoing_locked(ws_msg_t *m)
+{
+	if (!g_outgoing_tail)
+		g_outgoing_head = g_outgoing_tail = m;
+	else {
+		g_outgoing_tail->next = m;
+		g_outgoing_tail = m;
+	}
+	g_outgoing_count++;
+}
+
 void ws_unregister_conn(int conn_id)
 {
+	int i;
+
 	pthread_mutex_lock(&g_mutex);
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
-		if (g_conns[i].conn_id == conn_id) {
+	for (i = 0; i < MAX_CONNECTIONS; i++) {
+		if (g_conns[i].wsi && g_conns[i].conn_id == conn_id) {
 			g_conns[i].wsi = NULL;
 			g_conns[i].conn_id = 0;
 			break;
 		}
 	}
+	/* Frames queued before CLOSE are never drained once wsi is gone. */
+	ws_drop_outgoing_locked(conn_id);
 	pthread_mutex_unlock(&g_mutex);
 }
 
@@ -218,82 +359,58 @@ int ws_has_pending_outgoing(int conn_id)
 
 int ws_send_to(const char *session_id, const char *text)
 {
-	if (!session_id || !ws_text_len_ok(text)) return -1;
-	int conn_id = parse_conn_id(session_id);
-	if (conn_id < 0) return -1;
-	ws_msg_t *m = malloc(sizeof(*m));
-	if (!m) return -1;
-	m->conn_id = conn_id;
-	m->text = strdup(text);
-	m->next = NULL;
-	if (!m->text) { free(m); return -1; }
+	int conn_id;
+	ws_msg_t *m;
+	ws_conn_t wsi;
+
+	if (!session_id || !ws_text_len_ok(text))
+		return -1;
+	conn_id = parse_conn_id(session_id);
+	if (conn_id < 0)
+		return -1;
+	m = ws_msg_new(conn_id, text);
+	if (!m)
+		return -1;
 	pthread_mutex_lock(&g_mutex);
+	wsi = ws_find_wsi_locked(conn_id);
+	/* No live socket: enqueueing would pin the shared queue until restart. */
+	if (!wsi) {
+		pthread_mutex_unlock(&g_mutex);
+		ws_free_outgoing(m);
+		return 0;
+	}
 	if (g_outgoing_count >= MAX_QUEUE) {
 		pthread_mutex_unlock(&g_mutex);
-		free(m->text);
-		free(m);
+		ws_free_outgoing(m);
 		return -1;
 	}
-	if (!g_outgoing_tail)
-		g_outgoing_head = g_outgoing_tail = m;
-	else {
-		g_outgoing_tail->next = m;
-		g_outgoing_tail = m;
-	}
-	g_outgoing_count++;
-	ws_conn_t wsi = NULL;
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
-		if (g_conns[i].conn_id == conn_id) {
-			wsi = g_conns[i].wsi;
-			break;
-		}
-	}
+	ws_enqueue_outgoing_locked(m);
 	pthread_mutex_unlock(&g_mutex);
-	if (!wsi) return 0;
-	lws_callback_on_writable((struct lws *)wsi);
+	ws_wake_service();
 	return 0;
 }
 
 void ws_broadcast_text(const char *text)
 {
 	int i;
-	int wake_count = 0;
-	ws_conn_t wake_list[MAX_CONNECTIONS];
+	int queued = 0;
 	if (!ws_text_len_ok(text)) return;
 	pthread_mutex_lock(&g_mutex);
 	for (i = 0; i < MAX_CONNECTIONS; i++) {
 		ws_msg_t *m;
-		int cid;
-		if (!g_conns[i].wsi) continue;
-		cid = g_conns[i].conn_id;
+		if (!g_conns[i].wsi)
+			continue;
 		if (g_outgoing_count >= MAX_QUEUE)
 			break;
-		m = malloc(sizeof(*m));
-		if (!m) break;
-		m->conn_id = cid;
-		m->text = strdup(text);
-		if (!m->text) {
-			free(m);
+		m = ws_msg_new(g_conns[i].conn_id, text);
+		if (!m)
 			break;
-		}
-		m->next = NULL;
-		if (!g_outgoing_tail)
-			g_outgoing_head = g_outgoing_tail = m;
-		else {
-			g_outgoing_tail->next = m;
-			g_outgoing_tail = m;
-		}
-		g_outgoing_count++;
-		if (wake_count < MAX_CONNECTIONS) {
-			wake_list[wake_count] = g_conns[i].wsi;
-			wake_count++;
-		}
+ws_enqueue_outgoing_locked(m);
+		queued = 1;
 	}
 	pthread_mutex_unlock(&g_mutex);
-	for (i = 0; i < wake_count; i++) {
-		if (wake_list[i])
-			lws_callback_on_writable((struct lws *)wake_list[i]);
-	}
+	if (queued)
+		ws_wake_service();
 }
 
 void ws_shutdown_signal(void)

@@ -17,13 +17,16 @@
 
 #include "sandbox/sandbox.h"
 #include "sandbox/sandbox_landlock.h"
+#include "sandbox/sandbox_env.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #ifdef __linux__
 #include <sys/stat.h>
 #include <arpa/inet.h>
@@ -31,7 +34,6 @@
 #include <netinet/in.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
-#include <sys/wait.h>
 #endif
 
 #define ASSERT(c) do { \
@@ -144,6 +146,43 @@ static int test_stderr_captured(void)
 		return 0;
 	ASSERT(rc == 0);
 	ASSERT(strstr(out, "err") != NULL);
+	return 0;
+}
+
+/** Host API keys must not be readable from sh -c. printenv is not blocklisted. */
+static int test_command_does_not_inherit_host_secrets(void)
+{
+	char out[4096];
+	char ws[] = "/tmp/sc_sb_env_XXXXXX";
+	sandbox_config_t cfg;
+	char *dir;
+	int rc;
+	const char *secret = "leaked_via_env";
+
+	ASSERT(setenv("SHELLCLAW_AUDIT_SECRET", secret, 1) == 0);
+	ASSERT(setenv("ANTHROPIC_API_KEY", secret, 1) == 0);
+	dir = mkdtemp(ws);
+	if (!dir) {
+		fprintf(stderr, "test_command_does_not_inherit_host_secrets: mkdtemp failed\n");
+		return 1;
+	}
+	memset(&cfg, 0, sizeof cfg);
+	cfg.workspace_path = dir;
+	rc = sandbox_exec(
+		"printenv SHELLCLAW_AUDIT_SECRET ANTHROPIC_API_KEY; "
+		"tr '\\0' '\\n' < /proc/1/environ 2>/dev/null; "
+		"echo HOME=$(printenv HOME); echo PATH_OK",
+		out, sizeof out, 5000, &cfg);
+	rmdir(dir);
+	unsetenv("SHELLCLAW_AUDIT_SECRET");
+	unsetenv("ANTHROPIC_API_KEY");
+	if (skip_if_isolation_denied(rc, out, "test_command_does_not_inherit_host_secrets"))
+		return 0;
+	ASSERT(rc == 0);
+	ASSERT(strstr(out, secret) == NULL);
+	/* A real workspace exercises the HOME=workspace branch of the scrub. */
+	ASSERT(strstr(out, dir) != NULL);
+	ASSERT(strstr(out, "PATH_OK") != NULL);
 	return 0;
 }
 
@@ -274,6 +313,57 @@ static int test_missing_workspace_fail_closed(void)
 	ASSERT(rc == -1);
 	ASSERT(strstr(out, "should_not_run") == NULL);
 	ASSERT(strstr(out, "sandbox:") != NULL);
+	return 0;
+}
+
+static void trickle_timeout_watchdog(int sig)
+{
+	(void)sig;
+	fprintf(stderr, "FAIL: sandbox timeout did not fire while stdout trickled\n");
+	_exit(2);
+}
+
+static int test_timeout_kills_trickle_output(void)
+{
+	char out[8192];
+	struct timespec t0;
+	struct timespec t1;
+	long elapsed_ms;
+	int rc;
+
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
+	signal(SIGALRM, trickle_timeout_watchdog);
+	alarm(4);
+	/* The background sleep is a grandchild in the command process group,
+	 * so the deadline kill must wipe it along with the trickling shell. */
+	rc = sandbox_exec("sleep 9999 & while true; do echo x; sleep 0.05; done",
+	                  out, sizeof(out), 400, NULL);
+	alarm(0);
+	signal(SIGALRM, SIG_DFL);
+	if (skip_if_isolation_denied(rc, out, "test_timeout_kills_trickle_output"))
+		return 0;
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &t1) == 0);
+	elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000L
+		+ (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+	ASSERT(rc == 0);
+	ASSERT(strstr(out, "timed out") != NULL);
+	ASSERT(elapsed_ms < 2500);
+#ifdef __linux__
+	{
+		int tries;
+		for (tries = 0; tries < 20; tries++) {
+			if (!proc_cmdline_has("sleep 9999"))
+				break;
+			{
+				struct timespec ts;
+				ts.tv_sec = 0;
+				ts.tv_nsec = 50 * 1000 * 1000;
+				nanosleep(&ts, NULL);
+			}
+		}
+		ASSERT(proc_cmdline_has("sleep 9999") == 0);
+	}
+#endif
 	return 0;
 }
 
@@ -817,14 +907,152 @@ static int test_command_inherits_cgroup(void)
 }
 #endif
 
+/* --- No-namespace units for the wall-clock deadline rewrite (#116) and the
+ * secret-free child environment (#109). GitHub runners reject unshare, so
+ * the sandbox_exec paths above skip and these units keep the helpers
+ * covered on every host. Linked from sandbox_test.o. --- */
+
+size_t drain_pipe(int fd, char *buf, size_t cap, int timeout_ms, int *hit_deadline);
+
+static int test_poll_remain_ms_bounds(void)
+{
+	ASSERT(poll_remain_ms(1000, 0, 100) == 100);
+	ASSERT(poll_remain_ms(1000, 950, 100) == 50);
+	ASSERT(poll_remain_ms(1000, 999, 100) == 1);
+	ASSERT(poll_remain_ms(1000, 0, 5000) == 1000);
+	return 0;
+}
+
+static int test_monotonic_elapsed_ms_never_negative(void)
+{
+	struct timespec start;
+	struct timespec future;
+
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	usleep(30000);
+	ASSERT(monotonic_elapsed_ms(&start) >= 20);
+	ASSERT(monotonic_elapsed_ms(&start) < 60000);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &future) == 0);
+	future.tv_sec += 10;
+	ASSERT(monotonic_elapsed_ms(&future) == 0);
+	return 0;
+}
+
+static int test_drain_pipe_reads_until_eof(void)
+{
+	char buf[64];
+	const char msg[] = "hi";
+	size_t total;
+	int hit = -1;
+	int fds[2];
+	pid_t pid;
+	int st;
+
+	ASSERT(pipe(fds) == 0);
+	pid = fork();
+	if (pid == 0) {
+		ssize_t w;
+		close(fds[0]);
+		w = write(fds[1], msg, sizeof(msg) - 1);
+		(void)w;
+		close(fds[1]);
+		exit(0);
+	}
+	close(fds[1]);
+	total = drain_pipe(fds[0], buf, sizeof(buf), 5000, &hit);
+	close(fds[0]);
+	waitpid(pid, &st, 0);
+	ASSERT(total == 2);
+	ASSERT(hit == 0);
+	ASSERT(buf[0] == 'h' && buf[1] == 'i');
+	return 0;
+}
+
+static int test_drain_pipe_stops_at_wall_deadline(void)
+{
+	char buf[256];
+	char byte = 'x';
+	size_t total;
+	int hit = -1;
+	int fds[2];
+	pid_t pid;
+	int st;
+
+	ASSERT(pipe(fds) == 0);
+	pid = fork();
+	if (pid == 0) {
+		close(fds[0]);
+		/* Trickle one byte every 20 ms so the pipe stays readable and the
+		 * cap is never reached: only the wall deadline can stop the loop. */
+		for (;;) {
+			if (write(fds[1], &byte, 1) <= 0)
+				exit(0);
+			usleep(20000);
+		}
+	}
+	close(fds[1]);
+	total = drain_pipe(fds[0], buf, sizeof(buf), 400, &hit);
+	close(fds[0]);
+	waitpid(pid, &st, 0);
+	ASSERT(hit == 1);
+	ASSERT(total >= 1);
+	ASSERT(total < sizeof(buf) - 1);
+	return 0;
+}
+
+static int test_scrubbed_env_child_loses_secrets(void)
+{
+	pid_t pid;
+	int st;
+	int status;
+
+	pid = fork();
+	if (pid == 0) {
+		if (setenv("SHELLCLAW_AUDIT_SECRET", "leak", 1) != 0)
+			exit(4);
+		if (setenv("PATH", "/usr/bin", 1) != 0)
+			exit(5);
+		if (setenv("LD_PRELOAD", "/no/such/sc_fake_lib.so", 1) != 0)
+			exit(6);
+		sandbox_scrub_command_environment("/ws/home");
+		if (getenv("SHELLCLAW_AUDIT_SECRET"))
+			exit(1);
+		if (getenv("LD_PRELOAD"))
+			exit(7);
+		if (!getenv("PATH") || strcmp(getenv("PATH"), "/usr/bin") != 0)
+			exit(2);
+		if (!getenv("HOME") || strcmp(getenv("HOME"), "/ws/home") != 0)
+			exit(3);
+		exit(0);
+	}
+	if (waitpid(pid, &st, 0) < 0) {
+		fprintf(stderr, "FAIL: waitpid scrub child: %s\n", strerror(errno));
+		return 1;
+	}
+	if (!WIFEXITED(st))
+		return 1;
+	status = WEXITSTATUS(st);
+	if (status != 0) {
+		fprintf(stderr, "FAIL: scrub env child exit=%d\n", status);
+		return 1;
+	}
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_isolation_denied_helper());
 	RUN(test_fail_closed_reports_isolation_error());
 	RUN(test_output_capture());
 	RUN(test_stderr_captured());
+	RUN(test_command_does_not_inherit_host_secrets());
 	RUN(test_null_cmd_returns_error());
 	RUN(test_zero_cap_returns_error());
+	RUN(test_scrubbed_env_child_loses_secrets());
+	RUN(test_poll_remain_ms_bounds());
+	RUN(test_monotonic_elapsed_ms_never_negative());
+	RUN(test_drain_pipe_reads_until_eof());
+	RUN(test_drain_pipe_stops_at_wall_deadline());
 	RUN(test_exit_nonzero_runs());
 	RUN(test_exit_122_is_not_isolation_failure());
 	RUN(test_exit_123_with_workspace_is_not_isolation_failure());
@@ -832,6 +1060,7 @@ int main(void)
 	RUN(test_dev_null_is_writable());
 	RUN(test_workspace_chdir());
 	RUN(test_missing_workspace_fail_closed());
+	RUN(test_timeout_kills_trickle_output());
 	RUN(test_timeout_kills_process());
 #ifdef __linux__
 	RUN(test_landlock_probe_without_restrict());

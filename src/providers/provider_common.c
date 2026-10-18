@@ -2,12 +2,14 @@
  * @file provider_common.c
  * @brief Shared provider helpers: response cleanup, curl buffer, error helpers.
  */
+#define _POSIX_C_SOURCE 200809L
 
 #include "providers/provider.h"
 #include "cJSON.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 void provider_response_clear(provider_response_t *r)
 {
@@ -65,6 +67,64 @@ char *provider_dup_str(const char *s)
 	char *p = malloc(n);
 	if (p) memcpy(p, s, n);
 	return p;
+}
+
+static int id_has_prefix(const char *id, const char *prefix)
+{
+	size_t n = strlen(prefix);
+	return strncmp(id, prefix, n) == 0;
+}
+
+static int vendor_matches_backend(const char *model, size_t vendor_len, const char *backend)
+{
+	size_t n = strlen(backend);
+	if (vendor_len != n)
+		return 0;
+	/* Case-insensitive like the router's provider names, so "Anthropic/claude-x"
+	 * resolves for the anthropic backend instead of passing through raw. */
+	return strncasecmp(model, backend, n) == 0;
+}
+
+static int bare_id_is_openai_family(const char *model)
+{
+	if (id_has_prefix(model, "gpt-") || id_has_prefix(model, "chatgpt-"))
+		return 1;
+	if (id_has_prefix(model, "o1") || id_has_prefix(model, "o3"))
+		return 1;
+	return id_has_prefix(model, "o4");
+}
+
+static const char *bare_model_for_backend(const char *model, const char *backend)
+{
+	if (strcmp(backend, "openai") == 0 && id_has_prefix(model, "claude"))
+		return NULL;
+	if (strcmp(backend, "anthropic") == 0 && bare_id_is_openai_family(model))
+		return NULL;
+	return model;
+}
+
+/* NULL means skip. Sending the foreign id would be HTTP 4xx and stop fallback. */
+const char *provider_model_id_for_backend(const char *model, const char *backend)
+{
+	const char *slash;
+	size_t vendor_len;
+
+	if (!model || model[0] == '\0' || !backend || backend[0] == '\0')
+		return model;
+	slash = strchr(model, '/');
+	if (!slash)
+		return bare_model_for_backend(model, backend);
+	/* Only a well-formed "vendor/rest" resolves: one slash, non-empty vendor
+	 * and id segments, vendor equal to the backend name. Every other prefix
+	 * ("openrouter/anthropic/claude-3", "meta-llama/llama-3", "anthropic/",
+	 * "/foo") belongs to another gateway; the cloud APIs reject the raw id
+	 * with a 4xx that stops fallback, so skip and let the chain reach local. */
+	vendor_len = (size_t)(slash - model);
+	if (vendor_len == 0 || slash[1] == '\0' || strchr(slash + 1, '/') != NULL)
+		return NULL;
+	if (vendor_matches_backend(model, vendor_len, backend))
+		return slash + 1;
+	return NULL;
 }
 
 int provider_error_allows_fallback_retry(const char *msg)

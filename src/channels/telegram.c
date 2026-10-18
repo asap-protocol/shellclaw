@@ -8,10 +8,12 @@
 #include "core/config.h"
 #include "cJSON.h"
 #include <curl/curl.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define TG_API_BASE "https://api.telegram.org/bot"
 #define TG_GET_UPDATES "getUpdates"
@@ -21,6 +23,17 @@
 #define POLL_TIMEOUT_SEC 30
 #define RESP_BUF_SIZE (256 * 1024)
 #define RESP_BUF_INIT 4096
+/* Bot API sendMessage text limit. Longer agent replies are sent as several messages. */
+#define TG_TEXT_MAX 4096
+/* Telegram allows about 1 message per second per chat. dispatch caps replies at
+ * 32 KiB, so a long reply is up to 8 back-to-back sendMessage calls; pace them
+ * so the chat does not hit 429 mid-reply. A 429 that still slips through is
+ * retried once honoring parameters.retry_after (telegram_perform_post). */
+#define TG_CHUNK_PAUSE_MS 500
+/* Telegram 429 bodies ask for parameters.retry_after seconds, which can be a
+ * long flood-limit window; cap the wait so one rate-limited chat cannot pin
+ * the poll loop. */
+#define TG_429_WAIT_CAP_SEC 30
 
 struct telegram_ctx {
 	char *token;
@@ -148,14 +161,15 @@ static int parse_update(const char *json, channel_incoming_msg_t *out, long *upd
 		return 0;
 	}
 	cJSON *from = cJSON_GetObjectItem(msg, "from");
-	if (!from || !cJSON_IsObject(from)) {
-		cJSON_Delete(root);
-		return -1;
-	}
-	cJSON *from_id = cJSON_GetObjectItem(from, "id");
+	cJSON *from_id = (from && cJSON_IsObject(from)) ? cJSON_GetObjectItem(from, "id") : NULL;
+	/* Channel and anonymous-admin posts can omit a numeric from.id. Failing
+	 * the poll here left last_update_id unchanged, so this update stayed at
+	 * the head of getUpdates and later messages never ran. Skip it instead. */
 	if (!from_id || !cJSON_IsNumber(from_id)) {
+		fprintf(stderr, "shellclaw: telegram: skip update %ld (message has no from id)\n",
+		        *update_id_out);
 		cJSON_Delete(root);
-		return -1;
+		return 0;
 	}
 	long user_id = (long)from_id->valuedouble;
 	if (!is_user_allowed(g_tg.cfg, user_id)) {
@@ -221,14 +235,32 @@ static int parse_update(const char *json, channel_incoming_msg_t *out, long *upd
 	return 1;
 }
 
+static int format_getupdates_url(char *url, size_t url_cap, const char *token,
+                                 int timeout_sec, long offset)
+{
+	int n;
+	if (!url || url_cap == 0 || !token || token[0] == '\0')
+		return -1;
+	/* Default getUpdates limit is 100. A backlog of long messages exceeds the
+	 * 256 KiB read buffer, curl aborts, and the offset never advances, so
+	 * every later poll retries the same batch. The parser only consumes
+	 * result[0]; ask for that one update so a single message always fits. */
+	n = snprintf(url, url_cap, "%s%s/%s?timeout=%d&offset=%ld&limit=1",
+	             TG_API_BASE, token, TG_GET_UPDATES, timeout_sec, offset);
+	if (n < 0 || (size_t)n >= url_cap)
+		return -1;
+	return 0;
+}
+
 static int tg_poll(channel_incoming_msg_t *out, int timeout_ms)
 {
 	if (!out || !g_tg.initialized || !g_tg.token) return -1;
 	memset(out, 0, sizeof(*out));
 	int timeout_sec = (timeout_ms / 1000) > 0 ? (timeout_ms / 1000) : 1;
 	char url[512];
-	snprintf(url, sizeof(url), "%s%s/%s?timeout=%d&offset=%ld",
-	         TG_API_BASE, g_tg.token, TG_GET_UPDATES, timeout_sec, g_tg.last_update_id + 1);
+	if (format_getupdates_url(url, sizeof(url), g_tg.token, timeout_sec,
+	                          g_tg.last_update_id + 1) != 0)
+		return -1;
 	CURL *curl = curl_easy_init();
 	if (!curl) return -1;
 	tg_curl_harden(curl);
@@ -261,41 +293,210 @@ static int tg_poll(channel_incoming_msg_t *out, int timeout_ms)
 	return 0;
 }
 
-static int tg_send(const char *recipient, const char *text,
-                   const channel_attachment_t *attachments, size_t att_count)
+/* Curl success is not delivery. sendMessage reports refusal in HTTP status and ok. */
+static int telegram_response_ok(long http_code, const char *body)
 {
-	(void)attachments;
-	(void)att_count;
-	if (!g_tg.initialized || !g_tg.token || !recipient || !text) return -1;
-	const char *chat_id = strchr(recipient, ':');
-	if (chat_id) chat_id++;
-	else chat_id = recipient;
+	cJSON *root;
+	cJSON *ok_item;
+
+	if (http_code < 200 || http_code >= 300)
+		return 0;
+	if (!body || body[0] == '\0')
+		return 0;
+	root = cJSON_Parse(body);
+	if (!root || !cJSON_IsObject(root)) {
+		if (root)
+			cJSON_Delete(root);
+		return 0;
+	}
+	ok_item = cJSON_GetObjectItemCaseSensitive(root, "ok");
+	if (!cJSON_IsBool(ok_item) || !cJSON_IsTrue(ok_item)) {
+		cJSON_Delete(root);
+		return 0;
+	}
+	cJSON_Delete(root);
+	return 1;
+}
+
+/* Rate-limit recovery: a Telegram 429 body carries parameters.retry_after in
+ * seconds. Returns 0 when the body has no usable value, and clamps the wait to
+ * TG_429_WAIT_CAP_SEC so a long flood limit cannot stall the poll loop. */
+static int telegram_retry_after_sec(const char *body)
+{
+	cJSON *root;
+	cJSON *params;
+	cJSON *retry_after;
+	int wait_sec = 0;
+
+	if (!body || body[0] == '\0')
+		return 0;
+	root = cJSON_Parse(body);
+	if (!root || !cJSON_IsObject(root)) {
+		if (root)
+			cJSON_Delete(root);
+		return 0;
+	}
+	params = cJSON_GetObjectItem(root, "parameters");
+	retry_after = (params && cJSON_IsObject(params)) ?
+	    cJSON_GetObjectItemCaseSensitive(params, "retry_after") : NULL;
+	/* Guard the sign too: a negative retry_after must wait 0, not wrap. */
+	if (cJSON_IsNumber(retry_after) && retry_after->valuedouble > 0.0)
+		wait_sec = (int)(retry_after->valuedouble + 0.5);
+	cJSON_Delete(root);
+	if (wait_sec > TG_429_WAIT_CAP_SEC)
+		wait_sec = TG_429_WAIT_CAP_SEC;
+	return wait_sec;
+}
+
+/* Forward declaration: the 429 retry below needs the pacing sleep defined with
+ * tg_post_piece (same forward-declaration pattern as discord_jitter_ms). */
+static void tg_sleep_ms(int ms);
+
+static int telegram_perform_post(CURL *curl, const char *url, const char *postfields)
+{
+	tg_buf_t resp;
+	long http_code = 0;
+	int ret = -1;
+
+	resp.buf = malloc(RESP_BUF_INIT);
+	if (!resp.buf)
+		return -1;
+	resp.len = 0;
+	resp.cap = RESP_BUF_INIT;
+	resp.buf[0] = '\0';
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+	if (tg_curl_perform(curl, "sendMessage") == 0) {
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+		if (!telegram_response_ok(http_code, resp.buf) && http_code == 429) {
+			/* 429 is the one recoverable failure: wait the requested
+			 * retry_after and send the same chunk once more, so a
+			 * paced reply survives a stray rate limit. A second 429
+			 * falls through as a normal rejection. */
+			int wait_sec = telegram_retry_after_sec(resp.buf);
+
+			if (wait_sec > 0)
+				tg_sleep_ms(wait_sec * 1000);
+			resp.len = 0;
+			resp.buf[0] = '\0';
+			if (tg_curl_perform(curl, "sendMessage retry") == 0)
+				curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+		}
+		if (telegram_response_ok(http_code, resp.buf))
+			ret = 0;
+		else
+			fprintf(stderr, "shellclaw: telegram: sendMessage rejected HTTP %ld\n",
+			        http_code);
+	}
+	free(resp.buf);
+	return ret;
+}
+
+static int telegram_post_chunk(const char *chat_id, const char *text)
+{
 	char url[512];
-	snprintf(url, sizeof(url), "%s%s/%s", TG_API_BASE, g_tg.token, TG_SEND_MSG);
-	CURL *curl = curl_easy_init();
-	if (!curl) return -1;
+	CURL *curl;
+	char *escaped;
+	char *postfields;
+	int ret;
+	size_t need;
+
+	curl = curl_easy_init();
+	if (!curl)
+		return -1;
 	tg_curl_harden(curl);
 	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
 	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-	char *escaped = curl_easy_escape(curl, text, (int)strlen(text));
+	snprintf(url, sizeof(url), "%s%s/%s", TG_API_BASE, g_tg.token, TG_SEND_MSG);
+	escaped = curl_easy_escape(curl, text, (int)strlen(text));
 	if (!escaped) {
 		curl_easy_cleanup(curl);
 		return -1;
 	}
-	size_t need = strlen(chat_id) + strlen(escaped) + 32;
-	char *postfields = malloc(need);
-	int ret = -1;
-	if (postfields) {
-		snprintf(postfields, need, "chat_id=%s&text=%s", chat_id, escaped);
-		curl_easy_setopt(curl, CURLOPT_URL, url);
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields);
-		ret = (tg_curl_perform(curl, "sendMessage") == 0) ? 0 : -1;
-		free(postfields);
+	need = strlen(chat_id) + strlen(escaped) + 32;
+	postfields = malloc(need);
+	if (!postfields) {
+		curl_free(escaped);
+		curl_easy_cleanup(curl);
+		return -1;
 	}
+	snprintf(postfields, need, "chat_id=%s&text=%s", chat_id, escaped);
+	ret = telegram_perform_post(curl, url, postfields);
+	free(postfields);
 	curl_free(escaped);
 	curl_easy_cleanup(curl);
 	return ret;
+}
+
+typedef struct {
+	const char *chat_id;
+	int posted_before;
+} tg_chunk_ctx_t;
+
+static void tg_sleep_ms(int ms)
+{
+	struct timespec ts;
+
+	if (ms <= 0)
+		return;
+	ts.tv_sec = (time_t)(ms / 1000);
+	ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+	while (nanosleep(&ts, &ts) == -1 && errno == EINTR)
+		;
+}
+
+static int tg_post_piece(const char *piece, void *userdata)
+{
+	tg_chunk_ctx_t *ctx = (tg_chunk_ctx_t *)userdata;
+
+	/* Pause between consecutive chunks only (never before the first):
+	 * the chat rate is ~1 msg/s, so paced posts avoid a 429 aborting
+	 * the rest of the reply. A 429 that still slips through is retried
+	 * once in telegram_perform_post honoring parameters.retry_after. */
+	if (ctx->posted_before)
+		tg_sleep_ms(TG_CHUNK_PAUSE_MS);
+	ctx->posted_before = 1;
+	return telegram_post_chunk(ctx->chat_id, piece);
+}
+
+static int tg_send(const char *recipient, const char *text,
+                   const channel_attachment_t *attachments, size_t att_count)
+{
+	tg_chunk_ctx_t ctx;
+	channel_chunk_fail_t fail;
+	const char *chat_id;
+
+	(void)attachments;
+	(void)att_count;
+	if (!g_tg.initialized || !g_tg.token || !recipient || !text || text[0] == '\0')
+		return -1;
+	chat_id = strchr(recipient, ':');
+	if (chat_id)
+		chat_id++;
+	else
+		chat_id = recipient;
+	if (chat_id[0] == '\0')
+		return -1;
+	ctx.chat_id = chat_id;
+	ctx.posted_before = 0;
+	if (channel_send_chunked(text, TG_TEXT_MAX, tg_post_piece, &ctx, &fail) != 0) {
+		/* Retry semantics depend on the source (see maybe_ack_cron in
+		 * dispatch.c): cron is at-least-once — its ack is skipped while
+		 * send fails, so a cron re-run repeats chunks 0..k-1 as
+		 * duplicates. On this interactive channel last_update_id has
+		 * already advanced past the user's message when the reply is
+		 * sent, so a failed chunk is lost: the user keeps a partial
+		 * reply and there is no automatic retry. Log the failure point
+		 * so a loss (or the cron duplicate boundary) is traceable. */
+		fprintf(stderr,
+		        "shellclaw: telegram: sendMessage failed at chunk %zu (byte offset %zu)\n",
+		        fail.index, fail.offset);
+		return -1;
+	}
+	return 0;
 }
 
 static void tg_cleanup(void)
@@ -331,8 +532,24 @@ int telegram_parse_update_for_test(const char *json, channel_incoming_msg_t *out
 	return parse_update(json, out, update_id);
 }
 
+int telegram_format_getupdates_url_for_test(char *url, size_t url_cap, const char *token,
+                                            int timeout_sec, long offset)
+{
+	return format_getupdates_url(url, url_cap, token, timeout_sec, offset);
+}
+
 void telegram_set_test_config(const config_t *cfg)
 {
 	g_tg.cfg = cfg;
+}
+
+int telegram_response_ok_for_test(long http_code, const char *body)
+{
+	return telegram_response_ok(http_code, body);
+}
+
+int telegram_retry_after_sec_for_test(const char *body)
+{
+	return telegram_retry_after_sec(body);
 }
 #endif

@@ -115,7 +115,8 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 	pid_t pid;
 	size_t total = 0;
 	int timed_out = 0;
-	int elapsed_ms = 0;
+	long timeout_ms;
+	struct timespec start_ts;
 	char buf[256];
 	if (pipe(pipefd) != 0) {
 		snprintf(result_buf, max_len, "{\"error\":\"pipe failed\"}");
@@ -140,30 +141,36 @@ static int run_unsandboxed(const char *command, int timeout_sec,
 	(void)setpgid(pid, pid);
 	close(pipefd[1]);
 	result_buf[0] = '\0';
-	while (total < max_len - 1 && elapsed_ms < timeout_sec * 1000) {
+	/* Unchecked on purpose: CLOCK_MONOTONIC failure is not a realistic case
+	 * (vDSO). If it ever failed, monotonic_elapsed_ms keeps returning -1,
+	 * the deadline never fires, and poll slices stay bounded. */
+	(void)clock_gettime(CLOCK_MONOTONIC, &start_ts);
+	/* Wall time, not idle poll time: a steady writer never used to trip
+	 * the timeout, so the agent lock stayed held until the buffer filled. */
+	timeout_ms = (long)timeout_sec * 1000L;
+	while (total < max_len - 1) {
 		struct pollfd pfd;
+		long elapsed_ms;
 		int rem;
 		int r;
 		ssize_t n;
+		elapsed_ms = monotonic_elapsed_ms(&start_ts);
+		if (elapsed_ms >= timeout_ms) {
+			timed_out = 1;
+			kill_command_tree(pid);
+			break;
+		}
 		pfd.fd = pipefd[0];
 		pfd.events = POLLIN;
 		pfd.revents = 0;
-		rem = timeout_sec * 1000 - elapsed_ms;
-		if (rem > 5000) rem = 5000;
+		rem = poll_remain_ms((int)timeout_ms, elapsed_ms, 5000);
 		r = poll(&pfd, 1, rem);
 		if (r < 0) {
 			if (errno == EINTR) continue;
 			break;
 		}
-		if (r == 0) {
-			elapsed_ms += rem;
-			if (elapsed_ms >= timeout_sec * 1000) {
-				timed_out = 1;
-				kill_command_tree(pid);
-				break;
-			}
+		if (r == 0)
 			continue;
-		}
 		n = read(pipefd[0], buf, sizeof(buf));
 		if (n <= 0) break;
 		append_unsandboxed_output(result_buf, max_len, &total, buf, (size_t)n);

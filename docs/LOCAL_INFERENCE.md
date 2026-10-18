@@ -18,7 +18,7 @@ llama-server (127.0.0.1:8080)
 GGUF model on disk (/var/lib/shellclaw/models/)
 ```
 
-At startup, `local.c` probes `GET /health` and `GET /v1/models`. If unreachable, the local provider marks itself unavailable and the router falls through to the next entry in `providers.fallback_chain`.
+At startup, `local.c` probes `GET /health` and `GET /v1/models`. If unreachable, the local provider marks itself unavailable and the router falls through to the next entry in `providers.fallback_chain`. After an unreachable startup the provider re-probes on the next request, at most once every 15 seconds, so a `llama-server` that comes up later can still serve.
 
 ---
 

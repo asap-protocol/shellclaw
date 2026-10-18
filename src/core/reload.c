@@ -87,6 +87,7 @@ int try_config_reload(config_t **pcfg)
 		return -1;
 	}
 	provider_router_set_live_config(new_cfg);
+	provider_anthropic_set_live_config(new_cfg);
 	provider_openai_set_live_config(new_cfg);
 	provider_local_set_live_config(new_cfg);
 	tool_set_config(new_cfg);

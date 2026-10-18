@@ -17,6 +17,7 @@
 #include "asap/log.h"
 #include "core/agent.h"
 #include "core/bootstrap.h"
+#include "core/dispatch.h"
 #include "core/config.h"
 #include "core/config_patch.h"
 #include "core/memory.h"
@@ -377,28 +378,75 @@ static void handle_skills_list(const config_t *cfg, char *buf, size_t size, int 
 #define SKILL_CONTENT_MAX 32768
 #define MEMORY_RESULTS_MAX 16384
 
-static void handle_skill_get(const config_t *cfg, const char *name, char *buf, size_t size, int *status)
+static void skill_too_large(char *buf, size_t size, int *status, const char *name,
+                           const char *limit_desc)
 {
-	char *content = malloc(SKILL_CONTENT_MAX);
-	if (!content) { json_error(buf, size, status, 500, "Out of memory"); return; }
-	if (skill_get_content(cfg, name, content, SKILL_CONTENT_MAX) != 0) {
-		free(content);
-		json_error(buf, size, status, 404, "Skill not found");
+	char msg[256];
+	int n;
+
+	n = snprintf(msg, sizeof(msg), "skill \"%s\" exceeds %s",
+	             name ? name : "", limit_desc ? limit_desc : "edit buffer");
+	if (n < 0 || (size_t)n >= sizeof(msg))
+		json_error(buf, size, status, 413, "skill exceeds edit buffer");
+	else
+		json_error(buf, size, status, 413, msg);
+}
+
+static void skill_get_send(const char *name, const char *content, char *buf, size_t size,
+                          int *status)
+{
+	cJSON *obj;
+	char *printed;
+	obj = cJSON_CreateObject();
+	if (!obj) {
+		json_error(buf, size, status, 500, "Internal error");
 		return;
 	}
-	cJSON *obj = cJSON_CreateObject();
-	if (!obj) { free(content); json_error(buf, size, status, 500, "Internal error"); return; }
 	cJSON_AddItemToObject(obj, "name", cJSON_CreateString(name));
 	cJSON_AddItemToObject(obj, "content", cJSON_CreateString(content));
-	free(content);
-	char *s = cJSON_PrintUnformatted(obj);
+	printed = cJSON_PrintUnformatted(obj);
 	cJSON_Delete(obj);
-	if (s) {
-		json_response(buf, size, status, s);
-		free(s);
-	} else {
+	if (!printed) {
 		json_error(buf, size, status, 500, "Internal error");
+		return;
 	}
+	/* A cut-off 200 body parses as empty in the dashboard and Save wipes the file. */
+	if (strlen(printed) >= size) {
+		char limit_desc[64];
+		free(printed);
+		snprintf(limit_desc, sizeof(limit_desc), "%zu byte response buffer", size);
+		skill_too_large(buf, size, status, name, limit_desc);
+		return;
+	}
+	json_response(buf, size, status, printed);
+	free(printed);
+}
+
+static void handle_skill_get(const config_t *cfg, const char *name, char *buf, size_t size, int *status)
+{
+	char *content;
+	int rc;
+
+	content = malloc(SKILL_CONTENT_MAX);
+	if (!content) {
+		json_error(buf, size, status, 500, "Out of memory");
+		return;
+	}
+	rc = skill_get_content(cfg, name, content, SKILL_CONTENT_MAX);
+	if (rc != 0) {
+		free(content);
+		if (rc == -2) {
+			char limit_desc[64];
+			snprintf(limit_desc, sizeof(limit_desc), "%d byte edit buffer",
+			         SKILL_CONTENT_MAX - 1);
+			skill_too_large(buf, size, status, name, limit_desc);
+		} else {
+			json_error(buf, size, status, 404, "Skill not found");
+		}
+		return;
+	}
+	skill_get_send(name, content, buf, size, status);
+	free(content);
 }
 
 static void handle_skill_create(const config_t *cfg, const char *body, size_t body_len,
@@ -458,8 +506,13 @@ static void handle_skill_delete(const config_t *cfg, const char *name,
 static void handle_memory_get(const char *query, int limit, char *buf, size_t size, int *status)
 {
 	char *results = malloc(MEMORY_RESULTS_MAX);
+	int recall_rc;
 	if (!results) { json_error(buf, size, status, 500, "Out of memory"); return; }
-	if (memory_recall(query ? query : "", results, MEMORY_RESULTS_MAX, limit > 0 ? limit : 20) != 0) {
+	agent_lock();
+	recall_rc = memory_recall(query ? query : "", results, MEMORY_RESULTS_MAX,
+				   limit > 0 ? limit : 20);
+	agent_unlock();
+	if (recall_rc != 0) {
 		free(results);
 		json_error(buf, size, status, 500, "Memory recall failed");
 		return;
@@ -481,7 +534,10 @@ static void handle_memory_get(const char *query, int limit, char *buf, size_t si
 static void handle_sessions_list(char *buf, size_t size, int *status)
 {
 	char *ids[64];
-	int n = session_list(ids, 64);
+	int n;
+	agent_lock();
+	n = session_list(ids, 64);
+	agent_unlock();
 	cJSON *arr = cJSON_CreateArray();
 	if (!arr) { json_error(buf, size, status, 500, "Internal error"); return; }
 	for (int i = 0; i < n; i++) {
@@ -500,7 +556,7 @@ static void handle_sessions_list(char *buf, size_t size, int *status)
 
 static void handle_session_delete(const char *id, char *buf, size_t size, int *status)
 {
-	if (session_delete(id) != 0) {
+	if (dispatch_delete_session(id) != 0) {
 		json_error(buf, size, status, 404, "Session not found");
 		return;
 	}
@@ -522,7 +578,9 @@ static void handle_cron_list(char *buf, size_t size, int *status)
 	int n;
 	int i;
 	if (!rows) { json_error(buf, size, status, 500, "Out of memory"); return; }
+	agent_lock();
 	n = cron_job_list(rows, 64);
+	agent_unlock();
 	if (n < 0) {
 		free(rows);
 		json_error(buf, size, status, 500, "Internal error");
@@ -580,7 +638,10 @@ static void handle_cron_create(const char *body, size_t body_len, char *buf, siz
 		id[0] = '\0';
 	const char *ch = (channel && cJSON_IsString(channel)) ? channel->valuestring : NULL;
 	const char *rec = (recipient && cJSON_IsString(recipient)) ? recipient->valuestring : NULL;
-	int ret = cron_create_job(schedule->valuestring, message->valuestring, ch, rec, id, sizeof(id));
+	int ret;
+	agent_lock();
+	ret = cron_create_job(schedule->valuestring, message->valuestring, ch, rec, id, sizeof(id));
+	agent_unlock();
 	cJSON_Delete(root);
 	if (ret != 0) {
 		json_error(buf, size, status, 400, "Failed to create job");
@@ -600,7 +661,11 @@ static void handle_cron_create(const char *body, size_t body_len, char *buf, siz
 
 static void handle_cron_delete(const char *id, char *buf, size_t size, int *status)
 {
-	if (cron_job_delete(id) != 0) {
+	int rc;
+	agent_lock();
+	rc = cron_job_delete(id);
+	agent_unlock();
+	if (rc != 0) {
 		json_error(buf, size, status, 404, "Job not found");
 		return;
 	}
@@ -610,7 +675,11 @@ static void handle_cron_delete(const char *id, char *buf, size_t size, int *stat
 
 static void handle_cron_toggle(const char *id, char *buf, size_t size, int *status)
 {
-	if (cron_job_toggle(id) != 0) {
+	int rc;
+	agent_lock();
+	rc = cron_job_toggle(id);
+	agent_unlock();
+	if (rc != 0) {
 		json_error(buf, size, status, 404, "Job not found");
 		return;
 	}
@@ -964,8 +1033,10 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		if (method != HTTP_GET) { json_error(buf, size, status, 405, "Method not allowed"); return 0; }
 		char qbuf[256] = {0};
 		char lbuf[32] = {0};
-		lws_get_urlarg_by_name_safe(wsi, "q", qbuf, sizeof(qbuf));
-		lws_get_urlarg_by_name_safe(wsi, "limit", lbuf, sizeof(lbuf));
+		if (wsi) {
+			lws_get_urlarg_by_name_safe(wsi, "q", qbuf, sizeof(qbuf));
+			lws_get_urlarg_by_name_safe(wsi, "limit", lbuf, sizeof(lbuf));
+		}
 		int limit = parse_memory_limit_arg(lbuf[0] ? lbuf : NULL);
 		handle_memory_get(qbuf[0] ? qbuf : NULL, limit, buf, size, status);
 		return 0;
