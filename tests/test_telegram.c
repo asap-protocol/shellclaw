@@ -285,6 +285,31 @@ static void test_vtable_fields_set(void)
 	MU_ASSERT(ch->cleanup != NULL, "cleanup not null");
 }
 
+/* An empty agent reply used to return -1 before any HTTP call. Cron treats
+ * that as a failed delivery and leaves next_run in the past, so the same job
+ * reruns the agent on every poll. Telegram would 400 an empty sendMessage,
+ * so the only successful outcome is to post nothing. */
+static void test_send_empty_text_succeeds(void)
+{
+	const channel_t *ch;
+	config_t *cfg = load_test_config("/tmp/test_tg_empty_send.toml", "42");
+	MU_ASSERT(cfg != NULL, "load config");
+	setenv("TG_TOK", "test-token", 1);
+	ch = channel_telegram_get();
+	MU_ASSERT(ch->init(cfg) == 0, "telegram init");
+	MU_ASSERT(ch->send("telegram:42", "", NULL, 0) == 0,
+		"empty reply to a chat id is not a delivery failure");
+	MU_ASSERT(ch->send("42", "", NULL, 0) == 0,
+		"empty reply to a raw chat id is not a delivery failure");
+	MU_ASSERT(ch->send("telegram:", "", NULL, 0) != 0,
+		"empty chat id still fails");
+	MU_ASSERT(ch->send(NULL, "", NULL, 0) != 0, "missing recipient still fails");
+	ch->cleanup();
+	unsetenv("TG_TOK");
+	config_free(cfg);
+	remove("/tmp/test_tg_empty_send.toml");
+}
+
 int main(void)
 {
 	MU_RUN(test_parse_valid_text_message);
@@ -298,6 +323,7 @@ MU_RUN(test_getupdates_url_requests_one_update);
 	MU_RUN(test_send_response_requires_ok);
 	MU_RUN(test_429_retry_after_parsed_and_capped);
 	MU_RUN(test_vtable_fields_set);
+	MU_RUN(test_send_empty_text_succeeds);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }

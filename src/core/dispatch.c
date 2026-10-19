@@ -36,7 +36,10 @@ static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_
 	if (!ch || !ch->send || !msg)
 		return -1;
 	send_err = ch->send(msg->session_id, text, NULL, 0);
-	if (send_err != 0)
+	/* An empty reply cannot be posted. A channel that still returns -1
+	 * must not skip the cron ack: the job would stay due and the agent,
+	 * tools included, would run again on every poll. */
+	if (send_err != 0 && !(text && text[0] == '\0'))
 		return send_err;
 	if (agent_err != 0)
 		return 0;

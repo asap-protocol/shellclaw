@@ -48,6 +48,10 @@ static int webchat_send(const char *recipient, const char *text,
 	(void)attachments;
 	(void)att_count;
 	if (!recipient || !text) return -1;
+	/* ws_send_to rejects a zero-length frame. Cron would treat that as a
+	 * failed delivery and rerun the agent. There is nothing to enqueue. */
+	if (text[0] == '\0')
+		return 0;
 	return ws_send_to(recipient, text);
 }
 

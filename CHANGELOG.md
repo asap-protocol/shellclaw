@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- An empty agent reply is a completed delivery for Telegram, Discord, and WebChat. Those channels reject an empty post, and treating that rejection as a failed send skipped the cron ack, so the job stayed due and reran the agent and its tools on every poll.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
