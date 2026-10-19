@@ -959,12 +959,16 @@ static int discord_send(const char *recipient, const char *text,
 	(void)attachments;
 	if (att_count > 0)
 		return -1;
-	if (!dc->token || !recipient || !text || text[0] == '\0')
+	if (!dc->token || !recipient || !text)
 		return -1;
 	/* A single REST message is capped at 2000 characters, so a longer
 	 * reply is delivered as several messages. */
 	if (discord_recipient_channel_id(recipient, ctx.channel_id, sizeof(ctx.channel_id)) != 0)
 		return -1;
+	/* Discord rejects an empty content body. A -1 here skips the cron ack
+	 * and the job reruns the agent on every poll. */
+	if (text[0] == '\0')
+		return 0;
 	if (snprintf(ctx.auth_hdr, sizeof(ctx.auth_hdr), "Authorization: Bot %s", dc->token) >=
 	    (int)sizeof(ctx.auth_hdr))
 		return -1;

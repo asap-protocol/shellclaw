@@ -471,7 +471,7 @@ static int tg_send(const char *recipient, const char *text,
 
 	(void)attachments;
 	(void)att_count;
-	if (!g_tg.initialized || !g_tg.token || !recipient || !text || text[0] == '\0')
+	if (!g_tg.initialized || !g_tg.token || !recipient || !text)
 		return -1;
 	chat_id = strchr(recipient, ':');
 	if (chat_id)
@@ -480,6 +480,10 @@ static int tg_send(const char *recipient, const char *text,
 		chat_id = recipient;
 	if (chat_id[0] == '\0')
 		return -1;
+	/* Telegram rejects an empty sendMessage. Returning -1 made cron skip
+	 * its ack, so a null model reply stayed due and reran the agent. */
+	if (text[0] == '\0')
+		return 0;
 	ctx.chat_id = chat_id;
 	ctx.posted_before = 0;
 	if (channel_send_chunked(text, TG_TEXT_MAX, tg_post_piece, &ctx, &fail) != 0) {

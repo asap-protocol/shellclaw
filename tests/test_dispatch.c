@@ -55,6 +55,9 @@ static int mock_send(const char *session_id, const char *text,
 	g_last_session[sizeof(g_last_session) - 1] = '\0';
 	strncpy(g_last_text, text ? text : "", sizeof(g_last_text) - 1);
 	g_last_text[sizeof(g_last_text) - 1] = '\0';
+	/* Telegram, Discord, and WebChat reject an empty post. */
+	if (!text || text[0] == '\0')
+		return -1;
 	return 0;
 }
 
@@ -123,6 +126,28 @@ static const provider_t fail_provider = {
 	.name = "fail",
 	.init = spy_init,
 	.chat = fail_chat,
+	.cleanup = spy_cleanup,
+};
+
+static int empty_chat(const provider_message_t *messages, size_t message_count,
+		      const provider_tool_def_t *tools, size_t tool_count,
+		      provider_response_t *response)
+{
+	(void)messages;
+	(void)message_count;
+	(void)tools;
+	(void)tool_count;
+	response->error = 0;
+	response->content = NULL;
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	return 0;
+}
+
+static const provider_t empty_provider = {
+	.name = "empty",
+	.init = spy_init,
+	.chat = empty_chat,
 	.cleanup = spy_cleanup,
 };
 
@@ -439,6 +464,51 @@ static int test_cron_agent_failure_does_not_ack(void)
 	return 0;
 }
 
+/* A finished cron turn whose model content is null (no tool calls, or the
+ * tool cap hit on a tool-call turn) must ack. Otherwise next_run stays due
+ * and the next poll reruns the agent. */
+static int test_cron_empty_reply_acks_job(void)
+{
+	const char *db_path = "build/test_dispatch_cron_empty.db";
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_cron_empty_XXXXXX";
+	channel_incoming_msg_t msg = {0};
+	config_t *cfg = NULL;
+	cron_job_row_t row;
+	long long due_at;
+	int fd;
+	reset_send_spy();
+	memory_cleanup();
+	remove(db_path);
+	ASSERT(memory_init(db_path) == 0);
+	due_at = (long long)time(NULL) - 1;
+	ASSERT(cron_job_create("cron_empty", "interval:60", "remind me", "telegram", "42",
+			       due_at, 1) == 0);
+	fd = mkstemp(tmpl);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	bootstrap_set_cfg(cfg);
+	bootstrap_set_provider_for_test(&empty_provider);
+	bootstrap_reset_tools_for_test();
+	msg.session_id = "telegram:42";
+	msg.user_id = "cron_empty";
+	msg.text = "remind me";
+	ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+	ASSERT(g_send_calls == 1);
+	ASSERT(g_last_text[0] == '\0');
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("cron_empty", &row) == 1);
+	ASSERT(row.next_run > due_at);
+	cron_job_row_free(&row);
+	config_free(cfg);
+	unlink(tmpl);
+	memory_cleanup();
+	remove(db_path);
+	return 0;
+}
+
 static int test_handle_message_holds_agent_mutex(void)
 {
 	channel_incoming_msg_t msg = {0};
@@ -502,6 +572,7 @@ int main(void)
 	RUN(test_handle_message_holds_agent_mutex());
 	RUN(test_cron_slash_commands_ack_jobs());
 	RUN(test_cron_agent_failure_does_not_ack());
+	RUN(test_cron_empty_reply_acks_job());
 	puts("test_dispatch OK");
 	return 0;
 }
