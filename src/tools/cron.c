@@ -181,13 +181,39 @@ int cron_is_one_shot(const char *schedule)
 	return strncmp(schedule, CRON_PREFIX_AT, strlen(CRON_PREFIX_AT)) == 0;
 }
 
+static const char *cron_delivery_channel(const char *channel)
+{
+	if (!channel || channel[0] == '\0')
+		return "cli";
+	return channel;
+}
+
+/** 1 when a poll can hand this job to a channel that has a send callback. */
+static int cron_target_can_deliver(const char *channel)
+{
+	const char *name = cron_delivery_channel(channel);
+	const channel_t *dest;
+
+	if (strcmp(name, "cron") == 0)
+		return 0;
+	dest = channel_get_by_name(name);
+	return dest && dest->send ? 1 : 0;
+}
+
 int cron_create_job(const char *schedule, const char *message,
                     const char *channel, const char *recipient,
                     char *id_out, size_t id_size)
 {
+	const char *ch;
+	const char *rec;
+
 	if (!schedule || !message || !id_out || id_size == 0) return -1;
-	const char *ch = channel ? channel : "cli";
-	const char *rec = recipient ? recipient : "default";
+	ch = channel ? channel : "cli";
+	rec = recipient ? recipient : "default";
+	/* An unregistered target fails in cron_send after agent_run, and the
+	 * skipped ack leaves next_run in the past so the job reruns forever. */
+	if (!cron_target_can_deliver(ch))
+		return -2;
 	if (id_out[0] == '\0') {
 		unsigned char rnd[2];
 		if (crypto_read_urandom(rnd, sizeof(rnd)) != 0) return -1;
@@ -382,6 +408,23 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 	return 1;
 }
 
+/** Drop a stored job that can never send, before the agent runs it. */
+static void cron_disable_undeliverable(const cron_job_row_t *row, int timeout_ms)
+{
+	int rc;
+
+	fprintf(stderr,
+		"shellclaw: cron: job '%s' channel '%s' cannot deliver; disabling it so a failed send cannot rerun the agent\n",
+		row->id, cron_delivery_channel(row->channel));
+	agent_lock();
+	rc = cron_job_set_enabled(row->id, 0);
+	agent_unlock();
+	/* A missed update leaves the row due. Remember the offer so the next poll
+	 * waits instead of spinning the scheduler on the same id. */
+	if (rc != 0)
+		cron_mark_offered(row->id, timeout_ms > 0 ? timeout_ms : 1000);
+}
+
 static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 {
 	cron_job_row_t row;
@@ -392,6 +435,11 @@ static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
 	memset(&row, 0, sizeof(row));
 	if (!cron_pick_due_row(now, timeout_ms, &row))
 		return 0;
+	if (!cron_target_can_deliver(row.channel)) {
+		cron_disable_undeliverable(&row, timeout_ms);
+		cron_job_row_free(&row);
+		return 0;
+	}
 	memset(out, 0, sizeof(*out));
 	snprintf(session_id, sizeof(session_id), "%s:%s",
 		row.channel[0] ? row.channel : "cli",
@@ -553,9 +601,13 @@ static int cron_tool_execute(const char *args_json, char *result_buf, size_t max
 			id[0] = '\0';
 		const char *ch = (channel && cJSON_IsString(channel)) ? channel->valuestring : NULL;
 		const char *rec = (recipient && cJSON_IsString(recipient)) ? recipient->valuestring : NULL;
-		if (cron_create_job(schedule->valuestring, message->valuestring, ch, rec, id, sizeof(id)) != 0) {
+		int created = cron_create_job(schedule->valuestring, message->valuestring, ch, rec, id,
+					      sizeof(id));
+		if (created != 0) {
 			cJSON_Delete(root);
-			snprintf(result_buf, max_len, "{\"error\":\"failed to create job\"}");
+			snprintf(result_buf, max_len, "%s",
+				 created == -2 ? "{\"error\":\"channel cannot deliver\"}"
+					       : "{\"error\":\"failed to create job\"}");
 			return -1;
 		}
 		snprintf(result_buf, max_len, "{\"ok\":true,\"id\":\"%s\"}", id);

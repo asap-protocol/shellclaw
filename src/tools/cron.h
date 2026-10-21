@@ -59,10 +59,11 @@ const tool_t *tool_cron_get(void);
  * @param schedule  Schedule string (interval:N, at:ts, or cron expression).
  * @param message   Message to inject when job fires.
  * @param channel   Target channel name (e.g., "cli"). NULL defaults to "cli".
+ *                  The name must be a registered channel other than "cron".
  * @param recipient Recipient ID. NULL defaults to "default".
  * @param id_out    Buffer for job ID. If non-empty on entry, used as-is; else generated.
  * @param id_size   Size of id_out buffer.
- * @return 0 on success, -1 on error.
+ * @return 0 on success, -2 if channel cannot deliver, -1 on any other error.
  */
 int cron_create_job(const char *schedule, const char *message,
                     const char *channel, const char *recipient,

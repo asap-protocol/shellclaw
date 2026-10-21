@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- Cron jobs whose channel cannot deliver (unknown name, a channel left disabled, or `cron` itself) are rejected at create time (`-2`). A row already stored with that channel is disabled on the next poll before `agent_run`. Previously `cron_send` failed after the full turn, ack was skipped, and the still-due job reran the model and its tools on every poll.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed

@@ -644,7 +644,8 @@ static void handle_cron_create(const char *body, size_t body_len, char *buf, siz
 	agent_unlock();
 	cJSON_Delete(root);
 	if (ret != 0) {
-		json_error(buf, size, status, 400, "Failed to create job");
+		json_error(buf, size, status, 400,
+			   ret == -2 ? "channel cannot deliver" : "Failed to create job");
 		return;
 	}
 	cJSON *resp_obj = cJSON_CreateObject();
