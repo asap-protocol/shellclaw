@@ -23,6 +23,21 @@ void provider_router_active_backend_snapshot(char *dst, size_t dst_sz)
 		dst[0] = '\0';
 }
 
+static int cron_test_deliver(const char *recipient, const char *text,
+			     const channel_attachment_t *attachments, size_t att_count)
+{
+	(void)recipient;
+	(void)text;
+	(void)attachments;
+	(void)att_count;
+	return 0;
+}
+
+static const channel_t cron_test_cli_channel = {
+	.name = "cli",
+	.send = cron_test_deliver,
+};
+
 static void cron_test_reset_offers(void)
 {
 	const channel_t *cron_ch = channel_cron_get();
@@ -754,8 +769,58 @@ static int test_cron_poll_delivers_17th_after_ack(void)
 	return 0;
 }
 
+/**
+ * A due job whose channel was never registered must not be handed to the agent.
+ * Send would fail, ack would be skipped, and the still-due row would rerun tools
+ * on every poll. Direct cron_job_create bypasses the create-time check, which is
+ * how an already stored row reaches this path.
+ */
+static int test_unregistered_channel_is_not_delivered(void)
+{
+	const char *path = "/tmp/shellclaw_test_cron_bad_channel.db";
+	const channel_t *cron_ch;
+	channel_incoming_msg_t msg;
+	cron_job_row_t row;
+	long long now;
+	char id[128];
+
+	cron_test_reset_offers();
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	now = (long long)time(NULL);
+	ASSERT(cron_job_create("ghost", "interval:60", "run the backup", "no-such-channel",
+			       "default", now - 1, 1) == 0);
+	cron_ch = channel_cron_get();
+	ASSERT(cron_ch != NULL && cron_ch->poll != NULL);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 0);
+	ASSERT(msg.text == NULL);
+	memset(&row, 0, sizeof(row));
+	ASSERT(cron_job_get_by_id("ghost", &row) == 1);
+	ASSERT(row.enabled == 0);
+	cron_job_row_free(&row);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 0);
+	id[0] = '\0';
+	ASSERT(cron_create_job("interval:60", "hi", "no-such-channel", "user", id, sizeof(id)) != 0);
+	ASSERT(cron_job_create("cli_ok", "interval:60", "still delivered", "cli", "default",
+			       now - 1, 1) == 0);
+	memset(&msg, 0, sizeof(msg));
+	ASSERT(cron_ch->poll(&msg, 0) == 1);
+	ASSERT(msg.text != NULL);
+	ASSERT(strcmp(msg.text, "still delivered") == 0);
+	ASSERT(msg.user_id != NULL);
+	ASSERT(strcmp(msg.user_id, "cli_ok") == 0);
+	channel_incoming_msg_clear(&msg);
+	cron_test_reset_offers();
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
+	channel_register("cli", &cron_test_cli_channel);
 	RUN(test_interval_next_run());
 	RUN(test_at_one_shot());
 	RUN(test_cron_expr_next_run());
@@ -781,6 +846,7 @@ int main(void)
 	RUN(test_cron_poll_waits_when_offer_table_is_full());
 	RUN(test_cron_poll_delivers_17th_after_ack());
 	RUN(test_cron_list_orders_ties_by_id());
+	RUN(test_unregistered_channel_is_not_delivered());
 	printf("test_cron: all tests passed\n");
 	return 0;
 }

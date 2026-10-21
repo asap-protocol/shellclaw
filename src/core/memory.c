@@ -462,6 +462,22 @@ int cron_job_toggle(const char *id)
 	return ret;
 }
 
+int cron_job_set_enabled(const char *id, int enabled)
+{
+	const char *sql = "UPDATE cron_jobs SET enabled = ?1 WHERE id = ?2 AND enabled != ?1";
+	sqlite3_stmt *stmt = NULL;
+	int ret;
+
+	if (!g_db || !id) return -1;
+	memory_sqlite_entry_probe();
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+	sqlite3_bind_int(stmt, 1, enabled ? 1 : 0);
+	sqlite3_bind_text(stmt, 2, id, -1, SQLITE_TRANSIENT);
+	ret = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_db) > 0) ? 0 : -1;
+	sqlite3_finalize(stmt);
+	return ret;
+}
+
 int cron_job_update_next_run(const char *id, long long next_run)
 {
 	if (!g_db || !id) return -1;

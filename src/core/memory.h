@@ -182,6 +182,18 @@ int cron_job_delete(const char *id);
 int cron_job_toggle(const char *id);
 
 /**
+ * Set the enabled flag to 0 or 1. Unlike cron_job_toggle(), this does not flip
+ * a row that already has the requested value.
+ *
+ * @param id      Job id.
+ * @param enabled 0 to disable, nonzero to enable.
+ * @return 0 when a row changes, non-zero if the job is missing or already set.
+ *
+ * Example: `cron_job_set_enabled("cron_1", 0);`
+ */
+int cron_job_set_enabled(const char *id, int enabled);
+
+/**
  * Update next_run for a job.
  *
  * @return 0 on success, non-zero on error.
