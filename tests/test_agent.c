@@ -2046,10 +2046,11 @@ static const provider_t keep_history_provider = {
 };
 
 /**
- * Concrete trigger: near-cap session JSON + fat assistant reply.
- * Before the fix, append truncated mid-JSON, session_save persisted corrupt
- * payload, and the next agent_run parse wiped history. After the fix, overflow
- * refuses to save and prior history remains parseable.
+ * Concrete trigger: near-cap session JSON (count still under max_context_messages)
+ * plus a fat assistant reply. A truncated save must not replace the row with
+ * invalid JSON. Dropping the new turn instead leaves the byte cap stuck, so
+ * every later turn is forgotten. The save stays valid JSON, keeps the newer
+ * stored turn, and persists this exchange by evicting the oldest message.
  */
 static int test_session_overflow_does_not_corrupt_history(void)
 {
@@ -2058,6 +2059,7 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	const char *db_path = "build/test_agent_overflow.db";
 	const char *config_path = "build/test_agent_overflow.toml";
 	const char *session_id = "cli:overflow";
+	const char *oldest = "OLDEST_TURN_SHOULD_DROP";
 	const char *marker = "UNIQUE_HISTORY_MARKER_xyz";
 	/* Two large messages keep msg_count under max_context so compaction does not shrink first. */
 	enum { PAD_A = 62 * 1024, PAD_B = 62 * 1024, LOAD_CAP = 130 * 1024 };
@@ -2079,12 +2081,12 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	pad_a[PAD_A] = '\0';
 	memset(pad_b, 'B', PAD_B);
 	pad_b[PAD_B] = '\0';
-	need = strlen(marker) + PAD_A + PAD_B + 128;
+	need = strlen(oldest) + strlen(marker) + PAD_A + PAD_B + 128;
 	session_json = malloc(need);
 	if (!session_json) goto cleanup;
 	off = (size_t)snprintf(session_json, need,
-		"[{\"role\":\"user\",\"content\":\"%s%s\"},{\"role\":\"assistant\",\"content\":\"%s\"}]",
-		marker, pad_a, pad_b);
+		"[{\"role\":\"user\",\"content\":\"%s%s\"},{\"role\":\"assistant\",\"content\":\"%s%s\"}]",
+		oldest, pad_a, marker, pad_b);
 	if (off == 0 || off >= need) goto cleanup;
 	if (session_save(session_id, session_json) != 0) goto cleanup;
 
@@ -2120,6 +2122,14 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	}
 	cJSON_Delete(parsed);
 	if (strstr(loaded, marker) == NULL) goto cleanup;
+	if (strstr(loaded, "push over the limit") == NULL) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: overflow dropped the new turn\n");
+		goto cleanup;
+	}
+	if (strstr(loaded, oldest) != NULL) {
+		fprintf(stderr, "FAIL: tests/test_agent.c: overflow kept the oldest turn and cannot fit\n");
+		goto cleanup;
+	}
 
 	/* Next turn must still see prior history (not wiped to empty []). */
 	spy_roles_clear();
