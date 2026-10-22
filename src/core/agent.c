@@ -515,6 +515,35 @@ static void free_tool_calls_copy(const provider_tool_call_t *copy, size_t n)
 	free(owned);
 }
 
+/** Print @p arr, dropping oldest messages until the text fits in @p out_size.
+ *  Compaction is count-based, so a few long turns fill the byte cap while the
+ *  message count is still under max_context_messages. Refusing the save then
+ *  drops every later exchange and the session never shrinks. The newest
+ *  @p keep_tail messages (this turn) stay. Caller frees the returned cJSON string.
+ */
+static char *session_array_print_fitting(cJSON *arr, size_t out_size, int keep_tail,
+	const char *session_id)
+{
+	char *printed;
+	int dropped = 0;
+
+	if (!arr || out_size == 0 || keep_tail < 1)
+		return NULL;
+	printed = cJSON_PrintUnformatted(arr);
+	while (printed && strlen(printed) >= out_size && cJSON_GetArraySize(arr) > keep_tail) {
+		cJSON_DeleteItemFromArray(arr, 0);
+		cJSON_free(printed);
+		printed = cJSON_PrintUnformatted(arr);
+		dropped++;
+	}
+	if (dropped > 0) {
+		fprintf(stderr,
+			"agent: dropped %d oldest session message(s) to fit cap session_id=%s\n",
+			dropped, session_id ? session_id : "");
+	}
+	return printed;
+}
+
 /** Append user+assistant exchange to session JSON. Invalid or empty existing becomes []. */
 static int append_exchange_to_session_json(const char *existing_json, const char *user_message,
 	const char *assistant_content, char *out_buf, size_t out_size, const char *session_id)
@@ -527,6 +556,7 @@ static int append_exchange_to_session_json(const char *existing_json, const char
 			arr = NULL;
 		}
 	}
+	int added = 0;
 	if (!arr) arr = cJSON_CreateArray();
 	if (!arr) return -1;
 	cJSON *user_obj = cJSON_CreateObject();
@@ -534,14 +564,20 @@ static int append_exchange_to_session_json(const char *existing_json, const char
 		cJSON_AddItemToObject(user_obj, "role", cJSON_CreateString("user"));
 		cJSON_AddItemToObject(user_obj, "content", cJSON_CreateString(user_message ? user_message : ""));
 		cJSON_AddItemToArray(arr, user_obj);
+		added++;
 	}
 	cJSON *asst_obj = cJSON_CreateObject();
 	if (asst_obj) {
 		cJSON_AddItemToObject(asst_obj, "role", cJSON_CreateString("assistant"));
 		cJSON_AddItemToObject(asst_obj, "content", cJSON_CreateString(assistant_content ? assistant_content : ""));
 		cJSON_AddItemToArray(arr, asst_obj);
+		added++;
 	}
-	char *printed = cJSON_PrintUnformatted(arr);
+	if (added == 0) {
+		cJSON_Delete(arr);
+		return -1;
+	}
+	char *printed = session_array_print_fitting(arr, out_size, added, session_id);
 	cJSON_Delete(arr);
 	return copy_printed_session_json(out_buf, out_size, printed, session_id);
 }

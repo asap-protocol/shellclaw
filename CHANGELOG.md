@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- Session saves that exceed the 128 KiB transcript cap drop the oldest messages instead of skipping the write. Compaction only runs once the message count passes `max_context_messages`, so a few long turns used to fill the byte cap and every later exchange was forgotten while the old transcript stayed in place.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
