@@ -300,7 +300,7 @@ This section summarizes Jetson Orin Nano Super / JetPack 6.2.x concerns that do 
 |------|------------------|----------------------------|
 | Sandbox isolation | [`src/sandbox/sandbox.c`](../src/sandbox/sandbox.c), [`src/sandbox/sandbox_landlock.c`](../src/sandbox/sandbox_landlock.c) | user ns + `unshare` + PID-1 fork, Landlock workspace bound, cgroups v2, fail-closed isolation |
 | Command policy | [`src/sandbox/allowlist.c`](../src/sandbox/allowlist.c) | Blocklist (incl. Jetson GPU + Argus), workspace path containment (DiD) |
-| Gateway auth | [`src/gateway/http_lws.c`](../src/gateway/http_lws.c) | `requires_auth()` Bearer gate for `/api/*` |
+| Gateway auth | [`src/gateway/http_lws.c`](../src/gateway/http_lws.c) | `requires_auth()` Bearer gate for `/api/*`; WebSocket upgrade checks the pairing token on HTTP `CONFIRM_UPGRADE` and ws `FILTER_PROTOCOL_CONNECTION` |
 | Hardware HTTP API | [`src/gateway/routes_hardware.c`](../src/gateway/routes_hardware.c) | Read-only GET handlers, camera POST deferred stub |
 | Rate limits | [`src/gateway/rate_limit.c`](../src/gateway/rate_limit.c) | Per-IP `/asap` RPM (64-slot table); reuses expired windows; **fail-closed** (429) when table is full and no slot expired |
 | Camera spawn | [`src/hardware/hardware_camera.c`](../src/hardware/hardware_camera.c) | argv-only `execvp`, validated resolution/type/path |
