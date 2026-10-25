@@ -25,6 +25,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -1614,6 +1615,118 @@ static int test_api_hardware_camera_deferred(const char *token)
 	return 0;
 }
 
+/* HTTP status from a /ws upgrade, or 0 when the peer closes with no status line. */
+static int ws_upgrade_read_status(int fd)
+{
+	struct pollfd pfd;
+	char resp[256];
+	size_t got;
+	ssize_t n;
+
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	got = 0;
+	resp[0] = '\0';
+	while (got + 1 < sizeof(resp)) {
+		if (poll(&pfd, 1, 2000) <= 0)
+			break;
+		n = recv(fd, resp + got, sizeof(resp) - 1 - got, 0);
+		if (n <= 0)
+			break;
+		got += (size_t)n;
+		resp[got] = '\0';
+		if (memchr(resp, '\n', got) != NULL)
+			break;
+	}
+	if (strncmp(resp, "HTTP/1.1 ", 9) != 0 && strncmp(resp, "HTTP/1.0 ", 9) != 0)
+		return 0;
+	return atoi(resp + 9);
+}
+
+static int ws_upgrade_append(char *req, size_t cap, int used, const char *line)
+{
+	int n;
+
+	if (used < 0 || (size_t)used >= cap)
+		return -1;
+	n = snprintf(req + used, cap - (size_t)used, "%s", line);
+	if (n < 0 || (size_t)used + (size_t)n >= cap)
+		return -1;
+	return used + n;
+}
+
+static int ws_upgrade_http_status(int port, const char *protocol, const char *bearer)
+{
+	int fd;
+	int used;
+	struct sockaddr_in addr;
+	char req[768];
+	char line[320];
+
+	fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0)
+		return -1;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons((uint16_t)port);
+	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+		close(fd);
+		return -1;
+	}
+	used = snprintf(req, sizeof(req),
+	                "GET /ws HTTP/1.1\r\n"
+	                "Host: 127.0.0.1:%d\r\n"
+	                "Upgrade: websocket\r\n"
+	                "Connection: Upgrade\r\n"
+	                "Sec-WebSocket-Version: 13\r\n"
+	                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+	                port);
+	if (protocol) {
+		snprintf(line, sizeof(line), "Sec-WebSocket-Protocol: %s\r\n", protocol);
+		used = ws_upgrade_append(req, sizeof(req), used, line);
+	}
+	if (bearer) {
+		snprintf(line, sizeof(line), "Authorization: Bearer %s\r\n", bearer);
+		used = ws_upgrade_append(req, sizeof(req), used, line);
+	}
+	used = ws_upgrade_append(req, sizeof(req), used, "\r\n");
+	if (used < 0 || send(fd, req, (size_t)used, 0) != used) {
+		close(fd);
+		return -1;
+	}
+	used = ws_upgrade_read_status(fd);
+	close(fd);
+	return used;
+}
+
+static int test_ws_upgrade_requires_token(int port, const char *token)
+{
+	char proto[160];
+	int status;
+
+	status = ws_upgrade_http_status(port, "ws", NULL);
+	ASSERT(status != 101);
+	status = ws_upgrade_http_status(port, NULL, NULL);
+	ASSERT(status != 101);
+	snprintf(proto, sizeof(proto), "bearer.%s", token);
+	status = ws_upgrade_http_status(port, proto, NULL);
+	ASSERT(status != 101);
+	snprintf(proto, sizeof(proto), "ws, bearer.%s", token);
+	status = ws_upgrade_http_status(port, proto, NULL);
+	ASSERT(status == 101);
+	snprintf(proto, sizeof(proto), "bearer.%s, ws", token);
+	status = ws_upgrade_http_status(port, proto, NULL);
+	ASSERT(status == 101);
+	status = ws_upgrade_http_status(port, "ws, bearer.not-the-token", NULL);
+	ASSERT(status != 101);
+	status = ws_upgrade_http_status(port, "ws", token);
+	ASSERT(status == 101);
+	status = ws_upgrade_http_status(port, "ws", "not-the-token");
+	ASSERT(status != 101);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	(void)argc;
@@ -1818,6 +1931,10 @@ int main(int argc, char **argv)
 		}
 		if (test_api_hardware_camera_deferred(token) != 0) {
 			fprintf(stderr, "test_api_hardware_camera_deferred failed\n");
+			failed++;
+		}
+		if (test_ws_upgrade_requires_token(port, token) != 0) {
+			fprintf(stderr, "test_ws_upgrade_requires_token failed\n");
 			failed++;
 		}
 	}

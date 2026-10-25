@@ -63,7 +63,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR workflow, coding standards, and th
 
 **Jetson install (v1.0):** `./scripts/install.sh`, `./scripts/build_llama_jetson.sh`, `./scripts/download_model.sh phi3` — details in [`docs/HARDWARE_JETSON.md`](docs/HARDWARE_JETSON.md) and [`docs/LOCAL_INFERENCE.md`](docs/LOCAL_INFERENCE.md).
 
-**WebSocket auth (breaking vs early gateway builds):** browsers cannot send `Authorization` on WebSocket; use subprotocol `bearer.<pairing-token>` when opening `/ws` (see `web/js/app.js`).
+**WebSocket auth:** browsers cannot send `Authorization` on WebSocket. Offer the registered subprotocol `ws` together with `bearer.<pairing-token>` (see `web/js/app.js`). `bearer.<token>` alone is not a protocol libwebsockets will select, and `ws` alone is rejected without a valid pairing token. Non-browser clients may send `Authorization: Bearer <token>` with subprotocol `ws`.
 
 **Debug (macOS):** Symbols in `tests-dSYM/`. Use `lldb build/test_agent` then `settings set target.debug-file-search-path tests-dSYM`. Old `.dSYM` in repo root? Run `make clean-root-dsym`.
 

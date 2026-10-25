@@ -129,41 +129,89 @@ const char *http_request_bearer_token(struct lws *wsi, char *buf, size_t buf_siz
 	return buf + 7;
 }
 
-/** WebSocket upgrade: Bearer from Authorization (or custom header); browser may send bearer.<token> subprotocol. */
-static int ws_copy_upgrade_token(struct lws *wsi, char *token_out, size_t token_size)
+static int copy_token_text(const char *src, size_t len, char *token_out, size_t token_size)
 {
-	char auth_buf[256];
-	const char *token;
-	if (!wsi || !token_out || token_size == 0) return -1;
-	token_out[0] = '\0';
-	token = http_request_bearer_token(wsi, auth_buf, sizeof(auth_buf));
-	if (!token) {
-		int n = lws_hdr_custom_copy(wsi, auth_buf, sizeof(auth_buf), "authorization", 13);
-		if (n > 7 && strncmp(auth_buf, "Bearer ", 7) == 0)
-			token = auth_buf + 7;
-	}
-	if (token && token[0] != '\0') {
-		size_t len = strlen(token);
-		if (len >= token_size) len = token_size - 1;
-		memcpy(token_out, token, len);
-		token_out[len] = '\0';
-		return 0;
-	}
-	{
-		char proto[512];
-		int n = lws_hdr_copy(wsi, proto, sizeof(proto), WSI_TOKEN_COLON_PROTOCOL);
-		if (n <= 0)
-			n = lws_hdr_custom_copy(wsi, proto, sizeof(proto), "sec-websocket-protocol", 22);
-		if (n > 7 && strncmp(proto, "bearer.", 7) == 0) {
-			const char *sub = proto + 7;
-			size_t len = (size_t)(n - 7);
-			if (len >= token_size) len = token_size - 1;
-			memcpy(token_out, sub, len);
-			token_out[len] = '\0';
-			return token_out[0] != '\0' ? 0 : -1;
-		}
+	if (!src || len == 0 || !token_out || token_size == 0)
+		return -1;
+	/* A truncated token must not be checked: validation is an exact match. */
+	if (len >= token_size)
+		return -1;
+	memcpy(token_out, src, len);
+	token_out[len] = '\0';
+	return token_out[0] != '\0' ? 0 : -1;
+}
+
+/** `bearer.<token>` may sit anywhere in the comma-separated subprotocol list. */
+static int token_from_bearer_list(const char *list, int list_len,
+                                  char *token_out, size_t token_size)
+{
+	const char *p;
+	const char *end;
+
+	if (!list || list_len <= 0)
+		return -1;
+	p = list;
+	end = list + list_len;
+	while (p < end) {
+		const char *comma;
+		const char *stop;
+		size_t len;
+
+		while (p < end && (*p == ' ' || *p == '\t' || *p == ','))
+			p++;
+		if (p >= end)
+			break;
+		comma = memchr(p, ',', (size_t)(end - p));
+		stop = comma ? comma : end;
+		while (stop > p && (stop[-1] == ' ' || stop[-1] == '\t'))
+			stop--;
+		len = (size_t)(stop - p);
+		if (len > 7 && memcmp(p, "bearer.", 7) == 0)
+			return copy_token_text(p + 7, len - 7, token_out, token_size);
+		p = comma ? comma + 1 : end;
 	}
 	return -1;
+}
+
+/**
+ * Pairing token for a WebSocket upgrade.
+ * Browsers cannot set Authorization, so they offer `ws` (the registered
+ * protocol) and `bearer.<token>` in Sec-WebSocket-Protocol. The token is
+ * not only a prefix: lws selects the first name it knows (`ws`).
+ */
+static int ws_copy_upgrade_token(struct lws *wsi, char *token_out, size_t token_size)
+{
+	char hdr[512];
+	const char *token;
+	int n;
+
+	if (!wsi || !token_out || token_size == 0)
+		return -1;
+	token_out[0] = '\0';
+	token = http_request_bearer_token(wsi, hdr, sizeof(hdr));
+	if (token && token[0] != '\0')
+		return copy_token_text(token, strlen(token), token_out, token_size);
+	n = lws_hdr_copy(wsi, hdr, (int)sizeof(hdr), WSI_TOKEN_PROTOCOL);
+	if (n <= 0)
+		n = lws_hdr_custom_copy(wsi, hdr, (int)sizeof(hdr),
+		                        "sec-websocket-protocol", 22);
+	if (n > 0 && token_from_bearer_list(hdr, n, token_out, token_size) == 0)
+		return 0;
+	return -1;
+}
+
+/** 1 when this upgrade carries a stored pairing token. */
+static int ws_upgrade_allowed(struct lws *wsi)
+{
+	http_server_ctx_t *ctx;
+	char token_buf[256];
+
+	ctx = http_ctx_get();
+	if (!ctx || !ctx->auth)
+		return 0;
+	if (ws_copy_upgrade_token(wsi, token_buf, sizeof(token_buf)) != 0)
+		return 0;
+	return auth_validate_token(ctx->auth, token_buf) ? 1 : 0;
 }
 
 static int is_static_path(const char *uri, int uri_len, int method)
@@ -395,6 +443,13 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		}
 		return 0;
 	}
+	case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE:
+		/* lws 4.3 calls this on the HTTP protocol (protocols[0]) before
+		 * it binds "ws". The same case on ws_callback never runs, so an
+		 * upgrade of Sec-WebSocket-Protocol: ws was accepted with no token. */
+		if (!ws_upgrade_allowed(wsi))
+			return -1;
+		return 0;
 	case LWS_CALLBACK_CLOSED_HTTP: {
 		http_conn_t *conn = lws_wsi_user(wsi);
 		if (conn) {
@@ -434,18 +489,16 @@ static void ws_on_writable(struct lws *wsi, int conn_id)
 int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                       void *in, size_t len)
 {
-	http_server_ctx_t *ctx = http_ctx_get();
 	(void)user;
 	switch (reason) {
-	case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE: {
-		char token_buf[256] = {0};
-		if (!ctx || !ctx->auth) return -1;
-		if (ws_copy_upgrade_token(wsi, token_buf, sizeof(token_buf)) != 0)
-			return -1;
-		if (!auth_validate_token(ctx->auth, token_buf))
+	case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE:
+	case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
+		/* FILTER runs on the ws protocol after lws selects it, still
+		 * before the 101. CONFIRM on this callback is unused on lws 4.3
+		 * (it is delivered to http_callback) and stays as a backstop. */
+		if (!ws_upgrade_allowed(wsi))
 			return -1;
 		return 0;
-	}
 	case LWS_CALLBACK_ESTABLISHED: {
 		int conn_id = ws_next_conn_id();
 		lws_set_wsi_user(wsi, (void *)(intptr_t)conn_id);

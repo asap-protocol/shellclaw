@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Security
+- WebSocket upgrade requires a pairing token. libwebsockets 4.3 delivers `LWS_CALLBACK_HTTP_CONFIRM_UPGRADE` on the HTTP protocol, so the check on the `ws` callback never ran and `Sec-WebSocket-Protocol: ws` was accepted with no token (the socket can inject WebChat messages into the agent). The dashboard offered only `bearer.<token>`, which is not a registered protocol, so that handshake never completed. Clients offer `ws` and `bearer.<token>`, or send `Authorization: Bearer` with subprotocol `ws`.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
