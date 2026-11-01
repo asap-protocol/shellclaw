@@ -285,6 +285,91 @@ static int http_get(const char *url, long *code_out, char **body_out)
 	return (res == CURLE_OK) ? 0 : -1;
 }
 
+struct http_raw_body {
+	unsigned char data[65536];
+	size_t len;
+};
+
+static size_t write_raw_cb(char *ptr, size_t size, size_t nmemb, void *user)
+{
+	struct http_raw_body *body = user;
+	size_t total = size * nmemb;
+
+	if (!body || body->len + total > sizeof(body->data))
+		return 0;
+	memcpy(body->data + body->len, ptr, total);
+	body->len += total;
+	return total;
+}
+
+static int http_get_raw(const char *url, long *code_out, struct http_raw_body *body,
+			curl_off_t *cl_out)
+{
+	CURL *curl;
+	CURLcode res;
+	long code = 0;
+	curl_off_t cl = -1;
+
+	if (!body)
+		return -1;
+	curl = curl_easy_init();
+	if (!curl)
+		return -1;
+	body->len = 0;
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_raw_cb);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, body);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+	curl_easy_setopt(curl, CURLOPT_HTTP_CONTENT_DECODING, 0L);
+	res = curl_easy_perform(curl);
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+	curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+	curl_easy_cleanup(curl);
+	if (code_out)
+		*code_out = code;
+	if (cl_out)
+		*cl_out = cl;
+	return (res == CURLE_OK) ? 0 : -1;
+}
+
+static int raw_body_is_full_gzip(const struct http_raw_body *body, long code,
+				 curl_off_t cl)
+{
+	if (!body || code != 200 || cl <= 4096)
+		return 0;
+	if (body->len != (size_t)cl || body->len < 2)
+		return 0;
+	return body->data[0] == 0x1f && body->data[1] == 0x8b;
+}
+
+/* Static HTTP sends at most 4096 bytes per writable callback. These scripts
+ * gzip larger than that, so a stalled callback returns a short body. */
+static int test_static_js_body_completes(void)
+{
+	static const char *paths[] = { "/js/app.js", "/js/hardware.js" };
+	struct http_raw_body *body;
+	size_t i;
+
+	body = calloc(1, sizeof(*body));
+	if (!body)
+		return 1;
+	for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		long code = 0;
+		curl_off_t cl = -1;
+		int rc = http_get_raw(gw_url(paths[i]), &code, body, &cl);
+
+		if (rc != 0 || !raw_body_is_full_gzip(body, code, cl)) {
+			fprintf(stderr,
+				"static %s incomplete rc=%d code=%ld cl=%lld len=%zu\n",
+				paths[i], rc, code, (long long)cl, body->len);
+			free(body);
+			return 1;
+		}
+	}
+	free(body);
+	return 0;
+}
+
 static int http_post(const char *url, const char *json, long *code_out, char **body_out)
 {
 	return http_post_raw(url, json, json ? strlen(json) : 0, NULL, code_out, body_out);
@@ -1713,6 +1798,10 @@ int main(int argc, char **argv)
 		failed++;
 	}
 	if (test_health() != 0) { fprintf(stderr, "test_health failed\n"); failed++; }
+	if (test_static_js_body_completes() != 0) {
+		fprintf(stderr, "test_static_js_body_completes failed\n");
+		failed++;
+	}
 	if (test_pair(pairing_code, token, sizeof(token)) != 0) {
 		fprintf(stderr, "test_pair failed\n");
 		failed++;

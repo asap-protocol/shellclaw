@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- Gateway static responses continue across HTTP writable callbacks. The dashboard and hardware scripts gzip past the 4096-byte chunk, and the first chunk was the last one sent, so the browser waited on `Content-Length` and the UI never started.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
