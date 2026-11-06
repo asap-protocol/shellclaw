@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- Session compaction that folds a summary into an assistant line now retags that line as `user` and merges a following user turn, so an odd `max_context_messages` cannot send an assistant-first transcript. Anthropic rejects that shape with HTTP 400, the router stops, and the unsaved turn is rebuilt on every later message.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
