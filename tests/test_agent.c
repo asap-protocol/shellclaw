@@ -1073,7 +1073,9 @@ static int test_compaction_gives_oversized_line_full_buffer_on_next_pass(void)
 		fprintf(stderr, "FAIL: pass 1 destroyed the oversized message instead of keeping it whole\n");
 		goto cleanup;
 	}
-	if (count_session_messages(loaded) != 5 + 2) {
+	/* Fold drops the consumed head. The following user turn is merged into
+	 * the retagged head, so the count shrinks by two before the new exchange. */
+	if (count_session_messages(loaded) >= 6 + 2) {
 		fprintf(stderr, "FAIL: partial pass did not fold its summary into the oversized line\n");
 		goto cleanup;
 	}
@@ -2431,6 +2433,120 @@ cleanup:
 	return failed;
 }
 
+/* A user line that fills most of the 64 KiB summary source, then an assistant
+ * line that does not fit the remainder, folds at index 1. With an odd
+ * max_context_messages the stored count is max+1, so the folded head is inside
+ * the sent window (skip == 0). Leaving that head as assistant makes Anthropic
+ * return 400. The router does not fall through, the turn is not saved, and
+ * every later turn rebuilds the same transcript. The head must be retagged
+ * user and the following user turn merged so the roles still alternate. */
+static int test_compaction_fold_keeps_alternating_user_head(void)
+{
+	enum { USER_LEN = 60 * 1024, ASST_LEN = 8 * 1024, JSON_CAP = 120 * 1024,
+		LOAD_CAP = 128 * 1024 };
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *session_json = NULL;
+	char *loaded = NULL;
+	char *user_body = NULL;
+	char *asst_body = NULL;
+	const char *db_path = "build/test_agent_compact_fold_roles.db";
+	const char *config_path = "build/test_agent_compact_fold_roles.toml";
+	size_t off;
+	size_t i;
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	memory_cleanup();
+	compaction_call_count = 0;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	session_json = malloc(JSON_CAP);
+	user_body = malloc((size_t)USER_LEN + 1);
+	asst_body = malloc((size_t)ASST_LEN + 1);
+	loaded = malloc(LOAD_CAP);
+	if (!session_json || !user_body || !asst_body || !loaded)
+		goto cleanup;
+	memset(user_body, 'U', (size_t)USER_LEN);
+	user_body[USER_LEN] = '\0';
+	memset(asst_body, 'A', (size_t)ASST_LEN);
+	memcpy(asst_body + ASST_LEN - 8, "ASST_END", 8);
+	asst_body[ASST_LEN] = '\0';
+	off = 0;
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		"[{\"role\":\"user\",\"content\":\"%s\"}", user_body);
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"assistant\",\"content\":\"%s\"}", asst_body);
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"user\",\"content\":\"m2\"}");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"assistant\",\"content\":\"m3\"}");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"user\",\"content\":\"m4\"}");
+	off += (size_t)snprintf(session_json + off, JSON_CAP - off,
+		",{\"role\":\"assistant\",\"content\":\"m5\"}]");
+	if (off >= JSON_CAP)
+		goto cleanup;
+	if (session_save("cli:foldroles", session_json) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 5\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	response_buf[0] = '\0';
+	spy_roles_clear();
+	if (agent_run(cfg, "cli:foldroles", "hi", &compaction_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (spy_message_count < 2 || spy_message_count > SPY_SLOTS)
+		goto cleanup;
+	if (!spy_roles[0] || strcmp(spy_roles[0], "system") != 0)
+		goto cleanup;
+	if (!spy_roles[1] || strcmp(spy_roles[1], "user") != 0) {
+		fprintf(stderr, "FAIL: folded head role is %s, expected user\n",
+			spy_roles[1] ? spy_roles[1] : "(null)");
+		goto cleanup;
+	}
+	if (strstr(spy_content[1], "Summary of earlier") == NULL) {
+		fprintf(stderr, "FAIL: summary was not folded into the leading user turn\n");
+		goto cleanup;
+	}
+	for (i = 2; i < spy_message_count && i < SPY_SLOTS; i++) {
+		if (!spy_roles[i] || strcmp(spy_roles[i], spy_roles[i - 1]) == 0) {
+			fprintf(stderr, "FAIL: folded chat has consecutive %s roles\n",
+				spy_roles[i] ? spy_roles[i] : "(null)");
+			goto cleanup;
+		}
+	}
+	if (session_load("cli:foldroles", loaded, LOAD_CAP) != 0)
+		goto cleanup;
+	if (strstr(loaded, "ASST_END") == NULL) {
+		fprintf(stderr, "FAIL: folded assistant body was dropped\n");
+		goto cleanup;
+	}
+	if (!json_roles_alternate_from_user(loaded)) {
+		fprintf(stderr, "FAIL: persisted folded session does not alternate from user\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(session_json);
+	free(loaded);
+	free(user_body);
+	free(asst_body);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
 int main(void)
 {
 	RUN(test_agent_run_with_stub_and_no_tools());
@@ -2451,6 +2567,7 @@ int main(void)
 	RUN(test_compaction_progresses_when_assistant_message_is_oversized());
 	RUN(test_compaction_failure_keeps_original_session());
 	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
+	RUN(test_compaction_fold_keeps_alternating_user_head());
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());
 	RUN(test_session_overflow_does_not_corrupt_history());

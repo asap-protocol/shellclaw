@@ -228,6 +228,109 @@ static int append_summary_user(cJSON *arr, const char *summary)
 	return 0;
 }
 
+static int message_role_is(const cJSON *item, const char *role)
+{
+	const cJSON *r;
+
+	r = item ? cJSON_GetObjectItem(item, "role") : NULL;
+	return cJSON_IsString(r) && r->valuestring && role &&
+		strcmp(r->valuestring, role) == 0;
+}
+
+static const char *message_text(const cJSON *item)
+{
+	const cJSON *c;
+
+	c = item ? cJSON_GetObjectItem(item, "content") : NULL;
+	if (c && cJSON_IsString(c) && c->valuestring)
+		return c->valuestring;
+	return "";
+}
+
+static int set_message_role(cJSON *item, const char *role)
+{
+	cJSON *node;
+
+	node = cJSON_CreateString(role ? role : "");
+	if (!node)
+		return -1;
+	if (cJSON_GetObjectItem(item, "role")) {
+		if (!cJSON_ReplaceItemInObject(item, "role", node)) {
+			cJSON_Delete(node);
+			return -1;
+		}
+		return 0;
+	}
+	if (!cJSON_AddItemToObject(item, "role", node)) {
+		cJSON_Delete(node);
+		return -1;
+	}
+	return 0;
+}
+
+/** Append @p extra after the message body. The summary fold prepends; this
+ *  joins the next user turn so two user roles are not sent in a row. */
+static int append_message_text(cJSON *item, const char *extra)
+{
+	const char *old;
+	char *merged;
+	cJSON *node;
+	size_t old_len;
+	size_t extra_len;
+	size_t n;
+
+	old = message_text(item);
+	extra = extra ? extra : "";
+	old_len = strlen(old);
+	extra_len = strlen(extra);
+	if (extra_len > SIZE_MAX - old_len - 3)
+		return -1;
+	n = old_len + 2 + extra_len + 1;
+	merged = malloc(n);
+	if (!merged)
+		return -1;
+	snprintf(merged, n, "%s\n\n%s", old, extra);
+	node = cJSON_CreateString(merged);
+	free(merged);
+	if (!node)
+		return -1;
+	if (cJSON_GetObjectItem(item, "content")) {
+		if (!cJSON_ReplaceItemInObject(item, "content", node)) {
+			cJSON_Delete(node);
+			return -1;
+		}
+		return 0;
+	}
+	if (!cJSON_AddItemToObject(item, "content", node)) {
+		cJSON_Delete(node);
+		return -1;
+	}
+	return 0;
+}
+
+/** Anthropic rejects a transcript whose first message is not user, and rejects
+ *  two user turns in a row. HTTP 4xx stops the router, the turn is not saved,
+ *  and the next turn rebuilds the same chat. A fold into a non-user head used
+ *  to leave that role in place. Retag it and merge one following user turn. */
+static int normalize_folded_non_user_head(cJSON *arr)
+{
+	cJSON *head;
+	cJSON *next;
+
+	head = cJSON_GetArrayItem(arr, 0);
+	if (!head || set_message_role(head, "user") != 0)
+		return -1;
+	cJSON_DeleteItemFromObject(head, "tool_use_id");
+	next = cJSON_GetArrayItem(arr, 1);
+	if (!next || !message_role_is(next, "user") ||
+	    cJSON_GetObjectItem(next, "tool_use_id"))
+		return 0;
+	if (append_message_text(head, message_text(next)) != 0)
+		return -1;
+	cJSON_DeleteItemFromArray(arr, 1);
+	return 0;
+}
+
 /** Summarize oldest messages when over max_ctx; replace with one summary + trailing.
  *  Messages that do not fit in the summary source stay in the session. */
 static int compact_session_via_llm(const char *session_id, char *session_buf, size_t session_buf_size,
@@ -318,10 +421,10 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	int folded = 0;
 	if (start < 0) start = 0;
 	/* Tail can start on a user turn (odd max_context_messages, or a cut that
-	 * lands on user). Inserting another user role makes Anthropic reject the
-	 * session on this turn and every later one. fold_into_oversized breaks on
-	 * that rule for the line that stopped the pass: it is not a user turn, so
-	 * the summary folds into it instead of a prepended wrapper (see the loop). */
+	 * lands on user). A second user role makes Anthropic reject the session
+	 * on this turn and every later one. A non-user line that stops the pass
+	 * folds the summary into itself; normalize_folded_non_user_head retags
+	 * that head to user so an odd max_ctx does not send assistant first. */
 	merge = kept_tail_starts_with_user(root, start);
 	if (!new_arr) { cJSON_Delete(root); return -1; }
 	if (!merge && !fold_into_oversized && append_summary_user(new_arr, summary_buf) != 0) {
@@ -347,6 +450,12 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 		cJSON_AddItemToArray(new_arr, dup);
 	}
 	if ((merge || fold_into_oversized) && !folded) {
+		cJSON_Delete(new_arr);
+		cJSON_Delete(root);
+		return -1;
+	}
+	if (fold_into_oversized && !merge &&
+	    normalize_folded_non_user_head(new_arr) != 0) {
 		cJSON_Delete(new_arr);
 		cJSON_Delete(root);
 		return -1;
