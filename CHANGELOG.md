@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- Session compaction treats a blank summarizer reply (empty or whitespace) as a failed summary and leaves the stored transcript unchanged. An empty completion, including JSON `null` content that OpenAI-compatible parsers turn into `""`, no longer deletes the turns the summary was supposed to keep.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed

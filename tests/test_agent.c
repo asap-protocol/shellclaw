@@ -1628,6 +1628,110 @@ cleanup_early:
 	return failed;
 }
 
+static int blank_summary_calls;
+static const char *blank_summary_body;
+static int blank_summary_init(const config_t *cfg)
+{
+	(void)cfg;
+	blank_summary_calls = 0;
+	return 0;
+}
+static int blank_summary_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	(void)tools;
+	(void)tool_count;
+	response->tool_calls = NULL;
+	response->tool_calls_count = 0;
+	response->error = 0;
+	blank_summary_calls++;
+	/* Summarizer shape is [system, source]. A blank body is what OpenAI-compatible
+	 * parsers produce for JSON null content, and what a local model emits on EOS. */
+	if (message_count == 2 && messages && messages[0].role &&
+	    strcmp(messages[0].role, "system") == 0) {
+		response->content = strdup(blank_summary_body ? blank_summary_body : "");
+		return response->content ? 0 : -1;
+	}
+	response->content = strdup("blank-summary-ok");
+	return response->content ? 0 : -1;
+}
+static void blank_summary_cleanup(void) {}
+static const provider_t blank_summary_provider = {
+	.name = "blank_summary",
+	.init = blank_summary_init,
+	.chat = blank_summary_chat,
+	.cleanup = blank_summary_cleanup,
+};
+
+/* A blank summarizer completion used to count as success and replace the
+ * summarized turns with an empty user line. The follow-up chat still succeeds,
+ * so the wiped transcript is what gets saved. */
+static int blank_summary_case(const char *body, const char *session_id, const char *db_path)
+{
+	int failed = 1;
+	config_t *cfg = NULL;
+	char *loaded = NULL;
+	char config_path[128];
+	char response_buf[4096];
+	char errbuf[256];
+	FILE *cf;
+
+	snprintf(config_path, sizeof(config_path), "%s.toml", db_path);
+	memory_cleanup();
+	blank_summary_calls = 0;
+	blank_summary_body = body;
+	if (memory_init(db_path) != 0)
+		goto cleanup_early;
+	if (save_alternating_session(session_id, 50) != 0)
+		goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf)
+		goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"test\"\nmax_context_messages = 40\n[memory]\npath = \"%s\"\n",
+		db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0)
+		goto cleanup;
+	loaded = malloc(128 * 1024);
+	if (!loaded)
+		goto cleanup;
+	response_buf[0] = '\0';
+	if (agent_run(cfg, session_id, "hi", &blank_summary_provider, NULL, 0,
+		      response_buf, sizeof(response_buf)) != 0)
+		goto cleanup;
+	if (blank_summary_calls < 2)
+		goto cleanup;
+	if (strstr(response_buf, "blank-summary-ok") == NULL)
+		goto cleanup;
+	if (session_load(session_id, loaded, 128 * 1024) != 0)
+		goto cleanup;
+	if (strstr(loaded, "\"content\":\"msg_0\"") == NULL) {
+		fprintf(stderr, "FAIL: blank summary \"%s\" deleted stored history\n", body);
+		goto cleanup;
+	}
+	if (strstr(loaded, "blank-summary-ok") == NULL || strstr(loaded, "\"content\":\"hi\"") == NULL) {
+		fprintf(stderr, "FAIL: blank summary \"%s\" dropped the completed turn\n", body);
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	config_free(cfg);
+	free(loaded);
+cleanup_early:
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
+	return failed;
+}
+
+static int test_blank_compaction_summary_keeps_stored_history(void)
+{
+	if (blank_summary_case("", "cli:compactblank", "build/test_agent_compact_blank.db") != 0)
+		return 1;
+	return blank_summary_case(" \n\t", "cli:compactblankws",
+		"build/test_agent_compact_blank_ws.db");
+}
+
 /* Odd max_context_messages cuts the tail on a user turn. A separate summary
  * user message then makes every later Anthropic call a 400. */
 static int test_compaction_merges_summary_when_tail_starts_with_user(void)
@@ -2450,6 +2554,7 @@ int main(void)
 	RUN(test_compaction_folds_assistant_line_that_fits_a_fresh_source());
 	RUN(test_compaction_progresses_when_assistant_message_is_oversized());
 	RUN(test_compaction_failure_keeps_original_session());
+	RUN(test_blank_compaction_summary_keeps_stored_history());
 	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());
