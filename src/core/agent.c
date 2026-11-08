@@ -228,6 +228,22 @@ static int append_summary_user(cJSON *arr, const char *summary)
 	return 0;
 }
 
+/** True when the summarizer returned no usable text.
+ *  OpenAI-compatible parsers turn JSON null content into "", and a local
+ *  model can end the completion immediately. That is not a summary. */
+static int summary_text_is_blank(const char *text)
+{
+	const unsigned char *p;
+
+	if (!text)
+		return 1;
+	for (p = (const unsigned char *)text; *p != '\0'; p++) {
+		if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+			return 0;
+	}
+	return 1;
+}
+
 /** Summarize oldest messages when over max_ctx; replace with one summary + trailing.
  *  Messages that do not fit in the summary source stay in the session. */
 static int compact_session_via_llm(const char *session_id, char *session_buf, size_t session_buf_size,
@@ -310,6 +326,13 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	memcpy(summary_buf, resp.content, sum_len);
 	summary_buf[sum_len] = '\0';
 	provider_response_clear(&resp);
+	/* A blank body used to pass !resp.content and replace the summarized
+	 * turns with an empty user line. The follow-up chat still succeeds, so
+	 * agent_persist_session then writes that loss. Leave session_buf as loaded. */
+	if (summary_text_is_blank(summary_buf)) {
+		cJSON_Delete(root);
+		return -1;
+	}
 	cJSON *new_arr = cJSON_CreateArray();
 	int keep = max_ctx - 1;
 	int start = (next_unsummarized < to_summarize_n)
