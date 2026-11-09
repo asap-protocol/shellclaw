@@ -5,6 +5,10 @@
  * Probe the kernel ABI and pass only bits it understands. create_ruleset uses
  * the ABI-1 attr size so older kernels are not E2BIG. Missing optional RO
  * paths are skipped; the workspace rule and restrict_self fail closed.
+ * ABI below 3 cannot handle TRUNCATE (JetPack 6.2 is kernel 5.15, ABI 1),
+ * so restrict_self is followed by a seccomp denial of the path truncate(2).
+ * ftruncate(2) stays allowed: it needs a writable fd, and WRITE_FILE already
+ * rejects opening a host file. Shell '>' uses open(O_TRUNC), not truncate(2).
  */
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -22,10 +26,16 @@
 #endif
 
 #ifndef __linux__
-int sandbox_landlock_restrict_to_workspace(const char *workspace)
+int sandbox_landlock_restrict_for_abi(const char *workspace, int abi)
 {
     (void)workspace;
+    (void)abi;
     return 0;
+}
+
+int sandbox_landlock_restrict_to_workspace(const char *workspace)
+{
+    return sandbox_landlock_restrict_for_abi(workspace, 0);
 }
 
 int sandbox_landlock_prepare(const char *workspace)
@@ -34,6 +44,13 @@ int sandbox_landlock_prepare(const char *workspace)
     return 0;
 }
 #else
+
+#include <errno.h>
+#include <stddef.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
 
 #ifndef LANDLOCK_ACCESS_FS_IOCTL_DEV
 #define LANDLOCK_ACCESS_FS_IOCTL_DEV (1ULL << 15)
@@ -56,16 +73,23 @@ static __u64 landlock_abi1_fs_rights(void)
            LANDLOCK_ACCESS_FS_MAKE_SYM;
 }
 
-static int landlock_handled_fs(__u64 *handled_out)
+static int landlock_probe_abi(void)
 {
     int abi;
-    __u64 handled;
 
-    if (!handled_out)
-        return -1;
     abi = (int)syscall(__NR_landlock_create_ruleset, NULL, 0,
                        LANDLOCK_CREATE_RULESET_VERSION);
     if (abi < 1)
+        return -1;
+    return abi;
+}
+
+/* @p abi selects bits the kernel understands. ABI below 3 has no TRUNCATE. */
+static int landlock_handled_fs(int abi, __u64 *handled_out)
+{
+    __u64 handled;
+
+    if (!handled_out || abi < 1)
         return -1;
     handled = landlock_abi1_fs_rights();
 #ifdef LANDLOCK_ACCESS_FS_REFER
@@ -149,7 +173,7 @@ static __u64 mask_workspace_access(__u64 handled)
 
 #define LANDLOCK_FD_SKIP (-2)
 
-static int landlock_make_ruleset(const char *workspace)
+static int landlock_make_ruleset(const char *workspace, int abi)
 {
     static const char *const RO_PATHS[] = {
         "/bin", "/usr", "/usr/local", "/lib", "/lib64", "/lib32",
@@ -174,7 +198,7 @@ static int landlock_make_ruleset(const char *workspace)
 
     if (!workspace || !workspace[0])
         return LANDLOCK_FD_SKIP;
-    if (landlock_handled_fs(&handled) != 0)
+    if (landlock_handled_fs(abi, &handled) != 0)
         return -1;
     workspace_access = mask_workspace_access(handled);
     ro_dir = (LANDLOCK_ACCESS_FS_EXECUTE |
@@ -220,30 +244,97 @@ static int landlock_make_ruleset(const char *workspace)
     return ruleset_fd;
 }
 
+static unsigned int native_audit_arch(void)
+{
+#if defined(__x86_64__)
+    return AUDIT_ARCH_X86_64;
+#elif defined(__aarch64__)
+    return AUDIT_ARCH_AARCH64;
+#elif defined(__arm__)
+    return AUDIT_ARCH_ARM;
+#else
+    return 0;
+#endif
+}
+
+/* Path truncate(2) is outside Landlock until ABI 3. Deny that syscall only. */
+static int deny_path_truncate(void)
+{
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_truncate, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+#ifdef __NR_truncate64
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_truncate64, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog prog;
+    unsigned int arch;
+
+    arch = native_audit_arch();
+    if (arch == 0)
+        return -1;
+    /* Instruction 1 is the architecture compare. A wrong index denies every syscall. */
+    filter[1].k = arch;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+        return -1;
+    memset(&prog, 0, sizeof(prog));
+    prog.len = (unsigned short)(sizeof(filter) / sizeof(filter[0]));
+    prog.filter = filter;
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0L, 0L) != 0)
+        return -1;
+    return 0;
+}
+
 int sandbox_landlock_prepare(const char *workspace)
 {
+    int abi;
     int fd;
-    fd = landlock_make_ruleset(workspace);
-    if (fd == LANDLOCK_FD_SKIP)
+
+    if (!workspace || !workspace[0])
         return 0;
+    abi = landlock_probe_abi();
+    if (abi < 0)
+        return -1;
+    fd = landlock_make_ruleset(workspace, abi);
     if (fd < 0)
         return -1;
     close(fd);
     return 0;
 }
 
-int sandbox_landlock_restrict_to_workspace(const char *workspace)
+int sandbox_landlock_restrict_for_abi(const char *workspace, int abi)
 {
     int fd;
     long rc;
-    fd = landlock_make_ruleset(workspace);
-    if (fd == LANDLOCK_FD_SKIP)
+
+    if (!workspace || !workspace[0])
         return 0;
+    if (abi <= 0) {
+        abi = landlock_probe_abi();
+        if (abi < 0)
+            return -1;
+    }
+    fd = landlock_make_ruleset(workspace, abi);
     if (fd < 0)
         return -1;
     rc = syscall(__NR_landlock_restrict_self, fd, 0);
     close(fd);
-    return (rc == 0) ? 0 : -1;
+    if (rc != 0)
+        return -1;
+    if (abi < 3 && deny_path_truncate() != 0)
+        return -1;
+    return 0;
+}
+
+int sandbox_landlock_restrict_to_workspace(const char *workspace)
+{
+    return sandbox_landlock_restrict_for_abi(workspace, 0);
 }
 
 #endif /* __linux__ */

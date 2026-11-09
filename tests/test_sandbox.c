@@ -20,6 +20,7 @@
 #include "sandbox/sandbox_env.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -613,6 +614,111 @@ static int test_landlock_denies_etc_ssl_outside_certs(void)
 	}
 	return 0;
 }
+
+/* ABI 1 (JetPack 6.2 / kernel 5.15) does not handle LANDLOCK_ACCESS_FS_TRUNCATE.
+ * open(O_TRUNC) is still denied by WRITE_FILE. truncate(2) is not, so a
+ * user-owned file outside the workspace can be wiped. */
+static int test_abi1_path_truncate_cannot_wipe_host_file(void)
+{
+	char workspace[] = "/tmp/sc_ll_abi1_XXXXXX";
+	char victim[] = "/tmp/sc_ll_victim_XXXXXX";
+	char *ws;
+	pid_t pid;
+	int st;
+	int status;
+	int vfd;
+	struct stat before;
+	struct stat after;
+
+	ws = mkdtemp(workspace);
+	if (!ws) {
+		fprintf(stderr, "test_abi1_path_truncate_cannot_wipe_host_file: mkdtemp failed\n");
+		return 1;
+	}
+	vfd = mkstemp(victim);
+	if (vfd < 0) {
+		rmdir(ws);
+		fprintf(stderr, "test_abi1_path_truncate_cannot_wipe_host_file: mkstemp failed\n");
+		return 1;
+	}
+	if (write(vfd, "hello-victim-contents\n", 22) != 22 || fstat(vfd, &before) != 0) {
+		close(vfd);
+		unlink(victim);
+		rmdir(ws);
+		return 1;
+	}
+	close(vfd);
+	pid = fork();
+	if (pid < 0) {
+		unlink(victim);
+		rmdir(ws);
+		return 1;
+	}
+	if (pid == 0) {
+		char grown[PATH_MAX];
+		int ofd;
+		int wfd;
+		int n;
+		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+			_exit(3);
+		if (sandbox_landlock_restrict_for_abi(ws, 1) != 0)
+			_exit(2);
+		ofd = open(victim, O_WRONLY | O_TRUNC | O_CLOEXEC);
+		if (ofd >= 0)
+			_exit(4);
+		if (truncate(victim, 0) == 0)
+			_exit(5);
+		if (errno != EPERM)
+			_exit(9);
+		n = snprintf(grown, sizeof(grown), "%s/grown", ws);
+		if (n < 0 || (size_t)n >= sizeof(grown))
+			_exit(6);
+		wfd = open(grown, O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC, 0600);
+		if (wfd < 0)
+			_exit(6);
+		if (write(wfd, "abcd", 4) != 4 || ftruncate(wfd, 2) != 0)
+			_exit(7);
+		close(wfd);
+		_exit(0);
+	}
+	if (waitpid(pid, &st, 0) < 0) {
+		unlink(victim);
+		rmdir(ws);
+		return 1;
+	}
+	if (stat(victim, &after) != 0) {
+		unlink(victim);
+		rmdir(ws);
+		return 1;
+	}
+	unlink(victim);
+	{
+		char grown[PATH_MAX];
+		snprintf(grown, sizeof(grown), "%s/grown", ws);
+		unlink(grown);
+	}
+	rmdir(ws);
+	if (!WIFEXITED(st)) {
+		fprintf(stderr,
+			"FAIL: tests/test_sandbox.c: abi1 truncate child did not exit (st=%d)\n", st);
+		return 1;
+	}
+	status = WEXITSTATUS(st);
+	if (status == 2 || status == 3) {
+		fprintf(stderr,
+			"test_sandbox: skip test_abi1_path_truncate_cannot_wipe_host_file (WEXITSTATUS=%d)\n",
+			status);
+		return 0;
+	}
+	if (status != 0 || after.st_size != before.st_size) {
+		fprintf(stderr,
+			"FAIL: tests/test_sandbox.c: abi1 truncate WEXITSTATUS=%d size %lld -> %lld "
+			"(0=blocked 4=open_write 5=truncate_wiped 6=ws_open 7=ftruncate 9=errno)\n",
+			status, (long long)before.st_size, (long long)after.st_size);
+		return 1;
+	}
+	return 0;
+}
 #endif
 
 #ifdef __linux__
@@ -1079,6 +1185,7 @@ int main(void)
 #ifdef __linux__
 	RUN(test_landlock_restrict_denies_etc_passwd());
 	RUN(test_landlock_denies_etc_ssl_outside_certs());
+	RUN(test_abi1_path_truncate_cannot_wipe_host_file());
 #endif
 	printf("test_sandbox: all tests passed\n");
 	return 0;
