@@ -16,6 +16,19 @@ extern "C" {
 #define WS_TEXT_MAX (32 * 1024)
 /** C-string dest bytes for a WS_TEXT_MAX payload, including the NUL. */
 #define WS_TEXT_BUF_SIZE (WS_TEXT_MAX + 1)
+/**
+ * One libwebsockets receive spill for the ws protocol.
+ * Not a whole-message cap: JSON escaping can outgrow this.
+ */
+#define WS_RX_SPILL ((size_t)WS_TEXT_MAX + 64u)
+/**
+ * Largest inbound WebChat JSON object to reassemble.
+ * JSON.stringify expands one input byte to at most six (`\u00XX`),
+ * and the `{"type":"message","text":...}` envelope fits in the slack.
+ *
+ * Example: a WS_TEXT_MAX string of backslashes is accepted; one byte more is not.
+ */
+#define WS_RX_JSON_MAX ((size_t)WS_TEXT_MAX * 6u + 64u)
 
 /**
  * True when @p len_out bytes fit in a WS_TEXT_MAX on-wire text frame.
@@ -112,6 +125,52 @@ int ws_has_pending_outgoing(int conn_id);
  * Example: `case LWS_CALLBACK_EVENT_WAIT_CANCELLED: ws_on_service_cancel(); break;`
  */
 void ws_on_service_cancel(void);
+
+/**
+ * In-progress WebChat frame. libwebsockets spills one websocket message
+ * across several LWS_CALLBACK_RECEIVE calls. The bytes live here until
+ * lws_is_final_fragment() is true. Zero the struct before the first feed
+ * and call ws_rx_acc_free() when the connection goes away.
+ */
+typedef struct ws_rx_acc {
+	char *buf;
+	size_t len;
+	size_t cap;
+	int skip;
+} ws_rx_acc_t;
+
+/** Drop any partial frame held in @p acc. Safe on a zeroed struct. */
+void ws_rx_acc_free(ws_rx_acc_t *acc);
+
+/**
+ * Append one RX chunk. On the final chunk, a complete `type:message`
+ * whose text fits in WS_TEXT_MAX is returned in @p text_out (malloc'd).
+ *
+ * @param acc      Accumulator for this connection.
+ * @param in       Chunk bytes. May be NULL only when @p len is 0.
+ * @param len      Chunk length.
+ * @param is_final Non-zero when this chunk ends the websocket message.
+ * @param text_out Receives the message text, or NULL when more chunks
+ *                 are required or the message was dropped.
+ * @return 1 when @p text_out is set, 0 when nothing is ready, -1 on OOM.
+ *
+ * Example: feed each LWS_CALLBACK_RECEIVE until the return value is 1.
+ */
+int ws_rx_acc_feed(ws_rx_acc_t *acc, const void *in, size_t len, int is_final,
+                   char **text_out);
+
+/**
+ * Same as ws_rx_acc_feed() for a registered `conn_id`.
+ * The accumulator is tracked with the connection, because lws_set_wsi_user()
+ * stores the conn id in the only per-wsi slot libwebsockets gives us.
+ *
+ * @return 1 when @p text_out is set, 0 when nothing is ready or @p conn_id
+ *         is not registered, -1 on OOM.
+ *
+ * Example: `ws_conn_rx_feed(conn_id, in, len, lws_is_final_fragment(wsi), &text);`
+ */
+int ws_conn_rx_feed(int conn_id, const void *in, size_t len, int is_final,
+                    char **text_out);
 
 /**
  * Get next connection ID for new connections.

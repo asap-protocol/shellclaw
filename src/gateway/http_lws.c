@@ -11,7 +11,6 @@
 #include "gateway/uri_match.h"
 #include "gateway/static.h"
 #include "gateway/ws.h"
-#include "cJSON.h"
 #include <libwebsockets.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -463,23 +462,16 @@ int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 	}
 	case LWS_CALLBACK_RECEIVE: {
 		int conn_id = (int)(intptr_t)lws_wsi_user(wsi);
-		if (conn_id <= 0) break;
-		if (len > 0 && in) {
-			char *buf = malloc(len + 1);
-			if (buf) {
-				memcpy(buf, in, len);
-				buf[len] = '\0';
-				cJSON *root = cJSON_Parse(buf);
-				free(buf);
-				if (root) {
-					cJSON *type = cJSON_GetObjectItem(root, "type");
-					cJSON *text = cJSON_GetObjectItem(root, "text");
-					if (cJSON_IsString(type) && strcmp(type->valuestring, "message") == 0 &&
-					    cJSON_IsString(text) && text->valuestring)
-						ws_push_incoming(conn_id, text->valuestring);
-					cJSON_Delete(root);
-				}
-			}
+		char *text = NULL;
+		int fed;
+		/* user_space holds the conn id (lws_set_wsi_user), so the
+		 * partial frame lives on the connection table instead. */
+		if (conn_id <= 0)
+			break;
+		fed = ws_conn_rx_feed(conn_id, in, len, lws_is_final_fragment(wsi), &text);
+		if (fed == 1 && text) {
+			ws_push_incoming(conn_id, text);
+			free(text);
 		}
 		break;
 	}

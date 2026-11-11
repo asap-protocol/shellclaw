@@ -42,8 +42,10 @@ static const struct lws_protocols protocols[] = {
 	{ .name = NULL },
 };
 
+_Static_assert(WS_RX_BUFFER_SIZE == WS_RX_SPILL,
+              "WebChat rx_buffer_size must match the reassembly spill");
 _Static_assert(WS_RX_BUFFER_SIZE >= (size_t)WS_TEXT_MAX + 32,
-              "WebChat rx_buffer_size must fit JSON envelope around WS_TEXT_MAX");
+              "WebChat rx_buffer_size must fit an unescaped JSON envelope");
 
 static const struct lws_http_mount mount_http = {
 	.mountpoint = "/",

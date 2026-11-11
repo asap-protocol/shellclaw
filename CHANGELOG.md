@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- WebChat reassembles libwebsockets receive spills before parsing, so a chat message whose JSON escapes grow past the 32 KiB + 64 byte callback buffer reaches the agent instead of being dropped.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
