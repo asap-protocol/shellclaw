@@ -66,6 +66,7 @@ typedef struct ws_msg {
 typedef struct {
 	ws_conn_t wsi;
 	int conn_id;
+	ws_rx_acc_t rx;
 } ws_conn_entry_t;
 
 static ws_conn_entry_t g_conns[MAX_CONNECTIONS];
@@ -138,6 +139,7 @@ int ws_register_conn(int conn_id, ws_conn_t wsi)
 	pthread_mutex_lock(&g_mutex);
 	for (int i = 0; i < MAX_CONNECTIONS; i++) {
 		if (g_conns[i].wsi == NULL) {
+			ws_rx_acc_free(&g_conns[i].rx);
 			g_conns[i].wsi = wsi;
 			g_conns[i].conn_id = conn_id;
 			registered = 1;
@@ -227,6 +229,7 @@ void ws_unregister_conn(int conn_id)
 	pthread_mutex_lock(&g_mutex);
 	for (i = 0; i < MAX_CONNECTIONS; i++) {
 		if (g_conns[i].wsi && g_conns[i].conn_id == conn_id) {
+			ws_rx_acc_free(&g_conns[i].rx);
 			g_conns[i].wsi = NULL;
 			g_conns[i].conn_id = 0;
 			break;
@@ -442,6 +445,27 @@ void ws_cleanup(void)
 	g_outgoing_head = NULL;
 	g_outgoing_tail = NULL;
 	g_outgoing_count = 0;
+	for (int i = 0; i < MAX_CONNECTIONS; i++)
+		ws_rx_acc_free(&g_conns[i].rx);
 	memset(g_conns, 0, sizeof(g_conns));
 	pthread_mutex_unlock(&g_mutex);
+}
+
+int ws_conn_rx_feed(int conn_id, const void *in, size_t len, int is_final,
+                    char **text_out)
+{
+	int rc = 0;
+
+	if (!text_out)
+		return -1;
+	*text_out = NULL;
+	pthread_mutex_lock(&g_mutex);
+	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+		if (!g_conns[i].wsi || g_conns[i].conn_id != conn_id)
+			continue;
+		rc = ws_rx_acc_feed(&g_conns[i].rx, in, len, is_final, text_out);
+		break;
+	}
+	pthread_mutex_unlock(&g_mutex);
+	return rc;
 }

@@ -25,7 +25,11 @@ extern "C" {
 #define CONFIG_BODY_MAX 65536
 #define BODY_BUF_SIZE CONFIG_BODY_MAX
 #define ASAP_BODY_MAX (1024 * 1024)
-/** Per-callback WebChat RX. Must fit `{"type":"message","text":...}` at WS_TEXT_MAX. */
+/**
+ * Per-callback WebChat RX spill (WS_RX_SPILL).
+ * A legal WS_TEXT_MAX body of quotes or backslashes is larger than this
+ * on the wire. ws_conn_rx_feed() reassembles until the final fragment.
+ */
 #define WS_RX_BUFFER_SIZE (WS_TEXT_MAX + 64)
 
 enum http_method {

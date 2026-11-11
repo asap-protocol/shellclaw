@@ -100,6 +100,7 @@ HTTP_LWS_O := $(if $(filter 1,$(GATEWAY)),src/gateway/http_lws.o,)
 ROUTES_O   := $(if $(filter 1,$(GATEWAY)),src/gateway/routes.o,)
 ROUTES_HARDWARE_O := $(if $(filter 1,$(GATEWAY)),src/gateway/routes_hardware.o,)
 WS_O       := $(if $(filter 1,$(GATEWAY)),src/gateway/ws.o,)
+WS_RX_O    := $(if $(filter 1,$(GATEWAY)),src/gateway/ws_rx.o,)
 # Tools (Task 7)
 SHELL_O    := src/tools/shell.o
 WEBSEARCH_O := src/tools/web_search.o
@@ -172,7 +173,7 @@ OBJS := $(CORE_OBJS) $(VENDOR_OBJS)
 PROVIDER_OBJS := $(PROVIDER_COMMON_O) $(STUB_O) $(ROUTER_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O)
 CHANNEL_OBJS := $(CHANNEL_COMMON_O) $(CHANNEL_CLI_O) $(CHANNEL_TG_O) $(CHANNEL_DISCORD_O) $(DISCORD_HELPERS_O) $(CHANNEL_HEARTBEAT_O) $(CHANNEL_WEBCHAT_O)
 ASAP_HTTP_BODY_O := $(if $(filter 1,$(GATEWAY)),src/gateway/asap_http_body.o,)
-GATEWAY_OBJS := $(AUTH_O) $(STATIC_O) $(HTTP_O) $(HTTP_LWS_O) $(ASAP_HTTP_BODY_O) $(ROUTES_O) $(ROUTES_HARDWARE_O) $(WS_O) $(RATE_LIMIT_O)
+GATEWAY_OBJS := $(AUTH_O) $(STATIC_O) $(HTTP_O) $(HTTP_LWS_O) $(ASAP_HTTP_BODY_O) $(ROUTES_O) $(ROUTES_HARDWARE_O) $(WS_O) $(WS_RX_O) $(RATE_LIMIT_O)
 TOOL_OBJS := $(SHELL_O) $(WEBSEARCH_O) $(FILE_O) $(REGISTRY_O) $(CONTEXT_O) $(CONTEXT_CACHE_O) $(CONTEXT_HTTP_O) $(CONTEXT_GEO_O) $(CRYPTO_LINK) $(HARDWARE_STUB_O) $(HARDWARE_INIT_O) $(HARDWARE_GPIO_SNAPSHOT_O) $(HARDWARE_TEGRASTATS_O) $(HARDWARE_TOOLS_O) $(BOARD_DETECT_O) $(HARDWARE_I2C_O) $(HARDWARE_CAMERA_O) $(HARDWARE_LIBGPIOD_O) $(CRON_O) $(ASAP_INVOKE_O)
 ASAP_OBJS := $(MANIFEST_O) $(MANIFEST_PROFILES_O) $(MANIFEST_BUILD_O) $(MANIFEST_SIGN_O) $(MANIFEST_KEYS_O) $(JCS_O) $(ENVELOPE_O) $(ULID_O) $(CLIENT_O) $(ASAP_REGISTRY_O) $(SERVER_O) $(ASAP_LOG_O)
 SANDBOX_OBJS := $(SANDBOX_O) $(ALLOWLIST_O)
@@ -385,6 +386,9 @@ $(ROUTES_HARDWARE_O): src/gateway/routes_hardware.c src/gateway/routes_hardware.
 
 $(WS_O): src/gateway/ws.c src/gateway/ws.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -c -o $@ src/gateway/ws.c
+
+src/gateway/ws_rx.o: src/gateway/ws_rx.c src/gateway/ws.h vendor/cJSON/cJSON.h
+	$(CC) $(CFLAGS) $(INC) -c -o $@ src/gateway/ws_rx.c
 
 $(SHELL_O): src/tools/shell.c src/tools/tool.h src/tools/shell.h src/core/config.h \
             src/sandbox/sandbox.h src/sandbox/allowlist.h
@@ -647,9 +651,14 @@ test_cron: tests/test_cron.c $(CRON_O) $(CRYPTO_LINK) $(MEMORY_O) $(SQLITE3_O) $
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_cron.c $(CRON_O) $(CRYPTO_LINK) $(MEMORY_O) $(SQLITE3_O) $(CHANNEL_COMMON_O) $(CJSON_O) $(AGENT_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(PROVIDER_COMMON_O) $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
 
-test_ws: tests/test_ws.c $(WS_TEST_O)
+test_ws: tests/test_ws.c $(WS_TEST_O) src/gateway/ws_rx.o $(CJSON_O)
 	@mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_ws.c $(WS_TEST_O) $(LDLIBS) -pthread
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_ws.c $(WS_TEST_O) src/gateway/ws_rx.o $(CJSON_O) $(LDLIBS) -pthread
+	$(DSYM_SCRIPT)
+
+test_ws_rx: tests/test_ws_rx.c $(WS_TEST_O) src/gateway/ws_rx.o $(CJSON_O)
+	@mkdir -p $(BINDIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_ws_rx.c $(WS_TEST_O) src/gateway/ws_rx.o $(CJSON_O) $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
 
 test_context: tests/test_context.c $(CONTEXT_TEST_OBJS) $(CONFIG_O) $(TOML_O) $(CJSON_O)
@@ -865,7 +874,7 @@ static:
 		--suppress=variableScope:src/vendor/tweetnacl/tweetnacl.c \
 		-q src/
 
-test: test_config test_config_patch test_memory test_skill test_provider test_anthropic test_openai test_local_provider test_router test_heartbeat test_agent test_reload test_channel test_cli test_shell test_file test_telegram test_discord_helpers test_web_search test_cron test_context test_dispatch test_crypto test_hardware_stub test_board_detect test_hardware_libgpiod test_hardware_i2c test_hardware_camera test_pin_tables test_hardware_init test_hardware_gpio_snapshot test_hardware_tegrastats test_hardware_tools test_registry test_ws test_manifest $(ASAP_UNIT_TESTS) test_sandbox test_allowlist test_rate_limit test_daemon_smoke test_bootstrap_keys test_update_script test_install_script test_download_model test_web_dashboard test_routes_hardware
+test: test_config test_config_patch test_memory test_skill test_provider test_anthropic test_openai test_local_provider test_router test_heartbeat test_agent test_reload test_channel test_cli test_shell test_file test_telegram test_discord_helpers test_web_search test_cron test_context test_dispatch test_crypto test_hardware_stub test_board_detect test_hardware_libgpiod test_hardware_i2c test_hardware_camera test_pin_tables test_hardware_init test_hardware_gpio_snapshot test_hardware_tegrastats test_hardware_tools test_registry test_ws test_ws_rx test_manifest $(ASAP_UNIT_TESTS) test_sandbox test_allowlist test_rate_limit test_daemon_smoke test_bootstrap_keys test_update_script test_install_script test_download_model test_web_dashboard test_routes_hardware
 	$(BINDIR)/test_config
 	$(BINDIR)/test_config_patch
 	$(BINDIR)/test_memory
@@ -901,6 +910,7 @@ test: test_config test_config_patch test_memory test_skill test_provider test_an
 	$(BINDIR)/test_hardware_tools
 	$(BINDIR)/test_registry
 	$(BINDIR)/test_ws
+	$(BINDIR)/test_ws_rx
 	@for t in $(ASAP_UNIT_TESTS); do $(BINDIR)/$$t || exit 1; done
 	$(BINDIR)/test_sandbox
 	$(BINDIR)/test_allowlist
@@ -922,7 +932,7 @@ COVERAGE_DIR := build/coverage
 COVERAGE_MIN := 80
 
 coverage: clean
-	$(MAKE) BUILD=coverage GATEWAY=0 test_config test_config_patch test_memory test_skill test_provider test_anthropic test_openai test_local_provider test_router test_heartbeat test_agent test_reload test_channel test_cli test_shell test_file test_telegram test_discord_helpers test_web_search test_cron test_context test_dispatch test_crypto test_hardware_stub test_board_detect test_hardware_libgpiod test_hardware_i2c test_hardware_camera test_pin_tables test_hardware_init test_hardware_gpio_snapshot test_hardware_tegrastats test_hardware_tools test_registry test_ws test_manifest_build test_manifest_keys test_jcs $(ASAP_UNIT_TESTS) test_sandbox test_allowlist test_rate_limit test_auth
+	$(MAKE) BUILD=coverage GATEWAY=0 test_config test_config_patch test_memory test_skill test_provider test_anthropic test_openai test_local_provider test_router test_heartbeat test_agent test_reload test_channel test_cli test_shell test_file test_telegram test_discord_helpers test_web_search test_cron test_context test_dispatch test_crypto test_hardware_stub test_board_detect test_hardware_libgpiod test_hardware_i2c test_hardware_camera test_pin_tables test_hardware_init test_hardware_gpio_snapshot test_hardware_tegrastats test_hardware_tools test_registry test_ws test_ws_rx test_manifest_build test_manifest_keys test_jcs $(ASAP_UNIT_TESTS) test_sandbox test_allowlist test_rate_limit test_auth
 
 	@if [ "$(GATEWAY)" = "1" ]; then $(MAKE) BUILD=coverage GATEWAY=1 shellclaw test_gateway_http test_static; fi
 	@chmod +x scripts/coverage.sh
@@ -934,9 +944,9 @@ clean-root-dsym:
 	@rm -f shellclaw test_agent test_anthropic test_channel test_cli test_config test_file test_memory test_local_provider test_openai test_provider test_router test_shell test_skill test_telegram test_web_search test_ws
 
 clean: clean-root-dsym
-	rm -f $(OBJS) $(PROVIDER_COMMON_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(ROUTER_O) $(CJSON_O) $(TWEETNACL_O) $(ANTHROPIC_TEST_O) $(OPENAI_TEST_O) $(LOCAL_TEST_O) $(CONTEXT_TEST_OBJS) $(HEARTBEAT_TEST_O) $(CHANNEL_TG_TEST_O) $(CHANNEL_COMMON_O) $(CHANNEL_STUB_O) $(CHANNEL_CLI_O) $(CHANNEL_TG_O) $(CHANNEL_DISCORD_O) $(DISCORD_HELPERS_O) $(CHANNEL_HEARTBEAT_O) $(CHANNEL_WEBCHAT_O) $(AUTH_O) $(STATIC_O) $(HTTP_O) $(HTTP_LWS_O) $(ASAP_HTTP_BODY_O) $(ROUTES_O) $(ROUTES_HARDWARE_O) $(WS_O) $(MANIFEST_O) $(MANIFEST_PROFILES_O) $(MANIFEST_BUILD_O) $(MANIFEST_SIGN_O) $(MANIFEST_KEYS_O) $(ENVELOPE_O) $(ULID_O) $(CLIENT_O) $(ASAP_REGISTRY_O) $(SERVER_O) $(ASAP_LOG_O) $(RATE_LIMIT_O) $(SHELL_O) $(WEBSEARCH_O) $(FILE_O) $(REGISTRY_O) $(CONTEXT_O) $(CONTEXT_CACHE_O) $(CONTEXT_HTTP_O) $(CONTEXT_GEO_O) $(CRYPTO_O) $(JCS_O) $(HARDWARE_STUB_O) $(HARDWARE_INIT_O) $(HARDWARE_GPIO_SNAPSHOT_O) $(HARDWARE_TEGRASTATS_O) $(HARDWARE_TOOLS_O) $(BOARD_DETECT_O) src/hardware/hardware_libgpiod.o $(HARDWARE_I2C_O) $(HARDWARE_CAMERA_O) $(CRON_O) $(ASAP_INVOKE_O) $(SANDBOX_CORE_O) $(SANDBOX_LANDLOCK_O) $(SANDBOX_ENV_O) $(ALLOWLIST_SCAN_O) $(ALLOWLIST_PATH_O)
+	rm -f $(OBJS) $(PROVIDER_COMMON_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(ROUTER_O) $(CJSON_O) $(TWEETNACL_O) $(ANTHROPIC_TEST_O) $(OPENAI_TEST_O) $(LOCAL_TEST_O) $(CONTEXT_TEST_OBJS) $(HEARTBEAT_TEST_O) $(CHANNEL_TG_TEST_O) $(CHANNEL_COMMON_O) $(CHANNEL_STUB_O) $(CHANNEL_CLI_O) $(CHANNEL_TG_O) $(CHANNEL_DISCORD_O) $(DISCORD_HELPERS_O) $(CHANNEL_HEARTBEAT_O) $(CHANNEL_WEBCHAT_O) $(AUTH_O) $(STATIC_O) $(HTTP_O) $(HTTP_LWS_O) $(ASAP_HTTP_BODY_O) $(ROUTES_O) $(ROUTES_HARDWARE_O) $(WS_O) src/gateway/ws_rx.o $(MANIFEST_O) $(MANIFEST_PROFILES_O) $(MANIFEST_BUILD_O) $(MANIFEST_SIGN_O) $(MANIFEST_KEYS_O) $(ENVELOPE_O) $(ULID_O) $(CLIENT_O) $(ASAP_REGISTRY_O) $(SERVER_O) $(ASAP_LOG_O) $(RATE_LIMIT_O) $(SHELL_O) $(WEBSEARCH_O) $(FILE_O) $(REGISTRY_O) $(CONTEXT_O) $(CONTEXT_CACHE_O) $(CONTEXT_HTTP_O) $(CONTEXT_GEO_O) $(CRYPTO_O) $(JCS_O) $(HARDWARE_STUB_O) $(HARDWARE_INIT_O) $(HARDWARE_GPIO_SNAPSHOT_O) $(HARDWARE_TEGRASTATS_O) $(HARDWARE_TOOLS_O) $(BOARD_DETECT_O) src/hardware/hardware_libgpiod.o $(HARDWARE_I2C_O) $(HARDWARE_CAMERA_O) $(CRON_O) $(ASAP_INVOKE_O) $(SANDBOX_CORE_O) $(SANDBOX_LANDLOCK_O) $(SANDBOX_ENV_O) $(ALLOWLIST_SCAN_O) $(ALLOWLIST_PATH_O)
 	rm -f src/gateway/ui_assets.h
 	find . -name '*.gcno' -o -name '*.gcda' -o -name '*.gcov' | xargs rm -f 2>/dev/null || true
-	rm -f $(WS_TEST_O) $(SANDBOX_TEST_O) $(BINDIR)/asap_registry_test.o $(BINDIR)/asap_invoke_test.o $(CONTEXT_TEST_OBJS) $(HEARTBEAT_TEST_O) $(BINDIR)/shellclaw $(BINDIR)/test_tweetnacl_smoke $(BINDIR)/test_config $(BINDIR)/test_config_patch $(BINDIR)/test_memory $(BINDIR)/test_skill $(BINDIR)/test_provider $(BINDIR)/test_anthropic $(BINDIR)/test_openai $(BINDIR)/test_local_provider $(BINDIR)/test_router $(BINDIR)/test_heartbeat $(BINDIR)/test_crypto $(BINDIR)/test_hardware_stub $(BINDIR)/test_board_detect $(BINDIR)/test_hardware_libgpiod $(BINDIR)/test_hardware_i2c $(BINDIR)/test_hardware_camera $(BINDIR)/test_pin_tables $(BINDIR)/test_hardware_init $(BINDIR)/test_hardware_tools $(BINDIR)/test_registry $(BINDIR)/test_ws $(BINDIR)/test_agent $(BINDIR)/test_channel $(BINDIR)/test_cli $(BINDIR)/test_shell $(BINDIR)/test_file $(BINDIR)/test_telegram $(BINDIR)/test_discord_helpers $(BINDIR)/test_web_search $(BINDIR)/test_cron $(BINDIR)/test_context $(BINDIR)/test_manifest_build $(BINDIR)/test_manifest_keys $(BINDIR)/test_jcs $(BINDIR)/test_asap_envelope $(BINDIR)/test_asap_ulid $(BINDIR)/test_asap_client $(BINDIR)/test_asap_registry $(BINDIR)/test_asap_server $(BINDIR)/test_asap_invoke $(BINDIR)/test_asap_log $(BINDIR)/test_auth $(BINDIR)/test_gateway_http $(BINDIR)/test_gateway_db_lock $(BINDIR)/test_static $(BINDIR)/test_sandbox $(BINDIR)/test_allowlist $(BINDIR)/test_rate_limit
+	rm -f $(WS_TEST_O) $(SANDBOX_TEST_O) $(BINDIR)/asap_registry_test.o $(BINDIR)/asap_invoke_test.o $(CONTEXT_TEST_OBJS) $(HEARTBEAT_TEST_O) $(BINDIR)/shellclaw $(BINDIR)/test_tweetnacl_smoke $(BINDIR)/test_config $(BINDIR)/test_config_patch $(BINDIR)/test_memory $(BINDIR)/test_skill $(BINDIR)/test_provider $(BINDIR)/test_anthropic $(BINDIR)/test_openai $(BINDIR)/test_local_provider $(BINDIR)/test_router $(BINDIR)/test_heartbeat $(BINDIR)/test_crypto $(BINDIR)/test_hardware_stub $(BINDIR)/test_board_detect $(BINDIR)/test_hardware_libgpiod $(BINDIR)/test_hardware_i2c $(BINDIR)/test_hardware_camera $(BINDIR)/test_pin_tables $(BINDIR)/test_hardware_init $(BINDIR)/test_hardware_tools $(BINDIR)/test_registry $(BINDIR)/test_ws $(BINDIR)/test_ws_rx $(BINDIR)/test_agent $(BINDIR)/test_channel $(BINDIR)/test_cli $(BINDIR)/test_shell $(BINDIR)/test_file $(BINDIR)/test_telegram $(BINDIR)/test_discord_helpers $(BINDIR)/test_web_search $(BINDIR)/test_cron $(BINDIR)/test_context $(BINDIR)/test_manifest_build $(BINDIR)/test_manifest_keys $(BINDIR)/test_jcs $(BINDIR)/test_asap_envelope $(BINDIR)/test_asap_ulid $(BINDIR)/test_asap_client $(BINDIR)/test_asap_registry $(BINDIR)/test_asap_server $(BINDIR)/test_asap_invoke $(BINDIR)/test_asap_log $(BINDIR)/test_auth $(BINDIR)/test_gateway_http $(BINDIR)/test_gateway_db_lock $(BINDIR)/test_static $(BINDIR)/test_sandbox $(BINDIR)/test_allowlist $(BINDIR)/test_rate_limit
 	rm -rf $(BINDIR)/*.dSYM $(DSYMDIR)
 	rm -f $(BOOTSTRAP_DISPATCH_STUB_O) $(TOOL_RELOAD_STUB_O) $(RELOAD_CHANNEL_STUB_O) $(HTTP_RELOAD_STUB_O)
