@@ -73,6 +73,12 @@ void provider_set_error(provider_response_t *response, const char *msg);
 char *provider_dup_str(const char *s);
 
 /**
+ * Return 1 when @p text is NULL, empty, or only space, tab, CR, or LF.
+ * Example: provider_text_is_blank(" ") returns 1.
+ */
+int provider_text_is_blank(const char *text);
+
+/**
  * Parse OpenAI-style chat/completions JSON into @p response. Caller must provider_response_clear on success.
  * Returns -1 on invalid JSON or API error object.
  */

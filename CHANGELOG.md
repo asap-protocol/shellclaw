@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- A tool-only reply at `max_tool_iterations` is saved as "Stopped: tool iteration limit reached." instead of a blank assistant turn. Replaying a blank or whitespace-only assistant string to Anthropic is also replaced before send. The Messages API treats that string as a text block and rejects it (`text` minLength 1, HTTP 400). The 4xx stops provider fallback, and the failed turn is not saved, so every later message hits the same row.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
