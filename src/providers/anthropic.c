@@ -336,7 +336,8 @@ static int append_assistant_tool_content(cJSON *msg, const provider_message_t *m
 	size_t k;
 	if (!content_arr)
 		return -1;
-	if (message->content && message->content[0] != '\0') {
+	/* Whitespace is still an empty text block. Omit it and keep tool_use. */
+	if (message->content && !provider_text_is_blank(message->content)) {
 		cJSON *text_block = cJSON_CreateObject();
 		if (!text_block) {
 			cJSON_Delete(content_arr);
@@ -390,8 +391,12 @@ static int append_anthropic_messages(cJSON *msg_arr, const provider_message_t *m
 			if (append_assistant_tool_content(msg, &messages[i]) != 0)
 				return -1;
 		} else {
-			cJSON_AddItemToObject(msg, "content",
-			                      cJSON_CreateString(messages[i].content ? messages[i].content : ""));
+			const char *text = messages[i].content ? messages[i].content : "";
+			/* A stored blank assistant turn is one empty text block. Anthropic
+			 * rejects it and the session cannot move. */
+			if (strcmp(role, "assistant") == 0 && provider_text_is_blank(text))
+				text = "The model returned no text.";
+			cJSON_AddItemToObject(msg, "content", cJSON_CreateString(text));
 		}
 	}
 	return 0;

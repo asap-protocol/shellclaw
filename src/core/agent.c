@@ -713,6 +713,23 @@ static void agent_persist_session(agent_run_ctx_t *ctx, const char *assistant_co
 	free(updated);
 }
 
+/**
+ * Text to store when this reply ends the turn.
+ * A tool-only body is valid only while its tool calls stay on the message.
+ * The iteration cap drops those calls. Anthropic then reads the leftover
+ * string as one text block and rejects an empty or whitespace body
+ * (HTTP 400, minLength 1). That 4xx stops fallback and the failed turn is
+ * not saved, so every later message hits the same row.
+ */
+static const char *assistant_text_to_keep(const provider_response_t *response,
+                                         int iteration, int max_iter)
+{
+	if (response->tool_calls_count > 0 && iteration >= max_iter &&
+	    provider_text_is_blank(response->content))
+		return "Stopped: tool iteration limit reached.";
+	return response->content;
+}
+
 /** ReAct loop: LLM chat, tool execution, message growth until done or max iterations. */
 static int agent_react_loop(agent_run_ctx_t *ctx)
 {
@@ -727,7 +744,9 @@ static int agent_react_loop(agent_run_ctx_t *ctx)
 			return -1;
 		}
 		if (response.tool_calls_count == 0 || iteration >= ctx->max_iter) {
-			copy_response_to_buf(response.content, ctx->response_buf, ctx->response_size);
+			const char *final_text =
+				assistant_text_to_keep(&response, iteration, ctx->max_iter);
+			copy_response_to_buf(final_text, ctx->response_buf, ctx->response_size);
 			provider_response_clear(&response);
 			agent_persist_session(ctx, ctx->response_buf);
 			return 0;
