@@ -5,12 +5,13 @@
 
 #include "test_runner.h"
 #include "hardware/hardware_camera.h"
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-static char s_spawn_out_path[256];
+static char s_spawn_out_path[PATH_MAX];
 static int s_spawn_fail;
 static int s_spawn_called;
 static int s_spawn_bad_jpeg;
@@ -641,6 +642,58 @@ static int test_caller_supplied_output_not_unlinked_on_error(void)
 	return 0;
 }
 
+/* A 256-byte path is legal. The 255-byte prefix is an existing file. */
+static int test_long_output_path_does_not_clobber_prefix(void)
+{
+	char result[PATH_MAX];
+	char err[128];
+	char ws[128];
+	char prefix[PATH_MAX];
+	char requested[PATH_MAX];
+	char got[8];
+	FILE *f;
+	size_t ws_len;
+	size_t name_len;
+	size_t i;
+
+	ASSERT(test_runner_mkdtemp_path("shellclaw_cam_long", ws, sizeof(ws)) == 0);
+	ws_len = strlen(ws);
+	ASSERT(ws_len + 2 < 255);
+	name_len = 255 - ws_len - 1;
+	ASSERT(name_len <= 255);
+	memcpy(prefix, ws, ws_len);
+	prefix[ws_len] = '/';
+	for (i = 0; i < name_len; i++)
+		prefix[ws_len + 1 + i] = 'a';
+	prefix[255] = '\0';
+	ASSERT(strlen(prefix) == 255);
+	memcpy(requested, prefix, 255);
+	requested[255] = 'b';
+	requested[256] = '\0';
+	f = fopen(prefix, "wb");
+	ASSERT(f != NULL);
+	ASSERT(fwrite("KEEP", 1, 4, f) == 4);
+	ASSERT(fclose(f) == 0);
+	hardware_camera_set_workspace(ws);
+	RUN(setup_mock());
+	ASSERT(hardware_camera_capture(BOARD_RPI_ZERO2W, "csi", "640x480", 75, 0, 0,
+				       requested, result, sizeof(result), err,
+				       sizeof(err)) == 0);
+	ASSERT(strcmp(s_spawn_out_path, requested) == 0);
+	ASSERT(strcmp(result, requested) == 0);
+	memset(got, 0, sizeof(got));
+	f = fopen(prefix, "rb");
+	ASSERT(f != NULL);
+	ASSERT(fread(got, 1, 4, f) == 4);
+	ASSERT(fclose(f) == 0);
+	ASSERT(memcmp(got, "KEEP", 4) == 0);
+	unlink(requested);
+	unlink(prefix);
+	teardown();
+	rmdir(ws);
+	return 0;
+}
+
 static int test_default_spawn_times_out(void)
 {
 	char *argv[] = { "/bin/sleep", "5", NULL };
@@ -679,6 +732,7 @@ int main(void)
 	RUN(test_temp_jpeg_unlinked_on_spawn_failure());
 	RUN(test_temp_jpeg_unlinked_on_invalid_jpeg());
 	RUN(test_caller_supplied_output_not_unlinked_on_error());
+	RUN(test_long_output_path_does_not_clobber_prefix());
 	RUN(test_default_spawn_times_out());
 	printf("All hardware_camera tests passed.\n");
 	return 0;
