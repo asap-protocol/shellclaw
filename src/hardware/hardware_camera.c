@@ -515,6 +515,20 @@ static int validate_capture_inputs(board_id_t board, const char *camera_type,
 	return 0;
 }
 
+/* Refuse a short copy. The workspace check used the full path, and a clipped
+ * path is a different file (the 255-byte prefix of a longer workspace path). */
+static int copy_exact_path(char *dst, size_t dstsz, const char *src)
+{
+	int n;
+
+	if (!dst || dstsz == 0 || !src)
+		return -1;
+	n = snprintf(dst, dstsz, "%s", src);
+	if (n < 0 || (size_t)n >= dstsz)
+		return -1;
+	return 0;
+}
+
 static int prepare_capture_output_path(const char *output_path, char *out_path,
 				       size_t out_pathsz, int *auto_output, char *errbuf,
 				       size_t errbufsz)
@@ -528,7 +542,10 @@ static int prepare_capture_output_path(const char *output_path, char *out_path,
 			set_err(errbuf, errbufsz, "camera: path outside workspace");
 			return -1;
 		}
-		snprintf(out_path, out_pathsz, "%s", output_path);
+		if (copy_exact_path(out_path, out_pathsz, output_path) != 0) {
+			set_err(errbuf, errbufsz, "camera: output path too long");
+			return -1;
+		}
 		*auto_output = 0;
 		return 0;
 	}
@@ -595,7 +612,7 @@ int hardware_camera_capture(board_id_t board, const char *camera_type,
 			    int video_index, const char *output_path, char *result_path,
 			    size_t result_pathsz, char *errbuf, size_t errbufsz)
 {
-	char out_path[256];
+	char out_path[PATH_MAX];
 	unsigned int width = 0;
 	unsigned int height = 0;
 	camera_cli_kind_t kind = CAMERA_CLI_NONE;
@@ -608,6 +625,14 @@ int hardware_camera_capture(board_id_t board, const char *camera_type,
 	if (prepare_capture_output_path(output_path, out_path, sizeof(out_path),
 					&auto_output, errbuf, errbufsz) != 0)
 		return -1;
+	/* Report the path that will be opened. A short result buffer must not
+	 * succeed with a different name than the file the CLI writes. */
+	if (strlen(out_path) >= result_pathsz) {
+		set_err(errbuf, errbufsz, "camera: result_path buffer too small");
+		if (auto_output)
+			unlink(out_path);
+		return -1;
+	}
 	return build_argv_and_run(kind, width, height, sensor_id, video_index, quality,
 				  auto_output, out_path, result_path, result_pathsz, errbuf,
 				  errbufsz);

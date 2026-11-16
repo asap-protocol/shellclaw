@@ -4,6 +4,9 @@ All notable changes to ShellClaw are documented here. Format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+- Camera capture opens the caller path that passed the workspace check. Paths of 256 bytes or more no longer go through a 256-byte buffer, so a USB or Raspberry Pi still cannot replace the shorter prefix file and still return success.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
