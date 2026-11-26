@@ -732,7 +732,10 @@ static int agent_react_loop(agent_run_ctx_t *ctx)
 			return -1;
 		}
 		if (response.tool_calls_count == 0 || iteration >= ctx->max_iter) {
-			copy_response_to_buf(response.content, ctx->response_buf, ctx->response_size);
+			const char *text = response.content;
+			if (response.tool_calls_count > 0 && provider_text_is_blank(text))
+				text = "Stopped: tool iteration limit reached.";
+			copy_response_to_buf(text, ctx->response_buf, ctx->response_size);
 			provider_response_clear(&response);
 			agent_persist_session(ctx, ctx->response_buf);
 			return 0;
