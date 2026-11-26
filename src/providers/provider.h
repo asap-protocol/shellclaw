@@ -72,6 +72,9 @@ void provider_set_error(provider_response_t *response, const char *msg);
 /** strdup-equivalent for provider use. Returns NULL on NULL input. */
 char *provider_dup_str(const char *s);
 
+/** Return 1 if @p text is NULL, empty, or contains only ASCII whitespace. */
+int provider_text_is_blank(const char *text);
+
 /**
  * Parse OpenAI-style chat/completions JSON into @p response. Caller must provider_response_clear on success.
  * Returns -1 on invalid JSON or API error object.

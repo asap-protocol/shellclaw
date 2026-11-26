@@ -60,6 +60,11 @@ void provider_set_error(provider_response_t *response, const char *msg)
 	response->content = msg ? provider_dup_str(msg) : NULL;
 }
 
+int provider_text_is_blank(const char *text)
+{
+	return !text || text[strspn(text, " \t\r\n\v\f")] == '\0';
+}
+
 char *provider_dup_str(const char *s)
 {
 	if (!s) return NULL;

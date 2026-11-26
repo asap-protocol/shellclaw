@@ -519,6 +519,64 @@ static int test_parse_tool_realloc_failure_is_error(void)
 	provider_response_clear(&response);
 	return 0;
 }
+
+/** A stored assistant turn with no text must not be replayed as an empty block. */
+static int test_blank_assistant_string_is_nonempty(void)
+{
+	provider_message_t messages[2];
+	char *json;
+	const char *kept = "The model returned no text.";
+
+	memset(messages, 0, sizeof(messages));
+	messages[0].role = "user";
+	messages[0].content = "continue";
+	messages[1].role = "assistant";
+	messages[1].content = "";
+	json = anthropic_messages_json_for_test(messages, 2);
+	ASSERT(json != NULL);
+	ASSERT(strstr(json, "\"content\":\"\"") == NULL);
+	ASSERT(strstr(json, kept) != NULL);
+	cJSON_free(json);
+
+	messages[1].content = " \n\t";
+	json = anthropic_messages_json_for_test(messages, 2);
+	ASSERT(json != NULL);
+	ASSERT(strstr(json, kept) != NULL);
+	ASSERT(strstr(json, "\\n\\t") == NULL);
+	cJSON_free(json);
+
+	messages[1].content = "partial";
+	json = anthropic_messages_json_for_test(messages, 2);
+	ASSERT(json != NULL);
+	ASSERT(strstr(json, "partial") != NULL);
+	ASSERT(strstr(json, kept) == NULL);
+	cJSON_free(json);
+	return 0;
+}
+
+/** Whitespace next to tool_use must not be sent as a text block. */
+static int test_whitespace_tool_text_is_omitted(void)
+{
+	provider_tool_call_t calls[1] = {
+		{.id = "toolu_a", .name = "shell", .arguments = "{\"command\":\"pwd\"}"},
+	};
+	provider_message_t messages[2];
+	char *json;
+
+	memset(messages, 0, sizeof(messages));
+	messages[0].role = "user";
+	messages[0].content = "run";
+	messages[1].role = "assistant";
+	messages[1].content = " \n";
+	messages[1].tool_calls = calls;
+	messages[1].tool_calls_count = 1;
+	json = anthropic_messages_json_for_test(messages, 2);
+	ASSERT(json != NULL);
+	ASSERT(strstr(json, "tool_use") != NULL);
+	ASSERT(strstr(json, "\"text\"") == NULL);
+	cJSON_free(json);
+	return 0;
+}
 #endif
 
 int main(void)
@@ -542,6 +600,8 @@ int main(void)
 	RUN(test_tool_results_do_not_merge_across_assistant_rounds());
 	RUN(test_parse_text_realloc_failure_is_error());
 	RUN(test_parse_tool_realloc_failure_is_error());
+	RUN(test_blank_assistant_string_is_nonempty());
+	RUN(test_whitespace_tool_text_is_omitted());
 	RUN(test_example_model_prefix_is_stripped());
 #endif
 	printf("test_anthropic: all tests passed\n");

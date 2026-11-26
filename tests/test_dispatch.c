@@ -41,6 +41,8 @@ void bootstrap_add_tool_for_test(const tool_t *tool);
 static char g_last_session[SEND_BUF_SIZE];
 static char g_last_text[SEND_BUF_SIZE];
 static int g_send_calls;
+static int g_send_error;
+static const char *g_spy_reply;
 static size_t g_last_provider_tool_count;
 static int g_agent_mutex_held_during_chat;
 static int g_agent_mutex_held_during_reset;
@@ -55,7 +57,7 @@ static int mock_send(const char *session_id, const char *text,
 	g_last_session[sizeof(g_last_session) - 1] = '\0';
 	strncpy(g_last_text, text ? text : "", sizeof(g_last_text) - 1);
 	g_last_text[sizeof(g_last_text) - 1] = '\0';
-	return 0;
+	return g_send_error;
 }
 
 static const channel_t mock_channel = {
@@ -89,7 +91,7 @@ static int spy_chat(const provider_message_t *messages, size_t message_count,
 	(void)tools;
 	g_last_provider_tool_count = tool_count;
 	response->error = 0;
-	response->content = strdup("agent-ok");
+	response->content = g_spy_reply ? strdup(g_spy_reply) : NULL;
 	response->tool_calls = NULL;
 	response->tool_calls_count = 0;
 	return 0;
@@ -185,6 +187,8 @@ static int write_minimal_toml(const char *path)
 static void reset_send_spy(void)
 {
 	g_send_calls = 0;
+	g_send_error = 0;
+	g_spy_reply = "agent-ok";
 	g_last_session[0] = '\0';
 	g_last_text[0] = '\0';
 	g_last_provider_tool_count = 0;
@@ -439,6 +443,65 @@ static int test_cron_agent_failure_does_not_ack(void)
 	return 0;
 }
 
+static int test_cron_blank_reply_acks_without_sending(void)
+{
+	const char *db_path = "build/test_dispatch_cron_blank.db";
+	const char *replies[] = {NULL, "", " \t\r\n\v\f", "reminder"};
+	const char *schedules[] = {"at:1", "interval:60", "interval:60", "interval:60"};
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_cron_blank_XXXXXX";
+	long long due_at = (long long)time(NULL) - 1;
+	channel_incoming_msg_t msg = {.session_id = "cli:default", .text = "remind me"};
+	config_t *cfg;
+	int fd = mkstemp(tmpl);
+
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	memory_cleanup();
+	remove(db_path);
+	ASSERT(memory_init(db_path) == 0);
+	bootstrap_set_cfg(cfg);
+	bootstrap_set_provider_for_test(&spy_provider);
+	bootstrap_reset_tools_for_test();
+	for (size_t i = 0; i < sizeof(replies) / sizeof(replies[0]); i++) {
+		cron_job_row_t row = {0};
+		char id[16];
+		snprintf(id, sizeof(id), "job_%zu", i);
+		ASSERT(cron_job_create(id, schedules[i], msg.text, "cli", "default", due_at, 1) == 0);
+		msg.user_id = id;
+		reset_send_spy();
+		g_spy_reply = replies[i];
+		g_send_error = -3;
+		if (i < 3) {
+			ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+			ASSERT(g_send_calls == 0);
+			ASSERT(cron_job_get_by_id(id, &row) == (i > 0 ? 1 : 0));
+			if (i > 0)
+				ASSERT(row.next_run > due_at);
+		} else {
+			ASSERT(handle_message(&cron_mock_channel, &msg) == -3);
+			ASSERT(g_send_calls == 1);
+			ASSERT(cron_job_get_by_id(id, &row) == 1);
+			ASSERT(row.next_run == due_at);
+		}
+		cron_job_row_free(&row);
+	}
+	reset_send_spy();
+	msg.user_id = NULL;
+	g_spy_reply = "";
+	g_send_error = -3;
+	ASSERT(handle_message(&mock_channel, &msg) == -3);
+	ASSERT(g_send_calls == 1);
+	reset_send_spy();
+	config_free(cfg);
+	unlink(tmpl);
+	memory_cleanup();
+	remove(db_path);
+	return 0;
+}
+
 static int test_handle_message_holds_agent_mutex(void)
 {
 	channel_incoming_msg_t msg = {0};
@@ -502,6 +565,7 @@ int main(void)
 	RUN(test_handle_message_holds_agent_mutex());
 	RUN(test_cron_slash_commands_ack_jobs());
 	RUN(test_cron_agent_failure_does_not_ack());
+	RUN(test_cron_blank_reply_acks_without_sending());
 	puts("test_dispatch OK");
 	return 0;
 }
