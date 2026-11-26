@@ -1628,6 +1628,71 @@ cleanup_early:
 	return failed;
 }
 
+static const char *mock_summary_body;
+static int blank_summary_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	if (message_count == 2) {
+		response->content = mock_summary_body ? strdup(mock_summary_body) : NULL;
+		return mock_summary_body && !response->content ? -1 : 0;
+	}
+	return spy_chat(messages, message_count, tools, tool_count, response);
+}
+
+static const provider_t blank_summary_provider = {
+	.name = "blank_summary",
+	.init = spy_init,
+	.chat = blank_summary_chat,
+	.cleanup = spy_cleanup,
+};
+
+static int test_blank_compaction_summary_keeps_history(void)
+{
+	const char *db_path = "build/test_blank_summary.db";
+	const char *config_path = "build/test_blank_summary.toml";
+	const char *session_id = "cli:blank-summary";
+	const char *bodies[] = { "", " \t\r\n", NULL };
+	config_t *cfg = NULL;
+	char before[4096];
+	char after[4096];
+	char response[32];
+	char err[256];
+	int failed = 1;
+
+	memory_cleanup();
+	FILE *cf = fopen(config_path, "w");
+	if (!cf) goto cleanup;
+	fputs("[agent]\nmodel = \"test\"\nmax_context_messages = 4\n", cf);
+	fclose(cf);
+	if (memory_init(db_path) != 0 ||
+	    config_load(config_path, &cfg, err, sizeof(err)) != 0)
+		goto cleanup;
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		mock_summary_body = bodies[i];
+		if (save_alternating_session(session_id, 6) != 0 ||
+		    session_load(session_id, before, sizeof(before)) != 0 ||
+		    agent_run(cfg, session_id, "new prompt", &blank_summary_provider, NULL, 0,
+		              response, sizeof(response)) != 0 ||
+		    session_load(session_id, after, sizeof(after)) != 0)
+			goto cleanup;
+		if (strcmp(response, "ok") != 0 || strlen(before) == 0 ||
+		    strncmp(before, after, strlen(before) - 1) != 0 ||
+		    strcmp(after + strlen(before) - 1, ",{\"role\":\"user\",\"content\":\"new prompt\"},"
+		           "{\"role\":\"assistant\",\"content\":\"ok\"}]") != 0) {
+			fprintf(stderr, "FAIL: blank summary case %zu changed prior history or lost the new turn\n", i);
+			goto cleanup;
+		}
+	}
+	failed = 0;
+cleanup:
+	spy_cleanup();
+	config_free(cfg);
+	memory_cleanup();
+	remove(config_path);
+	remove(db_path);
+	return failed;
+}
+
 /* Odd max_context_messages cuts the tail on a user turn. A separate summary
  * user message then makes every later Anthropic call a 400. */
 static int test_compaction_merges_summary_when_tail_starts_with_user(void)
@@ -2450,6 +2515,7 @@ int main(void)
 	RUN(test_compaction_folds_assistant_line_that_fits_a_fresh_source());
 	RUN(test_compaction_progresses_when_assistant_message_is_oversized());
 	RUN(test_compaction_failure_keeps_original_session());
+	RUN(test_blank_compaction_summary_keeps_history());
 	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());

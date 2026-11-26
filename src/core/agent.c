@@ -310,6 +310,11 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	memcpy(summary_buf, resp.content, sum_len);
 	summary_buf[sum_len] = '\0';
 	provider_response_clear(&resp);
+	/* Keep the original history if the summary contains only whitespace. */
+	if (strspn(summary_buf, " \t\n\r\v\f") == sum_len) {
+		cJSON_Delete(root);
+		return -1;
+	}
 	cJSON *new_arr = cJSON_CreateArray();
 	int keep = max_ctx - 1;
 	int start = (next_unsummarized < to_summarize_n)
