@@ -6,12 +6,11 @@
  * first when unprivileged). Isolation failure is reported on a control pipe,
  * not via sh-compatible exit codes. dup2, chdir, PID-1 fork, and workspace
  * setup failures write that byte before exiting; a 0-byte read is success.
- * After CLONE_NEWPID, fork so the command
- * is PID 1 (unshare does not move the caller). That child fchdir's the
- * workspace (Landlock cannot walk `/tmp` after restrict_self), remounts
- * procfs, applies Landlock, sets PR_SET_PDEATHSIG, and closes fds >= 3
- * so a timeout SIGKILL of the isolator cannot leave the command under
- * host init. The isolator joins its cgroup before the command fork so
+ * After CLONE_NEWPID, fork so the command is PID 1. That child remounts
+ * procfs, enters the workspace, and applies the filesystem policy. It sets
+ * PR_SET_PDEATHSIG so a timeout cannot leave the command under host init.
+ * The child closes inherited file descriptors before exec.
+ * The isolator joins its cgroup before the command fork so
  * memory.max and cpu.max apply to sh -c. The command process then
  * replaces the inherited environment so provider keys and bot tokens
  * are not readable via printenv. Limits degrade if unavailable.
@@ -38,6 +37,7 @@
 #include <unistd.h>
 
 #ifdef __linux__
+#include <linux/capability.h>
 #include <sched.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
@@ -51,6 +51,7 @@
 #define PIPE_POLL_SLICE_MS     500
 #define SANDBOX_ISO_NS         1
 #define SANDBOX_ISO_LL         2
+#define SANDBOX_ISO_MOUNTS     3
 
 #ifdef __linux__
 
@@ -243,7 +244,7 @@ static int unshare_isolation_namespaces(void)
     return 0;
 }
 
-static int isolate_namespaces(void)
+SANDBOX_UNIT int sandbox_isolate_namespaces(void)
 {
     if (unshare_isolation_namespaces() == 0)
         return 0;
@@ -274,16 +275,109 @@ static int enter_workspace_cwd(const char *workspace)
     return 0;
 }
 
+#if defined(__NR_open_tree) && defined(__NR_mount_setattr) && defined(__NR_move_mount)
+/* Mount UAPI for builds with an older libc. */
+#ifndef MOUNT_ATTR_SIZE_VER0
+#define MOUNT_ATTR_RDONLY 0x00000001
+#define MOUNT_ATTR_SIZE_VER0 32
+struct mount_attr {
+    __u64 attr_set;
+    __u64 attr_clr;
+    __u64 propagation;
+    __u64 userns_fd;
+};
+#endif
+#ifndef AT_RECURSIVE
+#define AT_RECURSIVE 0x8000
+#endif
+#ifndef OPEN_TREE_CLONE
+#define OPEN_TREE_CLONE 1
+#endif
+#ifndef MOVE_MOUNT_F_EMPTY_PATH
+#define MOVE_MOUNT_F_EMPTY_PATH 0x00000004
+#endif
+#ifndef MOVE_MOUNT_T_EMPTY_PATH
+#define MOVE_MOUNT_T_EMPTY_PATH 0x00000040
+#endif
+
+static int drop_mount_admin(void)
+{
+    struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3};
+    struct __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3];
+    unsigned int index = CAP_TO_INDEX(CAP_SYS_ADMIN);
+    __u32 mask = ~CAP_TO_MASK(CAP_SYS_ADMIN);
+
+    if (prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN, 0, 0, 0) != 0 ||
+        syscall(__NR_capget, &header, caps) != 0)
+        return -1;
+    caps[index].effective &= mask;
+    caps[index].permitted &= mask;
+    caps[index].inheritable &= mask;
+    return syscall(__NR_capset, &header, caps) == 0 ? 0 : -1;
+}
+#endif
+
+/* The caller must first create a private mount namespace. */
+SANDBOX_UNIT int sandbox_seal_workspace_mounts(const char *workspace)
+{
+#if defined(__NR_open_tree) && defined(__NR_mount_setattr) && defined(__NR_move_mount)
+    const struct mount_attr attr = {.attr_set = MOUNT_ATTR_RDONLY};
+    struct stat root_stat;
+    struct stat workspace_stat;
+    int ws_fd;
+    int clone_fd;
+    int rc = -1;
+
+    ws_fd = open(workspace, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (ws_fd < 0)
+        return -1;
+    /* The root directory cannot be the writable exception. */
+    if (fstat(ws_fd, &workspace_stat) != 0 || stat("/", &root_stat) != 0 ||
+        (root_stat.st_dev == workspace_stat.st_dev &&
+         root_stat.st_ino == workspace_stat.st_ino)) {
+        close(ws_fd);
+        return -1;
+    }
+    /* The detached copy keeps the workspace mount flags and submounts. */
+    clone_fd = (int)syscall(__NR_open_tree, ws_fd, "",
+                            AT_EMPTY_PATH | AT_RECURSIVE | OPEN_TREE_CLONE | O_CLOEXEC);
+    if (clone_fd >= 0) {
+        if (syscall(__NR_mount_setattr, AT_FDCWD, "/", AT_RECURSIVE, &attr,
+                    (size_t)MOUNT_ATTR_SIZE_VER0) == 0 &&
+            syscall(__NR_move_mount, clone_fd, "", ws_fd, "",
+                    MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH) == 0 &&
+            fchdir(clone_fd) == 0 && drop_mount_admin() == 0)
+            rc = 0;
+        close(clone_fd);
+    }
+    close(ws_fd);
+    return rc;
+#else
+    (void)workspace;
+    return -1;
+#endif
+}
+
 static unsigned char setup_command_process(const char *workspace)
 {
+    int needs_guard;
+
     if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0)
-        return SANDBOX_ISO_NS;
-    if (workspace && workspace[0] && enter_workspace_cwd(workspace) != 0)
         return SANDBOX_ISO_NS;
     if (remount_procfs() != 0)
         return SANDBOX_ISO_NS;
-    if (workspace && workspace[0] &&
-        sandbox_landlock_restrict_to_workspace(workspace) != 0)
+    if (!workspace || !workspace[0])
+        return 0;
+    needs_guard = sandbox_landlock_needs_mount_guard();
+    if (needs_guard < 0)
+        return SANDBOX_ISO_LL;
+    if (needs_guard) {
+        if (sandbox_seal_workspace_mounts(workspace) != 0)
+            return SANDBOX_ISO_MOUNTS;
+    } else if (enter_workspace_cwd(workspace) != 0) {
+        return SANDBOX_ISO_NS;
+    }
+    if (sandbox_landlock_restrict_to_workspace(".") != 0)
         return SANDBOX_ISO_LL;
     return 0;
 }
@@ -330,7 +424,7 @@ static unsigned char setup_child_process(int pipe_wr, const char *workspace)
 #ifdef __linux__
     (void)workspace;
     (void)setsid();
-    if (isolate_namespaces() != 0)
+    if (sandbox_isolate_namespaces() != 0)
         return SANDBOX_ISO_NS;
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
         return SANDBOX_ISO_NS;
@@ -386,6 +480,8 @@ static int report_isolation_failure(char *out, size_t out_cap, unsigned char iso
 {
     if (iso == SANDBOX_ISO_LL)
         snprintf(out, out_cap, "sandbox: Landlock filesystem bound failed");
+    else if (iso == SANDBOX_ISO_MOUNTS)
+        snprintf(out, out_cap, "sandbox: read-only mount guard failed");
     else
         snprintf(out, out_cap, "sandbox: namespace isolation failed");
     return -1;

@@ -16,7 +16,8 @@ extern "C" {
  * Restrict the calling thread to @p workspace (RW) plus a small RO/exec set
  * needed by /bin/sh. Empty @p workspace skips Landlock (returns 0).
  *
- * @param workspace Absolute workspace directory, or NULL/empty to skip.
+ * Use a private read-only mount guard for commands on Landlock ABI 1 or 2.
+ * @param workspace Workspace directory, or NULL/empty to skip.
  * @return          0 on success or skip; -1 if the ruleset cannot apply.
  *
  * Example: sandbox_landlock_restrict_to_workspace("/home/user/.shellclaw");
@@ -34,11 +35,10 @@ int sandbox_landlock_prepare(const char *workspace);
 
 #ifdef __linux__
 /**
- * Install a system call filter when the Landlock ruleset cannot control truncation.
- * The caller must set PR_SET_NO_NEW_PRIVS before it calls this function.
- * @return 0 on success or -1 if the kernel cannot install the filter.
+ * Check whether the kernel needs a mount guard to restrict file truncation.
+ * @return 1 for ABI 1 or 2, 0 for ABI 3 or later, -1 if Landlock is unavailable.
  */
-int sandbox_landlock_guard_truncate(int ruleset_handles_truncate);
+int sandbox_landlock_needs_mount_guard(void);
 #endif
 
 #ifdef __cplusplus
