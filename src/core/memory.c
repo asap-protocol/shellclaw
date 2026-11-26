@@ -449,32 +449,30 @@ int cron_job_delete(const char *id)
 	return ret;
 }
 
-int cron_job_toggle(const char *id)
+static int cron_job_set_enabled(const char *id, int disable)
 {
 	if (!g_db || !id) return -1;
 	memory_sqlite_entry_probe();
-	const char *sql = "UPDATE cron_jobs SET enabled = 1 - enabled WHERE id = ?1";
+	const char *sql = disable
+		? "UPDATE cron_jobs SET enabled = 0 WHERE id = ?1 AND enabled = 1"
+		: "UPDATE cron_jobs SET enabled = 1 - enabled WHERE id = ?1";
 	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
 	sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT);
-	int ret = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_db) > 0) ? 0 : -1;
+	int ret = (sqlite3_step(stmt) == SQLITE_DONE &&
+		   (disable || sqlite3_changes(g_db) > 0)) ? 0 : -1;
 	sqlite3_finalize(stmt);
 	return ret;
 }
 
+int cron_job_toggle(const char *id)
+{
+	return cron_job_set_enabled(id, 0);
+}
+
 int cron_job_disable(const char *id)
 {
-	sqlite3_stmt *stmt = NULL;
-	int rc;
-	if (!g_db || !id) return -1;
-	memory_sqlite_entry_probe();
-	if (sqlite3_prepare_v2(g_db, "UPDATE cron_jobs SET enabled = 0 WHERE id = ?1",
-			      -1, &stmt, NULL) != SQLITE_OK)
-		return -1;
-	sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT);
-	rc = sqlite3_step(stmt);
-	sqlite3_finalize(stmt);
-	return rc == SQLITE_DONE ? 0 : -1;
+	return cron_job_set_enabled(id, 1);
 }
 
 int cron_job_update_next_run(const char *id, long long next_run)

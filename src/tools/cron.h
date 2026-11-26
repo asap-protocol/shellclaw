@@ -59,12 +59,13 @@ const tool_t *tool_cron_get(void);
  * If id_out[0] == '\0', a random ID is generated.
  * If a known channel is unavailable, its job keeps its due time.
  * If a send fails, a later poll can run the agent and its tools again.
+ * WebChat IDs identify connections. A restart can reuse an ID for another client.
+ * The poller disables stored WebChat jobs and keeps their data.
  *
  * @param schedule  Schedule string (interval:N, at:ts, or cron expression).
  * @param message   Message to inject when job fires.
- * @param channel   Target channel name. NULL or empty selects "cli".
+ * @param channel   Target channel name. NULL or empty selects "cli". WebChat is invalid.
  * @param recipient Recipient ID for the target channel. CLI accepts "default".
- *                  A WebChat ID identifies a live connection only.
  * @param id_out    Buffer for job ID. If non-empty on entry, used as-is; else generated.
  * @param id_size   Size of id_out buffer.
  * @return 0 on success, CRON_INVALID_DESTINATION for an invalid target, or -1 on error.

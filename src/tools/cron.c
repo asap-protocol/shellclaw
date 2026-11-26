@@ -215,15 +215,10 @@ static int cron_route_recipient(const char *channel, const char *recipient, char
 	if (strlen(channel) >= sizeof(((cron_job_row_t *)0)->channel) ||
 	    strlen(recipient) >= sizeof(((cron_job_row_t *)0)->recipient) ||
 	    strchr(channel, ':') || strcmp(channel, "cron") == 0 ||
-	    strcmp(channel, "heartbeat") == 0)
+	    strcmp(channel, "heartbeat") == 0 || strcmp(channel, "webchat") == 0)
 		return -1;
 
-	if (strcmp(channel, "webchat") == 0) {
-		prefix = "webchat:";
-		id = cron_skip_prefix(recipient, prefix);
-		if (!cron_decimal_id(id, INT_MAX))
-			return -1;
-	} else if (strcmp(channel, "discord") == 0) {
+	if (strcmp(channel, "discord") == 0) {
 		prefix = "discord:c:";
 		id = cron_skip_prefix(cron_skip_prefix(recipient, "discord:"), "c:");
 		if (!cron_decimal_id(id, ULLONG_MAX))
