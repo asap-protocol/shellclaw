@@ -9,6 +9,7 @@
 #include "core/agent.h"
 #include "core/memory.h"
 #include "channels/channel.h"
+#include "channels/heartbeat.h"
 #include "core/config.h"
 #include "cJSON.h"
 #include <errno.h>
@@ -181,13 +182,124 @@ int cron_is_one_shot(const char *schedule)
 	return strncmp(schedule, CRON_PREFIX_AT, strlen(CRON_PREFIX_AT)) == 0;
 }
 
+static const char *cron_default(const char *value, const char *fallback)
+{
+	return value && value[0] ? value : fallback;
+}
+
+static const char *cron_skip_prefix(const char *value, const char *prefix)
+{
+	size_t len = strlen(prefix);
+	return strncmp(value, prefix, len) == 0 ? value + len : value;
+}
+
+static int cron_decimal_id(const char *id, unsigned long long max)
+{
+	unsigned long long value;
+	if (!id[0] || id[strspn(id, "0123456789")] != '\0')
+		return 0;
+	errno = 0;
+	value = strtoull(id, NULL, 10);
+	return errno != ERANGE && value > 0 && value <= max;
+}
+
+typedef enum {
+	CRON_TARGET_INVALID,
+	CRON_TARGET_DEFERRED,
+	CRON_TARGET_READY,
+} cron_target_status_t;
+
+typedef enum {
+	CRON_TARGET_NEW,
+	CRON_TARGET_STORED,
+} cron_target_origin_t;
+
+typedef struct {
+	const channel_t *channel;
+	char recipient[128];
+} cron_delivery_t;
+
+static cron_target_status_t cron_resolve_target(const char *channel, const char *recipient,
+					       cron_target_origin_t origin, cron_delivery_t *delivery)
+{
+	const channel_t *dest;
+	const char *id;
+	const char *prefix = "";
+
+	channel = cron_default(channel, "cli");
+	recipient = cron_default(recipient, "default");
+	if (strlen(channel) >= sizeof(((cron_job_row_t *)0)->channel) ||
+	    strlen(recipient) >= sizeof(((cron_job_row_t *)0)->recipient) ||
+	    strchr(channel, ':') || strcmp(channel, "cron") == 0 || strcmp(channel, "webchat") == 0)
+		return CRON_TARGET_INVALID;
+
+	dest = channel_get_by_name(channel);
+	if (dest == channel_cron_get() || (dest && dest->name && strcmp(dest->name, "webchat") == 0))
+		return CRON_TARGET_INVALID;
+	if (strcmp(channel, "heartbeat") == 0 || dest == channel_heartbeat_get()) {
+		dest = dest == channel_heartbeat_get() ? heartbeat_local_delivery() : NULL;
+		if (origin == CRON_TARGET_NEW && (!dest || !dest->send))
+			return CRON_TARGET_INVALID;
+		id = "default";
+	} else if (strcmp(channel, "discord") == 0) {
+		prefix = "discord:c:";
+		id = cron_skip_prefix(cron_skip_prefix(recipient, "discord:"), "c:");
+		if (!cron_decimal_id(id, ULLONG_MAX))
+			return CRON_TARGET_INVALID;
+	} else if (strcmp(channel, "telegram") == 0) {
+		id = cron_skip_prefix(recipient, "telegram:");
+		if (id[0] == '@') {
+			const char *valid = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+			if (!id[1] || id[1 + strspn(id + 1, valid)] != '\0')
+				return CRON_TARGET_INVALID;
+		} else if (!cron_decimal_id(id + (id[0] == '-'), LLONG_MAX)) {
+			return CRON_TARGET_INVALID;
+		}
+	} else {
+		if (origin == CRON_TARGET_NEW && strcmp(channel, "cli") != 0 && (!dest || !dest->send))
+			return CRON_TARGET_INVALID;
+		id = recipient;
+	}
+	if (!dest || !dest->send)
+		return CRON_TARGET_DEFERRED;
+	if (delivery) {
+		int n = snprintf(delivery->recipient, sizeof(delivery->recipient), "%s%s", prefix, id);
+		if (n < 0 || (size_t)n >= sizeof(delivery->recipient))
+			return CRON_TARGET_INVALID;
+		delivery->channel = dest;
+	}
+	return CRON_TARGET_READY;
+}
+
+static cron_target_status_t cron_stored_target(const char *channel, const char *recipient,
+					       int channel_truncated, int recipient_truncated)
+{
+	if (channel_truncated)
+		return CRON_TARGET_INVALID;
+	if (recipient_truncated) {
+		/* Only the native local channels ignore a legacy recipient. */
+		const char *name = cron_default(channel, "cli");
+		const channel_t *dest = channel_get_by_name(name);
+		const channel_t *local = NULL;
+		if (strcmp(name, "cli") == 0)
+			local = channel_cli_get();
+		else if (strcmp(name, "heartbeat") == 0)
+			local = channel_heartbeat_get();
+		if (!local || (dest && dest != local))
+			return CRON_TARGET_INVALID;
+	}
+	return cron_resolve_target(channel, recipient, CRON_TARGET_STORED, NULL);
+}
+
 int cron_create_job(const char *schedule, const char *message,
                     const char *channel, const char *recipient,
                     char *id_out, size_t id_size)
 {
 	if (!schedule || !message || !id_out || id_size == 0) return -1;
-	const char *ch = channel ? channel : "cli";
-	const char *rec = recipient ? recipient : "default";
+	const char *ch = cron_default(channel, "cli");
+	const char *rec = cron_default(recipient, "default");
+	if (cron_resolve_target(ch, rec, CRON_TARGET_NEW, NULL) == CRON_TARGET_INVALID)
+		return CRON_INVALID_DESTINATION;
 	if (id_out[0] == '\0') {
 		unsigned char rnd[2];
 		if (crypto_read_urandom(rnd, sizeof(rnd)) != 0) return -1;
@@ -342,22 +454,42 @@ static void cron_sleep_ms(long wait_ms)
 	nanosleep(&remain, NULL);
 }
 
-/** Prefer a due job outside its re-offer window so one stuck job cannot hide the rest. */
+/** Find a ready job, even when earlier jobs wait for a channel. */
 static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 {
 	cron_due_key_t keys[CRON_DUE_SCAN_MAX];
+	cron_due_key_t cursor;
+	const cron_due_key_t *after = NULL;
+	char first[sizeof(keys[0].id)] = {0};
 	struct timespec mono;
 	int n;
-	int wait_for_first = 0;
+	int deferred = 0;
+	int found;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &mono) != 0)
 		memset(&mono, 0, sizeof(mono));
 	/* HTTP dashboard routes use this same connection (SQLITE_THREADSAFE=0).
 	 * Drop the lock before the re-offer sleep so that thread is not stalled. */
 	agent_lock();
-	n = cron_job_list_due(now, keys, CRON_DUE_SCAN_MAX);
-	if (n > 0) {
+	do {
+		n = cron_job_list_due(now, after, keys, CRON_DUE_SCAN_MAX);
 		for (int i = 0; i < n; i++) {
+			cron_target_status_t target = cron_stored_target(keys[i].channel, keys[i].recipient,
+				keys[i].channel_truncated, keys[i].recipient_truncated);
+			if (target == CRON_TARGET_INVALID) {
+				if (cron_job_disable(keys[i].id) == 0)
+					fprintf(stderr, "shellclaw: cron: disabled job '%s' with an invalid destination\n",
+						keys[i].id);
+				else
+					deferred = 1;
+				continue;
+			}
+			if (target == CRON_TARGET_DEFERRED) {
+				deferred = 1;
+				continue;
+			}
+			if (!first[0])
+				memcpy(first, keys[i].id, sizeof(first));
 			if (!cron_due_is_returnable(keys[i].id, timeout_ms, &mono))
 				continue;
 			if (cron_job_get_by_id(keys[i].id, row) == 1) {
@@ -365,21 +497,31 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 				return 1;
 			}
 		}
-		if (cron_job_get_by_id(keys[0].id, row) == 1)
-			wait_for_first = 1;
-	}
+		if (n == CRON_DUE_SCAN_MAX) {
+			cursor = keys[n - 1];
+			after = &cursor;
+		}
+	} while (n == CRON_DUE_SCAN_MAX);
 	agent_unlock();
-	if (!wait_for_first)
-		return 0;
-	/* An id that never fit in the table has no age, so wait_remaining would return immediately. */
-	{
-		long age = 0;
-		if (cron_offer_age_ms(row->id, &mono, &age))
-			cron_wait_remaining(row->id, timeout_ms);
-		else
+	if (!first[0]) {
+		if (deferred)
 			cron_sleep_ms((long)timeout_ms);
+		return 0;
 	}
-	return 1;
+	long age = 0;
+	if (cron_offer_age_ms(first, &mono, &age))
+		cron_wait_remaining(first, timeout_ms);
+	else
+		cron_sleep_ms((long)timeout_ms);
+	agent_lock();
+	found = cron_job_get_by_id(first, row) == 1 && row->enabled && row->next_run <= now &&
+		cron_stored_target(row->channel, row->recipient, row->channel_truncated,
+				   row->recipient_truncated) == CRON_TARGET_READY;
+	agent_unlock();
+	if (found)
+		return 1;
+	cron_job_row_free(row);
+	return 0;
 }
 
 static int cron_poll(channel_incoming_msg_t *out, int timeout_ms)
@@ -448,6 +590,8 @@ int cron_ack_delivery(const char *job_id)
 static int cron_send(const char *recipient, const char *text,
                     const channel_attachment_t *attachments, size_t att_count)
 {
+	cron_delivery_t delivery;
+	cron_target_status_t target;
 	if (!recipient || !text) return -1;
 	const char *colon = strchr(recipient, ':');
 	if (!colon) return -1;
@@ -456,9 +600,12 @@ static int cron_send(const char *recipient, const char *text,
 	if (n >= sizeof(ch_name)) return -1;
 	memcpy(ch_name, recipient, n);
 	ch_name[n] = '\0';
-	const channel_t *ch = channel_get_by_name(ch_name);
-	if (!ch || !ch->send) return -1;
-	return ch->send(colon + 1, text, attachments, att_count);
+	agent_lock();
+	target = cron_resolve_target(ch_name, colon + 1, CRON_TARGET_STORED, &delivery);
+	agent_unlock();
+	if (target != CRON_TARGET_READY)
+		return -1;
+	return delivery.channel->send(delivery.recipient, text, attachments, att_count);
 }
 
 static void cron_cleanup(void)
@@ -553,9 +700,12 @@ static int cron_tool_execute(const char *args_json, char *result_buf, size_t max
 			id[0] = '\0';
 		const char *ch = (channel && cJSON_IsString(channel)) ? channel->valuestring : NULL;
 		const char *rec = (recipient && cJSON_IsString(recipient)) ? recipient->valuestring : NULL;
-		if (cron_create_job(schedule->valuestring, message->valuestring, ch, rec, id, sizeof(id)) != 0) {
+		int rc = cron_create_job(schedule->valuestring, message->valuestring, ch, rec, id, sizeof(id));
+		if (rc != 0) {
 			cJSON_Delete(root);
-			snprintf(result_buf, max_len, "{\"error\":\"failed to create job\"}");
+			snprintf(result_buf, max_len, "%s", rc == CRON_INVALID_DESTINATION
+				 ? "{\"error\":\"Invalid cron destination.\"}"
+				 : "{\"error\":\"failed to create job\"}");
 			return -1;
 		}
 		snprintf(result_buf, max_len, "{\"ok\":true,\"id\":\"%s\"}", id);
