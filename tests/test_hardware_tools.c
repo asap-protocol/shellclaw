@@ -10,6 +10,8 @@
 #include "core/config.h"
 #include "hardware/hardware.h"
 #include <errno.h>
+#include <limits.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -314,6 +316,82 @@ static int test_camera_capture_rejects_path_outside_workspace(void)
 	return 0;
 }
 
+static int write_test_jpeg(char *const argv[], char *errbuf, size_t errbufsz)
+{
+	FILE *file;
+	(void)errbuf;
+	(void)errbufsz;
+	ASSERT(strcmp(argv[1], "--output") == 0);
+	file = fopen(argv[2], "wb");
+	ASSERT(file != NULL);
+	ASSERT(fwrite("\xff\xd8\xff\xd9", 1, 4, file) == 4);
+	return fclose(file);
+}
+
+static int test_camera_tool_reports_the_full_path(void)
+{
+	char ws[128];
+	char path[700];
+	char args[sizeof(path) + 16];
+	char result[sizeof(args)];
+	size_t length;
+	size_t ends[2];
+	config_t *cfg = NULL;
+
+	ASSERT(test_runner_mkdtemp_path("shellclaw_cam_tool", ws, sizeof(ws)) == 0);
+	snprintf(path, sizeof(path), "%s", ws);
+	length = strlen(path);
+	for (size_t i = 0; i < 3; i++) {
+		path[length++] = '/';
+		memset(path + length, 'a', 175);
+		length += 175;
+		path[length] = '\0';
+		if (i < 2) {
+			ASSERT(mkdir(path, 0700) == 0);
+			ends[i] = length;
+		}
+	}
+	snprintf(args, sizeof(args), "{\"path\":\"%s\"}", path);
+	RUN(load_cfg("[agent]\nmodel = \"test\"\n[hardware]\nenabled = true\nboard = \"rpi\"\n"
+		     "[sandbox]\nworkspace_only = false\n", &cfg));
+	ASSERT(hardware_init(cfg) == 0);
+	tool_hardware_set_config(cfg);
+	hardware_camera_set_spawn_for_test(write_test_jpeg);
+	ASSERT(HW_TOOLS_CAMERA_CAPTURE.execute(args, result, strlen(args)) < 0);
+	ASSERT(access(path, F_OK) != 0);
+	ASSERT(HW_TOOLS_CAMERA_CAPTURE.execute(args, result, strlen(args) + 1) == 0);
+	ASSERT(strcmp(args, result) == 0);
+	ASSERT(unlink(path) == 0);
+	path[ends[1]] = '\0';
+	ASSERT(rmdir(path) == 0);
+	path[ends[0]] = '\0';
+	ASSERT(rmdir(path) == 0);
+	ASSERT(rmdir(ws) == 0);
+	hardware_camera_shutdown();
+	tool_hardware_set_config(NULL);
+	config_free(cfg);
+	return 0;
+}
+
+static int test_camera_tool_rejects_oversized_path(void)
+{
+	char path[PATH_MAX + 1];
+	char args[sizeof(path) + 16];
+	char result[128];
+	config_t *cfg = NULL;
+
+	memset(path, 'a', sizeof(path) - 1);
+	path[sizeof(path) - 1] = '\0';
+	snprintf(args, sizeof(args), "{\"path\":\"%s\"}", path);
+	RUN(load_cfg("[agent]\nmodel = \"test\"\n[hardware]\nenabled = true\n", &cfg));
+	tool_hardware_set_config(cfg);
+	ASSERT(HW_TOOLS_CAMERA_CAPTURE.execute(args, result, sizeof(result)) < 0);
+	ASSERT(strstr(result, "path too long") != NULL);
+	tool_hardware_set_config(NULL);
+	config_free(cfg);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_disabled_returns_error());
@@ -323,6 +401,8 @@ int main(void)
 	RUN(test_gpio_mode_executes_json());
 	RUN(test_gpio_write_rejects_non_binary_value());
 	RUN(test_camera_capture_rejects_path_outside_workspace());
+	RUN(test_camera_tool_rejects_oversized_path());
+	RUN(test_camera_tool_reports_the_full_path());
 	RUN(test_i2c_read_success_with_mock());
 	RUN(test_i2c_invalid_addr());
 	RUN(test_i2c_default_bus_from_board());

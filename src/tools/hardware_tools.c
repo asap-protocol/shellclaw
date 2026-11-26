@@ -32,12 +32,16 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 	const char *output_path = NULL;
 	const char *camera_type;
 	const char *resolution;
-	char result_path[512];
+	char result_path[PATH_MAX];
+	const size_t json_overhead = sizeof("{\"path\":\"\"}") - 1;
+	size_t path_capacity;
 	char errbuf[256];
 	board_id_t board;
 	int quality;
 	int rc;
 
+	if (!result_buf || max_len == 0)
+		return -1;
 	path_buf[0] = '\0';
 	if (!hw_tools_enabled()) {
 		snprintf(result_buf, max_len, "%s", HW_ERR_DISABLED);
@@ -48,8 +52,15 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 		if (hw_tools_parse_root(args_json, &root, result_buf, max_len) != 0)
 			return -1;
 		path_item = cJSON_GetObjectItem(root, "path");
-		if (path_item && cJSON_IsString(path_item) && path_item->valuestring[0])
-			snprintf(path_buf, sizeof(path_buf), "%s", path_item->valuestring);
+		if (cJSON_IsString(path_item) && path_item->valuestring[0]) {
+			size_t length = strlen(path_item->valuestring);
+			if (length >= sizeof(path_buf)) {
+				cJSON_Delete(root);
+				hw_tools_json_error(result_buf, max_len, "camera: output path too long");
+				return -1;
+			}
+			memcpy(path_buf, path_item->valuestring, length + 1);
+		}
 		cJSON_Delete(root);
 		root = NULL;
 	}
@@ -67,8 +78,15 @@ static int camera_capture_exec(const char *args_json, char *result_buf, size_t m
 	camera_type = config_hardware_camera_type(g_hw_cfg);
 	resolution = config_hardware_camera_resolution(g_hw_cfg);
 	quality = config_hardware_camera_quality(g_hw_cfg);
+	if (max_len <= json_overhead) {
+		hw_tools_json_error(result_buf, max_len, "camera: result buffer too small");
+		return -1;
+	}
+	path_capacity = max_len - json_overhead;
+	if (path_capacity > sizeof(result_path))
+		path_capacity = sizeof(result_path);
 	rc = hardware_camera_capture(board, camera_type, resolution, quality, 0, 0, output_path,
-				     result_path, sizeof(result_path), errbuf, sizeof(errbuf));
+				     result_path, path_capacity, errbuf, sizeof(errbuf));
 	if (rc != 0) {
 		hw_tools_json_error(result_buf, max_len, errbuf);
 		return -1;

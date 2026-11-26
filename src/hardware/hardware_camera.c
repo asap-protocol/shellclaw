@@ -329,10 +329,10 @@ static int output_jpeg_valid(const char *path)
 	return hdr[0] == 0xff && hdr[1] == 0xd8;
 }
 
-static int build_jetson_csi_argv(char **argv, char *arg0, char *arg1, char *arg2,
-				 char *arg_q, size_t arg_bufsz, unsigned int width,
-				 unsigned int height, int sensor_id, int quality,
-				 const char *out_path)
+static int build_jetson_csi_argv(char **argv, char *arg0, char *arg1, char *location,
+				 size_t location_size, char *arg_q, size_t arg_bufsz,
+				 unsigned int width, unsigned int height, int sensor_id,
+				 int quality, const char *out_path)
 {
 	int n;
 	n = snprintf(arg0, arg_bufsz, "sensor-id=%d", sensor_id);
@@ -343,8 +343,8 @@ static int build_jetson_csi_argv(char **argv, char *arg0, char *arg1, char *arg2
 		     height);
 	if (n < 0 || (size_t)n >= arg_bufsz)
 		return -1;
-	n = snprintf(arg2, arg_bufsz, "location=%s", out_path);
-	if (n < 0 || (size_t)n >= arg_bufsz)
+	n = snprintf(location, location_size, "location=%s", out_path);
+	if (n < 0 || (size_t)n >= location_size)
 		return -1;
 	/* nvjpegenc exposes a 0-100 quality property; emit it as its own argv token. */
 	n = snprintf(arg_q, arg_bufsz, "quality=%d", quality);
@@ -362,7 +362,7 @@ static int build_jetson_csi_argv(char **argv, char *arg0, char *arg1, char *arg2
 	argv[9] = arg_q;
 	argv[10] = "!";
 	argv[11] = "filesink";
-	argv[12] = arg2;
+	argv[12] = location;
 	argv[13] = NULL;
 	return 0;
 }
@@ -443,7 +443,7 @@ int hardware_camera_output_allowed(const char *path)
 {
 	if (!path || path[0] == '\0')
 		return 1;
-	return path_inside_workspace(path);
+	return strlen(path) < PATH_MAX && path_inside_workspace(path);
 }
 
 void hardware_camera_shutdown(void)
@@ -520,6 +520,11 @@ static int prepare_capture_output_path(const char *output_path, char *out_path,
 				       size_t errbufsz)
 {
 	if (output_path && output_path[0] != '\0') {
+		size_t length = strlen(output_path);
+		if (length >= out_pathsz) {
+			set_err(errbuf, errbufsz, "camera: output path too long");
+			return -1;
+		}
 		if (!path_chars_safe(output_path)) {
 			set_err(errbuf, errbufsz, "camera: unsafe output path");
 			return -1;
@@ -528,7 +533,7 @@ static int prepare_capture_output_path(const char *output_path, char *out_path,
 			set_err(errbuf, errbufsz, "camera: path outside workspace");
 			return -1;
 		}
-		snprintf(out_path, out_pathsz, "%s", output_path);
+		memcpy(out_path, output_path, length + 1);
 		*auto_output = 0;
 		return 0;
 	}
@@ -550,7 +555,7 @@ static int build_argv_and_run(camera_cli_kind_t kind, unsigned int width,
 	char *argv[HARDWARE_CAMERA_ARGV_MAX];
 	char arg0[ARG_BUF_SZ];
 	char arg1[CAPS_BUF_SZ];
-	char arg2[ARG_BUF_SZ];
+	char location[sizeof("location=") - 1 + PATH_MAX];
 	char arg_q[ARG_BUF_SZ];
 	char rpi_wbuf[16];
 	char rpi_hbuf[16];
@@ -558,8 +563,9 @@ static int build_argv_and_run(camera_cli_kind_t kind, unsigned int width,
 
 	memset(argv, 0, sizeof(argv));
 	if (kind == CAMERA_CLI_JETSON_CSI) {
-		if (build_jetson_csi_argv(argv, arg0, arg1, arg2, arg_q, ARG_BUF_SZ, width,
-					  height, sensor_id, quality, out_path) != 0) {
+		if (build_jetson_csi_argv(argv, arg0, arg1, location, sizeof(location),
+					  arg_q, ARG_BUF_SZ, width, height, sensor_id,
+					  quality, out_path) != 0) {
 			set_err(errbuf, errbufsz, HARDWARE_CAMERA_ERR_UNAVAILABLE);
 			return -1;
 		}
@@ -595,7 +601,7 @@ int hardware_camera_capture(board_id_t board, const char *camera_type,
 			    int video_index, const char *output_path, char *result_path,
 			    size_t result_pathsz, char *errbuf, size_t errbufsz)
 {
-	char out_path[256];
+	char out_path[PATH_MAX];
 	unsigned int width = 0;
 	unsigned int height = 0;
 	camera_cli_kind_t kind = CAMERA_CLI_NONE;
@@ -608,6 +614,12 @@ int hardware_camera_capture(board_id_t board, const char *camera_type,
 	if (prepare_capture_output_path(output_path, out_path, sizeof(out_path),
 					&auto_output, errbuf, errbufsz) != 0)
 		return -1;
+	if (strlen(out_path) >= result_pathsz) {
+		set_err(errbuf, errbufsz, "camera: result buffer too small for output path");
+		if (auto_output)
+			unlink(out_path);
+		return -1;
+	}
 	return build_argv_and_run(kind, width, height, sensor_id, video_index, quality,
 				  auto_output, out_path, result_path, result_pathsz, errbuf,
 				  errbufsz);
