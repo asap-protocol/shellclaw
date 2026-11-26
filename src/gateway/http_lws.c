@@ -355,6 +355,8 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 				free(conn);
 				lws_set_wsi_user(wsi, NULL);
 				http_lws_tx_completed(wsi);
+			} else {
+				lws_callback_on_writable(wsi);
 			}
 			return 0;
 		}
