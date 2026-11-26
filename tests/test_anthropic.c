@@ -132,7 +132,13 @@ static int test_parse_api_error_object_sets_error(void)
 
 static int test_parse_missing_or_invalid_content_returns_error(void)
 {
-	const char *bodies[] = { "{}", "{\"content\":null}", "{\"content\":{}}" };
+	const char *bodies[] = {
+		"{}", "{\"content\":null}", "{\"content\":{}}", "{\"content\":[{}]}",
+		"{\"content\":[{\"type\":\"text\",\"text\":42}]}",
+		"{\"content\":[{\"type\":\"text\"}]}",
+		"{\"content\":[{\"type\":\"tool_use\",\"id\":\"x\",\"name\":\"echo\",\"input\":[]}]}",
+		"{\"content\":[{\"type\":\"tool_use\",\"id\":\"x\",\"input\":{}}]}",
+	};
 	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
 		provider_response_t response = {0};
 		ASSERT(anthropic_parse_response_for_test(bodies[i], &response) == -1);
@@ -154,12 +160,13 @@ static int test_parse_empty_content_array_returns_zero(void)
 
 static int test_parse_valid_text_block_returns_content(void)
 {
-	const char *body = "{\"content\":[{\"type\":\"text\",\"text\":\"Hello world\"}]}";
+	const char *body = "{\"content\":[{\"type\":\"thinking\",\"thinking\":\"internal\"},"
+		"{\"type\":\"text\",\"text\":\"Hello world\"}]}";
 	provider_response_t response = {0};
 	ASSERT(anthropic_parse_response_for_test(body, &response) == 0);
 	ASSERT(response.error == 0);
 	ASSERT(response.content != NULL);
-	ASSERT(strstr(response.content, "Hello world") != NULL);
+	ASSERT(strcmp(response.content, "Hello world") == 0);
 	provider_response_clear(&response);
 	return 0;
 }
@@ -532,6 +539,35 @@ static int test_parse_tool_realloc_failure_is_error(void)
 	return 0;
 }
 
+static size_t cjson_allocations;
+static size_t cjson_fail_at;
+
+static void *fail_one_cjson_allocation(size_t size)
+{
+	return ++cjson_allocations == cjson_fail_at ? NULL : malloc(size);
+}
+
+static int test_parse_tool_input_serialization_failure_is_error(void)
+{
+	const char *body = "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"echo\",\"input\":{}}]}";
+	cJSON_Hooks hooks = { .malloc_fn = fail_one_cjson_allocation, .free_fn = free };
+	provider_response_t response = {0};
+	cjson_allocations = 0;
+	cjson_fail_at = 0;
+	cJSON_InitHooks(&hooks);
+	cJSON *parsed = cJSON_Parse(body);
+	int parsed_ok = parsed != NULL;
+	/* Fail the first allocation after parsing the response JSON. */
+	cjson_fail_at = cjson_allocations + 1;
+	cjson_allocations = 0;
+	cJSON_Delete(parsed);
+	int rc = anthropic_parse_response_for_test(body, &response);
+	cJSON_InitHooks(NULL);
+	ASSERT(parsed_ok && rc == -1 && response.error && response.tool_calls_count == 0);
+	provider_response_clear(&response);
+	return 0;
+}
+
 /** A stored assistant turn with no text must not be replayed as an empty block. */
 static int test_blank_assistant_string_is_nonempty(void)
 {
@@ -613,6 +649,7 @@ int main(void)
 	RUN(test_tool_results_do_not_merge_across_assistant_rounds());
 	RUN(test_parse_text_realloc_failure_is_error());
 	RUN(test_parse_tool_realloc_failure_is_error());
+	RUN(test_parse_tool_input_serialization_failure_is_error());
 	RUN(test_blank_assistant_string_is_nonempty());
 	RUN(test_whitespace_tool_text_is_omitted());
 	RUN(test_example_model_prefix_is_stripped());

@@ -495,10 +495,11 @@ static int test_cron_blank_reply_acks_without_sending(void)
 		cron_job_row_free(&row);
 	}
 	const char *valid_blank = "{\"choices\":[{\"message\":{\"content\":null}}]}";
-	const char *bodies[] = { valid_blank, "{}", valid_blank };
-	const char *channels[] = { "telegram", "cli", "cli" };
-	const char *recipients[] = { "42", "malformed", "silent" };
-	const char *routes[] = { "telegram:42", "cli:malformed", "cli:silent" };
+	const char *invalid_tools = "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":{}}}]}";
+	const char *bodies[] = { valid_blank, "{}", invalid_tools, valid_blank };
+	const char *channels[] = { "telegram", "cli", "cli", "cli" };
+	const char *recipients[] = { "42", "malformed", "invalid-tools", "silent" };
+	const char *routes[] = { "telegram:42", "cli:malformed", "cli:invalid-tools", "cli:silent" };
 	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
 		cron_job_row_t row = {0};
 		char history[512];
@@ -510,11 +511,11 @@ static int test_cron_blank_reply_acks_without_sending(void)
 		msg.user_id = id;
 		msg.session_id = (char *)routes[i];
 		ASSERT(handle_message(cron, &msg) == (i == 0 ? -1 : 0));
-		ASSERT(g_send_calls == (i == 1 ? 1 : 0));
-		ASSERT(cron_job_get_by_id(id, &row) == (i < 2 ? 1 : 0));
-		if (i < 2)
+		ASSERT(g_send_calls == (i == 1 || i == 2 ? 1 : 0));
+		ASSERT(cron_job_get_by_id(id, &row) == (i < 3 ? 1 : 0));
+		if (i < 3)
 			ASSERT(row.next_run == due_at && row.enabled);
-		if (i == 1)
+		if (i == 1 || i == 2)
 			ASSERT(session_load(routes[i], history, sizeof(history)) != 0);
 		cron_job_row_free(&row);
 	}

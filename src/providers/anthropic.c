@@ -147,30 +147,25 @@ static int append_text_block(char **text, size_t *text_len, size_t *text_cap, co
 	return 0;
 }
 
-static int append_tool_use(provider_tool_call_t **tool_calls, size_t *tool_count,
-                           size_t *tool_cap, cJSON *block)
+static const char *append_tool_use(provider_tool_call_t **tool_calls, size_t *tool_count,
+                                   size_t *tool_cap, const cJSON *block)
 {
-	provider_tool_call_t *tc;
-	cJSON *id_item;
-	cJSON *name_item;
-	cJSON *input_item;
+	const cJSON *id = cJSON_GetObjectItem(block, "id");
+	const cJSON *name = cJSON_GetObjectItem(block, "name");
+	const cJSON *input = cJSON_GetObjectItem(block, "input");
+	if (!cJSON_IsString(id) || !id->valuestring[0] ||
+	    !cJSON_IsString(name) || !name->valuestring[0] || !cJSON_IsObject(input))
+		return "Anthropic response has an invalid tool_use block";
 	if (ensure_tool_cap(tool_calls, tool_cap, *tool_count) != 0)
-		return -1;
-	tc = &(*tool_calls)[*tool_count];
-	tc->id = NULL;
-	tc->name = NULL;
-	tc->arguments = NULL;
-	id_item = cJSON_GetObjectItem(block, "id");
-	name_item = cJSON_GetObjectItem(block, "name");
-	input_item = cJSON_GetObjectItem(block, "input");
-	if (cJSON_IsString(id_item))
-		tc->id = provider_dup_str(id_item->valuestring);
-	if (cJSON_IsString(name_item))
-		tc->name = provider_dup_str(name_item->valuestring);
-	if (input_item)
-		tc->arguments = cJSON_PrintUnformatted(input_item);
+		return "Out of memory growing Anthropic tool_use array";
+	provider_tool_call_t *tc = &(*tool_calls)[*tool_count];
+	tc->id = provider_dup_str(id->valuestring);
+	tc->name = provider_dup_str(name->valuestring);
+	tc->arguments = cJSON_PrintUnformatted(input);
 	(*tool_count)++;
-	return 0;
+	if (!tc->id || !tc->name || !tc->arguments)
+		return "Out of memory reading Anthropic tool_use block";
+	return NULL;
 }
 
 static int parse_response_body(const char *response_buf, provider_response_t *response)
@@ -210,18 +205,23 @@ static int parse_response_body(const char *response_buf, provider_response_t *re
 		return parse_fail(root, text, NULL, 0, response,
 		                   "Out of memory growing Anthropic tool_use array");
 	cJSON_ArrayForEach(block, content) {
-		cJSON *type_item = cJSON_GetObjectItem(block, "type");
-		const char *type = cJSON_IsString(type_item) ? type_item->valuestring : NULL;
-		if (type && strcmp(type, "text") == 0) {
-			cJSON *text_item = cJSON_GetObjectItem(block, "text");
-			const char *t = cJSON_IsString(text_item) ? text_item->valuestring : "";
-			if (append_text_block(&text, &text_len, &text_cap, t) != 0)
+		const cJSON *type_item = cJSON_GetObjectItem(block, "type");
+		if (!cJSON_IsString(type_item) || !type_item->valuestring[0])
+			return parse_fail(root, text, tool_calls, tool_count, response,
+			                 "Anthropic content block has no type");
+		const char *type = type_item->valuestring;
+		if (strcmp(type, "text") == 0) {
+			const cJSON *text_item = cJSON_GetObjectItem(block, "text");
+			if (!cJSON_IsString(text_item))
+				return parse_fail(root, text, tool_calls, tool_count, response,
+				                 "Anthropic response has an invalid text block");
+			if (append_text_block(&text, &text_len, &text_cap, text_item->valuestring) != 0)
 				return parse_fail(root, text, tool_calls, tool_count, response,
 				                 "Out of memory growing Anthropic text buffer");
-		} else if (type && strcmp(type, "tool_use") == 0) {
-			if (append_tool_use(&tool_calls, &tool_count, &tool_cap, block) != 0)
-				return parse_fail(root, text, tool_calls, tool_count, response,
-				                 "Out of memory growing Anthropic tool_use array");
+		} else if (strcmp(type, "tool_use") == 0) {
+			const char *error = append_tool_use(&tool_calls, &tool_count, &tool_cap, block);
+			if (error)
+				return parse_fail(root, text, tool_calls, tool_count, response, error);
 		}
 	}
 	cJSON_Delete(root);

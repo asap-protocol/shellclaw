@@ -147,6 +147,33 @@ int provider_error_allows_fallback_retry(const char *msg)
 	return 1;
 }
 
+static const char *parse_openai_tool_calls(const cJSON *items, size_t count,
+                                          provider_response_t *response)
+{
+	const cJSON *item;
+	size_t index = 0;
+	response->tool_calls = calloc(count, sizeof(*response->tool_calls));
+	if (!response->tool_calls)
+		return "Out of memory reading OpenAI tool calls";
+	response->tool_calls_count = count;
+	cJSON_ArrayForEach(item, items) {
+		const cJSON *id = cJSON_GetObjectItem(item, "id");
+		const cJSON *function = cJSON_GetObjectItem(item, "function");
+		const cJSON *name = cJSON_GetObjectItem(function, "name");
+		const cJSON *arguments = cJSON_GetObjectItem(function, "arguments");
+		if (!cJSON_IsString(id) || !id->valuestring[0] || !cJSON_IsObject(function) ||
+		    !cJSON_IsString(name) || !name->valuestring[0] || !cJSON_IsString(arguments))
+			return "OpenAI message has an invalid function tool call";
+		provider_tool_call_t *call = &response->tool_calls[index++];
+		call->id = provider_dup_str(id->valuestring);
+		call->name = provider_dup_str(name->valuestring);
+		call->arguments = provider_dup_str(arguments->valuestring);
+		if (!call->id || !call->name || !call->arguments)
+			return "Out of memory reading OpenAI tool call";
+	}
+	return NULL;
+}
+
 int provider_parse_chat_completions_json(const char *response_body, provider_response_t *response)
 {
 	cJSON *root;
@@ -189,9 +216,14 @@ int provider_parse_chat_completions_json(const char *response_body, provider_res
 	}
 	content_item = cJSON_GetObjectItem(msg_obj, "content");
 	tool_calls_arr = cJSON_GetObjectItem(msg_obj, "tool_calls");
-	int has_tool_calls = cJSON_IsArray(tool_calls_arr) && cJSON_GetArraySize(tool_calls_arr) > 0;
+	if (tool_calls_arr && !cJSON_IsNull(tool_calls_arr) && !cJSON_IsArray(tool_calls_arr)) {
+		provider_set_error(response, "OpenAI tool_calls must be an array or null");
+		cJSON_Delete(root);
+		return -1;
+	}
+	size_t tool_count = (size_t)cJSON_GetArraySize(tool_calls_arr);
 	if (!cJSON_IsString(content_item) && !cJSON_IsNull(content_item) &&
-	    (content_item || !has_tool_calls)) {
+	    (content_item || tool_count == 0)) {
 		provider_set_error(response, "OpenAI message has invalid content");
 		cJSON_Delete(root);
 		return -1;
@@ -204,33 +236,12 @@ int provider_parse_chat_completions_json(const char *response_body, provider_res
 		cJSON_Delete(root);
 		return -1;
 	}
-	if (cJSON_IsArray(tool_calls_arr)) {
-		int n = cJSON_GetArraySize(tool_calls_arr);
-		if (n > 0) {
-			provider_tool_call_t *calls = malloc((size_t)n * sizeof(provider_tool_call_t));
-			if (calls) {
-				for (int i = 0; i < n; i++) {
-					cJSON *tc = cJSON_GetArrayItem(tool_calls_arr, i);
-					cJSON *id_item;
-					cJSON *fn;
-					calls[i].id = NULL;
-					calls[i].name = NULL;
-					calls[i].arguments = NULL;
-					id_item = cJSON_GetObjectItem(tc, "id");
-					fn = cJSON_GetObjectItem(tc, "function");
-					if (cJSON_IsString(id_item)) calls[i].id = provider_dup_str(id_item->valuestring);
-					if (cJSON_IsObject(fn)) {
-						cJSON *name_item = cJSON_GetObjectItem(fn, "name");
-						cJSON *args_item = cJSON_GetObjectItem(fn, "arguments");
-						if (cJSON_IsString(name_item)) calls[i].name = provider_dup_str(name_item->valuestring);
-						if (cJSON_IsString(args_item)) calls[i].arguments = provider_dup_str(args_item->valuestring);
-					}
-				}
-				response->tool_calls = calls;
-				response->tool_calls_count = (size_t)n;
-			}
-		}
-	}
+	const char *error = tool_count ? parse_openai_tool_calls(tool_calls_arr, tool_count, response) : NULL;
 	cJSON_Delete(root);
+	if (error) {
+		provider_response_clear(response);
+		provider_set_error(response, error);
+		return -1;
+	}
 	return 0;
 }

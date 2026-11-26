@@ -181,6 +181,10 @@ static int test_parse_invalid_completion_returns_error(void)
 		"{}", "{\"choices\":{}}", "{\"choices\":[]}",
 		"{\"choices\":[{}]}", "{\"choices\":[{\"message\":{}}]}",
 		"{\"choices\":[{\"message\":{\"content\":42}}]}",
+		"{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":{}}}]}",
+		"{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[null]}}]}",
+		"{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":3,\"function\":{\"name\":\"echo\",\"arguments\":\"{}\"}}]}}]}",
+		"{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"x\",\"function\":{\"name\":\"echo\",\"arguments\":{}}}]}}]}",
 	};
 	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
 		provider_response_t response = {0};
@@ -193,14 +197,20 @@ static int test_parse_invalid_completion_returns_error(void)
 
 static int test_parse_silent_and_tool_only_messages(void)
 {
-	const char *silent = "{\"choices\":[{\"message\":{\"content\":null}}]}";
+	const char *silent[] = {
+		"{\"choices\":[{\"message\":{\"content\":null}}]}",
+		"{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":null}}]}",
+		"{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[]}}]}",
+	};
 	const char *tool_only = "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\","
 		"\"function\":{\"name\":\"echo\",\"arguments\":\"{}\"}}]}}]}";
 	provider_response_t response = {0};
-	ASSERT(openai_parse_response_for_test(silent, &response) == 0);
-	ASSERT(response.error == 0 && provider_text_is_blank(response.content));
-	ASSERT(response.tool_calls_count == 0);
-	provider_response_clear(&response);
+	for (size_t i = 0; i < sizeof(silent) / sizeof(silent[0]); i++) {
+		ASSERT(openai_parse_response_for_test(silent[i], &response) == 0);
+		ASSERT(response.error == 0 && provider_text_is_blank(response.content));
+		ASSERT(response.tool_calls_count == 0);
+		provider_response_clear(&response);
+	}
 	ASSERT(openai_parse_response_for_test(tool_only, &response) == 0);
 	ASSERT(response.error == 0 && provider_text_is_blank(response.content));
 	ASSERT(response.tool_calls_count == 1 && response.tool_calls[0].name &&
