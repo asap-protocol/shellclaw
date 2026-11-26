@@ -142,6 +142,7 @@ static const provider_t always_tool_provider = {
 /* Tool-only replies often have no text. The cap drops the tool calls and
  * must not store that blank body: Anthropic rejects it on the next turn. */
 static int blank_cap_calls;
+static const char *blank_cap_body;
 static int blank_cap_init(const config_t *cfg) { (void)cfg; blank_cap_calls = 0; return 0; }
 static int blank_cap_chat(const provider_message_t *messages, size_t message_count,
 	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
@@ -152,9 +153,9 @@ static int blank_cap_chat(const provider_message_t *messages, size_t message_cou
 	(void)tool_count;
 	response->error = 0;
 	blank_cap_calls++;
-	response->content = strdup(" \n\t");
+	response->content = blank_cap_body ? strdup(blank_cap_body) : NULL;
 	response->tool_calls = malloc(sizeof(provider_tool_call_t));
-	if (!response->content || !response->tool_calls) {
+	if (!response->tool_calls || (blank_cap_body && !response->content)) {
 		free(response->content);
 		free(response->tool_calls);
 		response->content = NULL;
@@ -350,15 +351,15 @@ static int test_tool_cap_blank_reply_stays_replayable(void)
 	int failed = 1;
 	const char *db_path = "build/test_agent_blankcap.db";
 	const char *config_path = "build/test_agent_blankcap.toml";
-	const char *session_id = "cli:blankcap";
 	const char *kept = "Stopped: tool iteration limit reached.";
+	const char *bodies[] = { NULL, "", " \n\t" };
 	config_t *cfg = NULL;
 	char errbuf[256];
 	char response_buf[4096];
 	char loaded[8192];
+	char expected[256];
 	FILE *cf;
 	memory_cleanup();
-	blank_cap_calls = 0;
 	if (memory_init(db_path) != 0) goto cleanup;
 	cf = fopen(config_path, "w");
 	if (!cf) goto cleanup;
@@ -367,24 +368,29 @@ static int test_tool_cap_blank_reply_stays_replayable(void)
 	fclose(cf);
 	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0 || cfg == NULL)
 		goto cleanup;
-	response_buf[0] = '\0';
-	if (agent_run(cfg, session_id, "keep going", &blank_cap_provider, &mock_echo_tool, 1,
-		response_buf, sizeof(response_buf)) != 0)
-		goto cleanup;
-	if (blank_cap_calls != 2) goto cleanup;
-	if (strcmp(response_buf, kept) != 0) goto cleanup;
-	loaded[0] = '\0';
-	if (session_load(session_id, loaded, sizeof(loaded)) != 0) goto cleanup;
-	if (strstr(loaded, kept) == NULL) goto cleanup;
-	if (strstr(loaded, "\\n\\t") != NULL) goto cleanup;
-	spy_message_count = 0;
-	response_buf[0] = '\0';
-	if (agent_run(cfg, session_id, "continue", &spy_provider, &mock_echo_tool, 1,
-		response_buf, sizeof(response_buf)) != 0)
-		goto cleanup;
-	if (spy_message_count < 4) goto cleanup;
-	if (!spy_roles[2] || strcmp(spy_roles[2], "assistant") != 0) goto cleanup;
-	if (strcmp(spy_content[2], kept) != 0) goto cleanup;
+	snprintf(expected, sizeof(expected), "[{\"role\":\"user\",\"content\":\"keep going\"},"
+		 "{\"role\":\"assistant\",\"content\":\"%s\"}]", kept);
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		char session_id[32];
+		snprintf(session_id, sizeof(session_id), "cli:blankcap:%zu", i);
+		blank_cap_body = bodies[i];
+		blank_cap_calls = 0;
+		if (agent_run(cfg, session_id, "keep going", &blank_cap_provider, &mock_echo_tool, 1,
+			      response_buf, sizeof(response_buf)) != 0 ||
+		    blank_cap_calls != 2 || strcmp(response_buf, kept) != 0 ||
+		    session_load(session_id, loaded, sizeof(loaded)) != 0 ||
+		    strcmp(loaded, expected) != 0) {
+			fprintf(stderr, "FAIL: tool limit case %zu did not return and save the notice\n", i);
+			goto cleanup;
+		}
+		if (agent_run(cfg, session_id, "continue", &spy_provider, &mock_echo_tool, 1,
+			      response_buf, sizeof(response_buf)) != 0 ||
+		    spy_message_count < 4 || !spy_roles[2] ||
+		    strcmp(spy_roles[2], "assistant") != 0 || strcmp(spy_content[2], kept) != 0) {
+			fprintf(stderr, "FAIL: tool limit case %zu did not replay the notice\n", i);
+			goto cleanup;
+		}
+	}
 	failed = 0;
 cleanup:
 	spy_provider.cleanup();
