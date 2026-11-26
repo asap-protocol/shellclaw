@@ -22,10 +22,11 @@ function assert(cond, msg) {
   }
 }
 
-function testPairedChatProtocols() {
+function testPairedChatDisplaysRepliesAsText() {
   let connection;
   const location = { protocol: 'https:', host: 'localhost', hash: '#/chat' };
-  const elements = { app: {}, 'chat-log': {}, 'chat-input': {} };
+  const log = { textContent: '' };
+  const elements = { app: {}, 'chat-log': log, 'chat-input': {} };
   const token = '1234567890abcdef1234567890abcdef';
   const script = fs.readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
   vm.runInNewContext(script, {
@@ -33,14 +34,23 @@ function testPairedChatProtocols() {
     window: { location, addEventListener() {} },
     document: { getElementById: id => elements[id], querySelectorAll: () => [] },
     localStorage: { getItem: key => key === 'shellclaw_token' ? token : null },
-    WebSocket: function (url, protocols) { connection = { url, protocols }; },
+    WebSocket: function (url, protocols) {
+      this.url = url;
+      this.protocols = protocols;
+      connection = this;
+    },
   });
-  assert(connection && connection.url === 'wss://localhost/ws', 'paired chat WebSocket URL');
+  const replies = ['The card is blue.', '{"type":"provider_status","providers":[]}',
+    '"Café" <strong>azul</strong>'];
+  replies.forEach(text => connection.onmessage({ data: text }));
+  assert(log.textContent === replies.join('\n') + '\n', 'chat displays each reply as text');
+  assert(log.innerHTML === undefined, 'chat does not insert reply markup');
+  assert(connection.url === 'wss://localhost/ws?view=chat', 'chat requests the replies-only socket');
   assert(connection.protocols.length === 2 && connection.protocols[0] === 'ws' &&
     connection.protocols[1] === 'bearer.' + token, 'paired chat offers both WebSocket protocols');
 }
 
-testPairedChatProtocols();
+testPairedChatDisplaysRepliesAsText();
 
 assert(escapeHtml(null) === '', 'null');
 assert(escapeHtml(undefined) === '', 'undefined');

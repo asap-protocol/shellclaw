@@ -66,6 +66,7 @@ typedef struct ws_msg {
 typedef struct {
 	ws_conn_t wsi;
 	int conn_id;
+	int replies_only;
 } ws_conn_entry_t;
 
 static ws_conn_entry_t g_conns[MAX_CONNECTIONS];
@@ -132,7 +133,7 @@ int ws_next_conn_id(void)
 	return atomic_fetch_add(&g_next_conn_id, 1) + 1;
 }
 
-int ws_register_conn(int conn_id, ws_conn_t wsi)
+static int ws_register_conn_with_mode(int conn_id, ws_conn_t wsi, int replies_only)
 {
 	int registered = 0;
 	pthread_mutex_lock(&g_mutex);
@@ -140,12 +141,32 @@ int ws_register_conn(int conn_id, ws_conn_t wsi)
 		if (g_conns[i].wsi == NULL) {
 			g_conns[i].wsi = wsi;
 			g_conns[i].conn_id = conn_id;
+			g_conns[i].replies_only = replies_only;
 			registered = 1;
 			break;
 		}
 	}
 	pthread_mutex_unlock(&g_mutex);
 	return registered ? 0 : -1;
+}
+
+#ifdef SHELLCLAW_WS_TEST
+int ws_test_register_reply_conn(int conn_id, ws_conn_t wsi)
+{
+	return ws_register_conn_with_mode(conn_id, wsi, 1);
+}
+#endif
+
+int ws_register_conn(int conn_id, ws_conn_t wsi)
+{
+	int replies_only = 0;
+#ifndef SHELLCLAW_WS_TEST
+	/* libwebsockets keeps the request headers during the established callback. */
+	char value[16];
+	const char *view = lws_get_urlarg_by_name(wsi, "view=", value, sizeof(value));
+	replies_only = view && strcmp(view, "chat") == 0;
+#endif
+	return ws_register_conn_with_mode(conn_id, wsi, replies_only);
 }
 
 static void ws_free_outgoing(ws_msg_t *m)
@@ -398,7 +419,7 @@ void ws_broadcast_text(const char *text)
 	pthread_mutex_lock(&g_mutex);
 	for (i = 0; i < MAX_CONNECTIONS; i++) {
 		ws_msg_t *m;
-		if (!g_conns[i].wsi)
+		if (!g_conns[i].wsi || g_conns[i].replies_only)
 			continue;
 		if (g_outgoing_count >= MAX_QUEUE)
 			break;

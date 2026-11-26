@@ -32,7 +32,7 @@ static inline int ws_text_payload_fits(size_t len_out)
 typedef void *ws_conn_t;
 
 /**
- * Register a WebSocket connection. Called when connection is established.
+ * Register a WebSocket connection during the libwebsockets established callback.
  *
  * @param conn_id Unique connection ID (e.g. incrementing integer).
  * @param wsi     libwebsockets wsi (stored as ws_conn_t).
@@ -83,7 +83,7 @@ int ws_pop_incoming(char *session_id_out, size_t session_size,
  */
 int ws_send_to(const char *session_id, const char *text);
 
-/** Queue @p text for every connected WebSocket client. */
+/** Queue @p text for open WebSockets that receive broadcast events. */
 void ws_broadcast_text(const char *text);
 
 /**
