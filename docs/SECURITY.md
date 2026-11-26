@@ -100,6 +100,12 @@ The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened 
 
 ### JetPack 6 / kernel 5.15 note
 
+Landlock ABI 3 and later restrict regular file truncation to the workspace. On ABI 1 and 2, including JetPack 6 with Linux 5.15, ShellClaw adds a read-only mount policy.
+The policy applies in the command's private mount namespace. The workspace and its submounts keep their original mount permissions. The command can still resize files on writable workspace mounts.
+ShellClaw removes `CAP_SYS_ADMIN` before it starts the command. The command and its descendants cannot change the protected mounts.
+The legacy policy requires `open_tree`, `mount_setattr`, and `move_mount`. ShellClaw stops before it starts the command if the setup fails or the workspace is the root directory.
+Linux 5.15 requires the system to mount its root filesystem during boot. If the system runs directly from the initial initramfs, ShellClaw stops before it starts the command.
+
 Namespace behavior above was verified by **source audit**. On-device validation on JetPack 6.2.x is a [known pending](JETSON_SIGNOFF.md) item (not a CI or merge-to-`main` gate).
 
 ---
@@ -300,7 +306,7 @@ This section summarizes Jetson Orin Nano Super / JetPack 6.2.x concerns that do 
 |------|------------------|----------------------------|
 | Sandbox isolation | [`src/sandbox/sandbox.c`](../src/sandbox/sandbox.c), [`src/sandbox/sandbox_landlock.c`](../src/sandbox/sandbox_landlock.c) | user ns + `unshare` + PID-1 fork, Landlock workspace bound, cgroups v2, fail-closed isolation |
 | Command policy | [`src/sandbox/allowlist.c`](../src/sandbox/allowlist.c) | Blocklist (incl. Jetson GPU + Argus), workspace path containment (DiD) |
-| Gateway auth | [`src/gateway/http_lws.c`](../src/gateway/http_lws.c) | `requires_auth()` Bearer gate for `/api/*` |
+| Gateway auth | [`src/gateway/http_lws.c`](../src/gateway/http_lws.c) | The gateway validates the bearer token for `/api/*` and during the WebSocket handshake. |
 | Hardware HTTP API | [`src/gateway/routes_hardware.c`](../src/gateway/routes_hardware.c) | Read-only GET handlers, camera POST deferred stub |
 | Rate limits | [`src/gateway/rate_limit.c`](../src/gateway/rate_limit.c) | Per-IP `/asap` RPM (64-slot table); reuses expired windows; **fail-closed** (429) when table is full and no slot expired |
 | Camera spawn | [`src/hardware/hardware_camera.c`](../src/hardware/hardware_camera.c) | argv-only `execvp`, validated resolution/type/path |

@@ -398,6 +398,8 @@ static int fill_cron_job_row(sqlite3_stmt *stmt, cron_job_row_t *out)
 	copy_str_bounded(out->id, sizeof(out->id), (const char *)sqlite3_column_text(stmt, 0));
 	out->schedule = dup_sqlite_text(stmt, 1);
 	out->message = dup_sqlite_text(stmt, 2);
+	out->channel_truncated = (size_t)sqlite3_column_bytes(stmt, 3) >= sizeof(out->channel);
+	out->recipient_truncated = (size_t)sqlite3_column_bytes(stmt, 4) >= sizeof(out->recipient);
 	copy_str_bounded(out->channel, sizeof(out->channel), (const char *)sqlite3_column_text(stmt, 3));
 	copy_str_bounded(out->recipient, sizeof(out->recipient), (const char *)sqlite3_column_text(stmt, 4));
 	out->next_run = sqlite3_column_int64(stmt, 5);
@@ -449,17 +451,30 @@ int cron_job_delete(const char *id)
 	return ret;
 }
 
-int cron_job_toggle(const char *id)
+static int cron_job_set_enabled(const char *id, int disable)
 {
 	if (!g_db || !id) return -1;
 	memory_sqlite_entry_probe();
-	const char *sql = "UPDATE cron_jobs SET enabled = 1 - enabled WHERE id = ?1";
+	const char *sql = disable
+		? "UPDATE cron_jobs SET enabled = 0 WHERE id = ?1 AND enabled = 1"
+		: "UPDATE cron_jobs SET enabled = 1 - enabled WHERE id = ?1";
 	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
 	sqlite3_bind_text(stmt, 1, id, -1, SQLITE_TRANSIENT);
-	int ret = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_db) > 0) ? 0 : -1;
+	int ret = (sqlite3_step(stmt) == SQLITE_DONE &&
+		   (disable || sqlite3_changes(g_db) > 0)) ? 0 : -1;
 	sqlite3_finalize(stmt);
 	return ret;
+}
+
+int cron_job_toggle(const char *id)
+{
+	return cron_job_set_enabled(id, 0);
+}
+
+int cron_job_disable(const char *id)
+{
+	return cron_job_set_enabled(id, 1);
 }
 
 int cron_job_update_next_run(const char *id, long long next_run)
@@ -497,22 +512,37 @@ int cron_job_list(cron_job_row_t *out, int max_count)
 	return count;
 }
 
-int cron_job_list_due(long long now, cron_due_key_t *out, int max_count)
+int cron_job_list_due(long long now, const cron_due_key_t *after,
+		      cron_due_key_t *out, int max_count)
 {
-	const char *sql;
+	const char *sql = "SELECT id, next_run, channel, recipient FROM cron_jobs "
+		"WHERE next_run <= ?1 AND enabled = 1 "
+		"AND (?2 IS NULL OR next_run > ?2 OR (next_run = ?2 AND id > ?3)) "
+		"ORDER BY next_run ASC, id ASC LIMIT ?4";
 	sqlite3_stmt *stmt = NULL;
 	int count = 0;
 
 	if (!g_db || !out || max_count <= 0) return -1;
 	memory_sqlite_entry_probe();
-	sql = "SELECT id, next_run FROM cron_jobs WHERE next_run <= ?1 AND enabled = 1 "
-		"ORDER BY next_run ASC, id ASC";
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
 	sqlite3_bind_int64(stmt, 1, now);
+	if (after) {
+		sqlite3_bind_int64(stmt, 2, after->next_run);
+		sqlite3_bind_text(stmt, 3, after->id, -1, SQLITE_TRANSIENT);
+	}
+	sqlite3_bind_int(stmt, 4, max_count);
 	while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
 		copy_str_bounded(out[count].id, sizeof(out[count].id),
 				 (const char *)sqlite3_column_text(stmt, 0));
 		out[count].next_run = sqlite3_column_int64(stmt, 1);
+		out[count].channel_truncated =
+			(size_t)sqlite3_column_bytes(stmt, 2) >= sizeof(out[count].channel);
+		out[count].recipient_truncated =
+			(size_t)sqlite3_column_bytes(stmt, 3) >= sizeof(out[count].recipient);
+		copy_str_bounded(out[count].channel, sizeof(out[count].channel),
+				 (const char *)sqlite3_column_text(stmt, 2));
+		copy_str_bounded(out[count].recipient, sizeof(out[count].recipient),
+				 (const char *)sqlite3_column_text(stmt, 3));
 		count++;
 	}
 	sqlite3_finalize(stmt);

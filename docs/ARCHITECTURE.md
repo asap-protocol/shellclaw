@@ -86,7 +86,7 @@ Convention: one primary `.c` + `.h` per module; new tools go in `src/tools/<name
 
 - Binds `[gateway] host` / `port` (default `127.0.0.1:18789`).
 - **Auth:** pairing token; `/api/*` requires Bearer except `/health`, `/pair`, `/.well-known/*`.
-- **WebSocket:** browsers use subprotocol `bearer.<token>` (not `Authorization` header).
+- **WebSocket.** The gateway selects the `ws` subprotocol and validates the pairing token before the connection opens. See [WebSocket authentication](../README.md) for the browser and native client contracts.
 - **Hardware API:** `/api/hardware/*` — board info, GPIO snapshot, tegrastats on Jetson; sensor/camera panels stubbed “Coming in v1.2”.
 - **Rate limits:** per-IP on `/asap`; per-token on camera snapshot (1/sec) when enabled.
 - **Signed manifest:** `GET /.well-known/asap/manifest.json` builds and signs the JSON synchronously in the HTTP handler (single-threaded today; not safe for concurrent manifest builds without locking).

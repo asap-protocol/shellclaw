@@ -38,8 +38,8 @@ int hardware_camera_is_available(void);
  * @param sensor_id CSI sensor index (Jetson nvarguscamerasrc).
  * @param video_index USB /dev/videoN index.
  * @param output_path Optional output path; NULL selects a secure temp file.
- * @param result_path Buffer for the JPEG path written on success.
- * @param result_pathsz Size of @p result_path.
+ * @param result_path Buffer that receives the complete JPEG path on success.
+ * @param result_pathsz Buffer size in bytes. Capture requires room for the path and its terminating null byte.
  * @param errbuf Error message on failure (e.g. #HARDWARE_CAMERA_ERR_UNAVAILABLE).
  * @param errbufsz Size of @p errbuf.
  * @return 0 on success, -1 on error.

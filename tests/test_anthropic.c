@@ -130,6 +130,24 @@ static int test_parse_api_error_object_sets_error(void)
 	return 0;
 }
 
+static int test_parse_missing_or_invalid_content_returns_error(void)
+{
+	const char *bodies[] = {
+		"{}", "{\"content\":null}", "{\"content\":{}}", "{\"content\":[{}]}",
+		"{\"content\":[{\"type\":\"text\",\"text\":42}]}",
+		"{\"content\":[{\"type\":\"text\"}]}",
+		"{\"content\":[{\"type\":\"tool_use\",\"id\":\"x\",\"name\":\"echo\",\"input\":[]}]}",
+		"{\"content\":[{\"type\":\"tool_use\",\"id\":\"x\",\"input\":{}}]}",
+	};
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		provider_response_t response = {0};
+		ASSERT(anthropic_parse_response_for_test(bodies[i], &response) == -1);
+		ASSERT(response.error != 0 && response.content && response.content[0]);
+		provider_response_clear(&response);
+	}
+	return 0;
+}
+
 static int test_parse_empty_content_array_returns_zero(void)
 {
 	const char *body = "{\"content\":[]}";
@@ -142,12 +160,13 @@ static int test_parse_empty_content_array_returns_zero(void)
 
 static int test_parse_valid_text_block_returns_content(void)
 {
-	const char *body = "{\"content\":[{\"type\":\"text\",\"text\":\"Hello world\"}]}";
+	const char *body = "{\"content\":[{\"type\":\"thinking\",\"thinking\":\"internal\"},"
+		"{\"type\":\"text\",\"text\":\"Hello world\"}]}";
 	provider_response_t response = {0};
 	ASSERT(anthropic_parse_response_for_test(body, &response) == 0);
 	ASSERT(response.error == 0);
 	ASSERT(response.content != NULL);
-	ASSERT(strstr(response.content, "Hello world") != NULL);
+	ASSERT(strcmp(response.content, "Hello world") == 0);
 	provider_response_clear(&response);
 	return 0;
 }
@@ -519,6 +538,93 @@ static int test_parse_tool_realloc_failure_is_error(void)
 	provider_response_clear(&response);
 	return 0;
 }
+
+static size_t cjson_allocations;
+static size_t cjson_fail_at;
+
+static void *fail_one_cjson_allocation(size_t size)
+{
+	return ++cjson_allocations == cjson_fail_at ? NULL : malloc(size);
+}
+
+static int test_parse_tool_input_serialization_failure_is_error(void)
+{
+	const char *body = "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"echo\",\"input\":{}}]}";
+	cJSON_Hooks hooks = { .malloc_fn = fail_one_cjson_allocation, .free_fn = free };
+	provider_response_t response = {0};
+	cjson_allocations = 0;
+	cjson_fail_at = 0;
+	cJSON_InitHooks(&hooks);
+	cJSON *parsed = cJSON_Parse(body);
+	int parsed_ok = parsed != NULL;
+	/* Fail the first allocation after parsing the response JSON. */
+	cjson_fail_at = cjson_allocations + 1;
+	cjson_allocations = 0;
+	cJSON_Delete(parsed);
+	int rc = anthropic_parse_response_for_test(body, &response);
+	cJSON_InitHooks(NULL);
+	ASSERT(parsed_ok && rc == -1 && response.error && response.tool_calls_count == 0);
+	provider_response_clear(&response);
+	return 0;
+}
+
+/** A stored assistant turn with no text must not be replayed as an empty block. */
+static int test_blank_assistant_string_is_nonempty(void)
+{
+	provider_message_t messages[2];
+	char *json;
+	const char *kept = "The model returned no text.";
+
+	memset(messages, 0, sizeof(messages));
+	messages[0].role = "user";
+	messages[0].content = "continue";
+	messages[1].role = "assistant";
+	messages[1].content = "";
+	json = anthropic_messages_json_for_test(messages, 2);
+	ASSERT(json != NULL);
+	ASSERT(strstr(json, "\"content\":\"\"") == NULL);
+	ASSERT(strstr(json, kept) != NULL);
+	cJSON_free(json);
+
+	messages[1].content = " \n\t";
+	json = anthropic_messages_json_for_test(messages, 2);
+	ASSERT(json != NULL);
+	ASSERT(strstr(json, kept) != NULL);
+	ASSERT(strstr(json, "\\n\\t") == NULL);
+	cJSON_free(json);
+
+	messages[1].content = "partial";
+	json = anthropic_messages_json_for_test(messages, 2);
+	ASSERT(json != NULL);
+	ASSERT(strstr(json, "partial") != NULL);
+	ASSERT(strstr(json, kept) == NULL);
+	cJSON_free(json);
+	return 0;
+}
+
+/** Whitespace next to tool_use must not be sent as a text block. */
+static int test_whitespace_tool_text_is_omitted(void)
+{
+	provider_tool_call_t calls[1] = {
+		{.id = "toolu_a", .name = "shell", .arguments = "{\"command\":\"pwd\"}"},
+	};
+	provider_message_t messages[2];
+	char *json;
+
+	memset(messages, 0, sizeof(messages));
+	messages[0].role = "user";
+	messages[0].content = "run";
+	messages[1].role = "assistant";
+	messages[1].content = " \n";
+	messages[1].tool_calls = calls;
+	messages[1].tool_calls_count = 1;
+	json = anthropic_messages_json_for_test(messages, 2);
+	ASSERT(json != NULL);
+	ASSERT(strstr(json, "tool_use") != NULL);
+	ASSERT(strstr(json, "\"text\"") == NULL);
+	cJSON_free(json);
+	return 0;
+}
 #endif
 
 int main(void)
@@ -531,6 +637,7 @@ int main(void)
 #ifdef SHELLCLAW_TEST
 	RUN(test_parse_malformed_json_sets_error());
 	RUN(test_parse_api_error_object_sets_error());
+	RUN(test_parse_missing_or_invalid_content_returns_error());
 	RUN(test_parse_empty_content_array_returns_zero());
 	RUN(test_parse_valid_text_block_returns_content());
 	RUN(test_parse_null_json_returns_error());
@@ -542,6 +649,9 @@ int main(void)
 	RUN(test_tool_results_do_not_merge_across_assistant_rounds());
 	RUN(test_parse_text_realloc_failure_is_error());
 	RUN(test_parse_tool_realloc_failure_is_error());
+	RUN(test_parse_tool_input_serialization_failure_is_error());
+	RUN(test_blank_assistant_string_is_nonempty());
+	RUN(test_whitespace_tool_text_is_omitted());
 	RUN(test_example_model_prefix_is_stripped());
 #endif
 	printf("test_anthropic: all tests passed\n");

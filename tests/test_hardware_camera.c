@@ -5,12 +5,13 @@
 
 #include "test_runner.h"
 #include "hardware/hardware_camera.h"
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-static char s_spawn_out_path[256];
+static char s_spawn_out_path[PATH_MAX];
 static int s_spawn_fail;
 static int s_spawn_called;
 static int s_spawn_bad_jpeg;
@@ -585,7 +586,6 @@ static int test_temp_jpeg_unlinked_on_spawn_failure(void)
 {
 	char result[256];
 	char err[128];
-	char leaked_path[256];
 	RUN(setup_mock());
 	s_spawn_fail = 1;
 	ASSERT(hardware_camera_capture(BOARD_JETSON_ORIN_NANO, "csi", "640x480", 75, 0,
@@ -593,8 +593,7 @@ static int test_temp_jpeg_unlinked_on_spawn_failure(void)
 				       sizeof(err)) == -1);
 	ASSERT(strstr(err, HARDWARE_CAMERA_ERR_UNAVAILABLE) != NULL);
 	ASSERT(s_spawn_out_path[0] != '\0');
-	snprintf(leaked_path, sizeof(leaked_path), "%s", s_spawn_out_path);
-	ASSERT(access(leaked_path, F_OK) != 0);
+	ASSERT(access(s_spawn_out_path, F_OK) != 0);
 	teardown();
 	return 0;
 }
@@ -603,7 +602,6 @@ static int test_temp_jpeg_unlinked_on_invalid_jpeg(void)
 {
 	char result[256];
 	char err[128];
-	char leaked_path[256];
 	RUN(setup_mock());
 	s_spawn_bad_jpeg = 1;
 	ASSERT(hardware_camera_capture(BOARD_JETSON_ORIN_NANO, "csi", "640x480", 75, 0,
@@ -611,8 +609,7 @@ static int test_temp_jpeg_unlinked_on_invalid_jpeg(void)
 				       sizeof(err)) == -1);
 	ASSERT(strstr(err, HARDWARE_CAMERA_ERR_UNAVAILABLE) != NULL);
 	ASSERT(s_spawn_out_path[0] != '\0');
-	snprintf(leaked_path, sizeof(leaked_path), "%s", s_spawn_out_path);
-	ASSERT(access(leaked_path, F_OK) != 0);
+	ASSERT(access(s_spawn_out_path, F_OK) != 0);
 	teardown();
 	return 0;
 }
@@ -637,6 +634,39 @@ static int test_caller_supplied_output_not_unlinked_on_error(void)
 	/* Caller-owned path must survive the module's internal failure. */
 	ASSERT(access(caller_path, F_OK) == 0);
 	unlink(caller_path);
+	teardown();
+	return 0;
+}
+
+static int test_capture_uses_the_entire_path(void)
+{
+	char ws[128];
+	char path[257];
+	char result[sizeof(path)];
+	char err[128];
+	size_t prefix;
+
+	ASSERT(test_runner_mkdtemp_path("shellclaw_cam_path", ws, sizeof(ws)) == 0);
+	snprintf(path, sizeof(path), "%s/", ws);
+	prefix = strlen(path);
+	memset(path + prefix, 'a', sizeof(path) - prefix - 1);
+	path[sizeof(path) - 1] = '\0';
+	RUN(setup_mock());
+	hardware_camera_set_workspace(ws);
+	ASSERT(hardware_camera_capture(BOARD_RPI_ZERO2W, "csi", "640x480", 75, 0, 0,
+				       path, result, sizeof(result) - 1, err, sizeof(err)) < 0);
+	ASSERT(!s_spawn_called);
+	ASSERT(hardware_camera_capture(BOARD_RPI_ZERO2W, "csi", "640x480", 75, 0, 0,
+				       path, result, sizeof(result), err, sizeof(err)) == 0);
+	ASSERT(strcmp(result, path) == 0 && strcmp(s_spawn_out_path, path) == 0);
+	ASSERT(unlink(path) == 0);
+	ASSERT(hardware_camera_capture(BOARD_JETSON_ORIN_NANO, "csi", "640x480", 75, 0, 0,
+				       path, result, sizeof(result), err, sizeof(err)) == 0);
+	ASSERT(strcmp(result, path) == 0 && strcmp(s_spawn_out_path, path) == 0);
+	ASSERT(unlink(path) == 0);
+	path[255] = '\0';
+	ASSERT(access(path, F_OK) != 0);
+	ASSERT(rmdir(ws) == 0);
 	teardown();
 	return 0;
 }
@@ -679,6 +709,7 @@ int main(void)
 	RUN(test_temp_jpeg_unlinked_on_spawn_failure());
 	RUN(test_temp_jpeg_unlinked_on_invalid_jpeg());
 	RUN(test_caller_supplied_output_not_unlinked_on_error());
+	RUN(test_capture_uses_the_entire_path());
 	RUN(test_default_spawn_times_out());
 	printf("All hardware_camera tests passed.\n");
 	return 0;

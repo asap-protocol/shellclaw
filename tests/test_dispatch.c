@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "channels/channel.h"
+#include "channels/heartbeat.h"
 #include "core/bootstrap.h"
 
 void bootstrap_set_provider_for_test(const provider_t *provider);
@@ -16,6 +17,7 @@ void bootstrap_add_tool_for_test(const tool_t *tool);
 #include "core/memory.h"
 #include "core/version.h"
 #include "providers/provider.h"
+#include "tools/cron.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +43,10 @@ void bootstrap_add_tool_for_test(const tool_t *tool);
 static char g_last_session[SEND_BUF_SIZE];
 static char g_last_text[SEND_BUF_SIZE];
 static int g_send_calls;
+static int g_send_error;
+static const char *g_spy_reply;
+static const char *g_spy_openai_body;
+static const config_t *g_reload_during_send;
 static size_t g_last_provider_tool_count;
 static int g_agent_mutex_held_during_chat;
 static int g_agent_mutex_held_during_reset;
@@ -55,7 +61,13 @@ static int mock_send(const char *session_id, const char *text,
 	g_last_session[sizeof(g_last_session) - 1] = '\0';
 	strncpy(g_last_text, text ? text : "", sizeof(g_last_text) - 1);
 	g_last_text[sizeof(g_last_text) - 1] = '\0';
-	return 0;
+	if (g_reload_during_send) {
+		agent_lock();
+		heartbeat_set_live_config(g_reload_during_send);
+		agent_unlock();
+		g_reload_during_send = NULL;
+	}
+	return g_send_error;
 }
 
 static const channel_t mock_channel = {
@@ -88,8 +100,10 @@ static int spy_chat(const provider_message_t *messages, size_t message_count,
 	(void)message_count;
 	(void)tools;
 	g_last_provider_tool_count = tool_count;
+	if (g_spy_openai_body)
+		return provider_parse_chat_completions_json(g_spy_openai_body, response);
 	response->error = 0;
-	response->content = strdup("agent-ok");
+	response->content = g_spy_reply ? strdup(g_spy_reply) : NULL;
 	response->tool_calls = NULL;
 	response->tool_calls_count = 0;
 	return 0;
@@ -185,6 +199,8 @@ static int write_minimal_toml(const char *path)
 static void reset_send_spy(void)
 {
 	g_send_calls = 0;
+	g_send_error = 0;
+	g_spy_reply = "agent-ok";
 	g_last_session[0] = '\0';
 	g_last_text[0] = '\0';
 	g_last_provider_tool_count = 0;
@@ -439,6 +455,93 @@ static int test_cron_agent_failure_does_not_ack(void)
 	return 0;
 }
 
+static int test_cron_blank_reply_acks_without_sending(void)
+{
+	const channel_t *cron = channel_cron_get();
+	const char *db_path = "build/test_dispatch_cron_blank.db";
+	const char *replies[] = {NULL, "", " \t\r\n\v\f", "reminder"};
+	const char *schedules[] = {"at:1", "interval:60", "interval:60", "interval:60"};
+	char tmpl[] = "/tmp/shellclaw_test_dispatch_cron_blank_XXXXXX";
+	long long due_at = (long long)time(NULL) - 1;
+	channel_incoming_msg_t msg = {.session_id = "cli:default", .text = "remind me"};
+	config_t *cfg;
+	int fd = mkstemp(tmpl);
+
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(write_minimal_toml(tmpl) == 0);
+	cfg = load_minimal_cfg(tmpl);
+	ASSERT(cfg != NULL);
+	memory_cleanup();
+	remove(db_path);
+	ASSERT(memory_init(db_path) == 0);
+	bootstrap_set_cfg(cfg);
+	bootstrap_set_provider_for_test(&spy_provider);
+	bootstrap_reset_tools_for_test();
+	channel_register("cli", &mock_channel);
+	for (size_t i = 0; i < sizeof(replies) / sizeof(replies[0]); i++) {
+		cron_job_row_t row = {0};
+		char id[16];
+		snprintf(id, sizeof(id), "job_%zu", i);
+		ASSERT(cron_job_create(id, schedules[i], msg.text, "cli", "default", due_at, 1) == 0);
+		msg.user_id = id;
+		reset_send_spy();
+		g_spy_reply = replies[i];
+		g_send_error = -3;
+		if (i < 3) {
+			ASSERT(handle_message(cron, &msg) == 0);
+			ASSERT(g_send_calls == 0);
+			ASSERT(cron_job_get_by_id(id, &row) == (i > 0 ? 1 : 0));
+			if (i > 0)
+				ASSERT(row.next_run > due_at);
+		} else {
+			ASSERT(handle_message(cron, &msg) == -3);
+			ASSERT(g_send_calls == 1);
+			ASSERT(cron_job_get_by_id(id, &row) == 1);
+			ASSERT(row.next_run == due_at);
+		}
+		cron_job_row_free(&row);
+	}
+	const char *valid_blank = "{\"choices\":[{\"message\":{\"content\":null}}]}";
+	const char *invalid_tools = "{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":{}}}]}";
+	const char *bodies[] = { valid_blank, "{}", invalid_tools, valid_blank };
+	const char *channels[] = { "telegram", "cli", "cli", "cli" };
+	const char *recipients[] = { "42", "malformed", "invalid-tools", "silent" };
+	const char *routes[] = { "telegram:42", "cli:malformed", "cli:invalid-tools", "cli:silent" };
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		cron_job_row_t row = {0};
+		char history[512];
+		char id[16];
+		snprintf(id, sizeof(id), "parsed_%zu", i);
+		ASSERT(cron_job_create(id, "at:1", msg.text, channels[i], recipients[i], due_at, 1) == 0);
+		reset_send_spy();
+		g_spy_openai_body = bodies[i];
+		msg.user_id = id;
+		msg.session_id = (char *)routes[i];
+		ASSERT(handle_message(cron, &msg) == (i == 0 ? -1 : 0));
+		ASSERT(g_send_calls == (i == 1 || i == 2 ? 1 : 0));
+		ASSERT(cron_job_get_by_id(id, &row) == (i < 3 ? 1 : 0));
+		if (i < 3)
+			ASSERT(row.next_run == due_at && row.enabled);
+		if (i == 1 || i == 2)
+			ASSERT(session_load(routes[i], history, sizeof(history)) != 0);
+		cron_job_row_free(&row);
+	}
+	g_spy_openai_body = NULL;
+	reset_send_spy();
+	msg.user_id = NULL;
+	g_spy_reply = "";
+	g_send_error = -3;
+	ASSERT(handle_message(&mock_channel, &msg) == -3);
+	ASSERT(g_send_calls == 1);
+	reset_send_spy();
+	config_free(cfg);
+	unlink(tmpl);
+	memory_cleanup();
+	remove(db_path);
+	return 0;
+}
+
 static int test_handle_message_holds_agent_mutex(void)
 {
 	channel_incoming_msg_t msg = {0};
@@ -465,6 +568,78 @@ static int test_handle_message_holds_agent_mutex(void)
 	ASSERT(agent_mutex_is_locked_for_test() == 0);
 	config_free(cfg);
 	unlink(tmpl);
+	return 0;
+}
+
+static config_t *load_heartbeat_cfg(const char *path, const char *destination)
+{
+	FILE *file = fopen(path, "w");
+	if (!file)
+		return NULL;
+	int written = fprintf(file, "[agent]\nmodel = \"test\"\n[heartbeat]\n"
+	                            "enabled = true\ndefault_channel = \"%s\"\n", destination);
+	if (fclose(file) != 0 || written < 0)
+		return NULL;
+	return load_minimal_cfg(path);
+}
+
+static int test_cron_rechecks_heartbeat_only_for_silent_delivery(void)
+{
+	const channel_t *heartbeat = channel_heartbeat_get();
+	const channel_t *cron = channel_cron_get();
+	char path[] = "/tmp/shellclaw_test_dispatch_heartbeat_XXXXXX";
+	int fd = mkstemp(path);
+	ASSERT(fd >= 0);
+	close(fd);
+	config_t *ready = load_heartbeat_cfg(path, "cli");
+	config_t *unavailable = load_heartbeat_cfg(path, "webchat");
+	ASSERT(ready && unavailable);
+	ASSERT(memory_init(":memory:") == 0);
+	ASSERT(heartbeat->init(ready) == 0 && cron->init(ready) == 0);
+	channel_register("cli", &mock_channel);
+	channel_register("heartbeat", heartbeat);
+	bootstrap_set_cfg(ready);
+	bootstrap_set_provider_for_test(&spy_provider);
+	bootstrap_reset_tools_for_test();
+	for (int silent = 1; silent >= 0; silent--) {
+		char id[32];
+		channel_incoming_msg_t msg = {0};
+		cron_job_row_t row = {0};
+		long long due_at = (long long)time(NULL) - 1;
+		snprintf(id, sizeof(id), "heartbeat_%d", silent);
+		reset_send_spy();
+		agent_lock();
+		heartbeat_set_live_config(ready);
+		agent_unlock();
+		ASSERT(cron_job_create(id, "at:1", "remind me", "heartbeat", "default", due_at, 1) == 0);
+		ASSERT(cron->poll(&msg, 0) == 1);
+		g_spy_reply = silent ? "" : "delivered";
+		if (silent) {
+			agent_lock();
+			heartbeat_set_live_config(unavailable);
+			agent_unlock();
+		} else {
+			g_reload_during_send = unavailable;
+		}
+		ASSERT(handle_message(cron, &msg) == (silent ? -1 : 0));
+		ASSERT(g_send_calls == (silent ? 0 : 1) && !g_reload_during_send);
+		ASSERT(cron_job_get_by_id(id, &row) == silent);
+		if (silent) {
+			ASSERT(row.enabled && row.next_run == due_at);
+			ASSERT(cron_job_delete(id) == 0);
+		} else {
+			ASSERT(strcmp(g_last_text, "delivered") == 0);
+		}
+		cron_job_row_free(&row);
+		channel_incoming_msg_clear(&msg);
+	}
+	reset_send_spy();
+	cron->cleanup();
+	heartbeat->cleanup();
+	memory_cleanup();
+	config_free(ready);
+	config_free(unavailable);
+	unlink(path);
 	return 0;
 }
 
@@ -502,6 +677,8 @@ int main(void)
 	RUN(test_handle_message_holds_agent_mutex());
 	RUN(test_cron_slash_commands_ack_jobs());
 	RUN(test_cron_agent_failure_does_not_ack());
+	RUN(test_cron_blank_reply_acks_without_sending());
+	RUN(test_cron_rechecks_heartbeat_only_for_silent_delivery());
 	puts("test_dispatch OK");
 	return 0;
 }

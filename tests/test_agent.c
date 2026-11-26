@@ -139,6 +139,45 @@ static const provider_t always_tool_provider = {
 	.cleanup = always_tool_cleanup,
 };
 
+/* Tool-only replies often have no text. The cap drops the tool calls and
+ * must not store that blank body: Anthropic rejects it on the next turn. */
+static int blank_cap_calls;
+static const char *blank_cap_body;
+static int blank_cap_init(const config_t *cfg) { (void)cfg; blank_cap_calls = 0; return 0; }
+static int blank_cap_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	(void)messages;
+	(void)message_count;
+	(void)tools;
+	(void)tool_count;
+	response->error = 0;
+	blank_cap_calls++;
+	response->content = blank_cap_body ? strdup(blank_cap_body) : NULL;
+	response->tool_calls = malloc(sizeof(provider_tool_call_t));
+	if (!response->tool_calls || (blank_cap_body && !response->content)) {
+		free(response->content);
+		free(response->tool_calls);
+		response->content = NULL;
+		response->tool_calls = NULL;
+		response->tool_calls_count = 0;
+		response->error = 1;
+		return -1;
+	}
+	response->tool_calls[0].id = strdup("tid");
+	response->tool_calls[0].name = strdup("echo");
+	response->tool_calls[0].arguments = strdup("{}");
+	response->tool_calls_count = 1;
+	return 0;
+}
+static void blank_cap_cleanup(void) {}
+static const provider_t blank_cap_provider = {
+	.name = "blank_cap",
+	.init = blank_cap_init,
+	.chat = blank_cap_chat,
+	.cleanup = blank_cap_cleanup,
+};
+
 static int mock_echo_execute(const char *args_json, char *result_buf, size_t max_len)
 {
 	(void)args_json;
@@ -304,6 +343,61 @@ static int test_react_loop_max_iterations(void)
 cleanup:
 	config_free(cfg);
 	remove(path);
+	return failed;
+}
+
+static int test_tool_cap_blank_reply_stays_replayable(void)
+{
+	int failed = 1;
+	const char *db_path = "build/test_agent_blankcap.db";
+	const char *config_path = "build/test_agent_blankcap.toml";
+	const char *kept = "Stopped: tool iteration limit reached.";
+	const char *bodies[] = { NULL, "", " \n\t" };
+	config_t *cfg = NULL;
+	char errbuf[256];
+	char response_buf[4096];
+	char loaded[8192];
+	char expected[256];
+	FILE *cf;
+	memory_cleanup();
+	if (memory_init(db_path) != 0) goto cleanup;
+	cf = fopen(config_path, "w");
+	if (!cf) goto cleanup;
+	fprintf(cf, "[agent]\nmodel = \"anthropic/claude-sonnet-4-20250514\"\n"
+		"max_tool_iterations = 1\n[memory]\ndb_path = \"%s\"\n", db_path);
+	fclose(cf);
+	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0 || cfg == NULL)
+		goto cleanup;
+	snprintf(expected, sizeof(expected), "[{\"role\":\"user\",\"content\":\"keep going\"},"
+		 "{\"role\":\"assistant\",\"content\":\"%s\"}]", kept);
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		char session_id[32];
+		snprintf(session_id, sizeof(session_id), "cli:blankcap:%zu", i);
+		blank_cap_body = bodies[i];
+		blank_cap_calls = 0;
+		if (agent_run(cfg, session_id, "keep going", &blank_cap_provider, &mock_echo_tool, 1,
+			      response_buf, sizeof(response_buf)) != 0 ||
+		    blank_cap_calls != 2 || strcmp(response_buf, kept) != 0 ||
+		    session_load(session_id, loaded, sizeof(loaded)) != 0 ||
+		    strcmp(loaded, expected) != 0) {
+			fprintf(stderr, "FAIL: tool limit case %zu did not return and save the notice\n", i);
+			goto cleanup;
+		}
+		if (agent_run(cfg, session_id, "continue", &spy_provider, &mock_echo_tool, 1,
+			      response_buf, sizeof(response_buf)) != 0 ||
+		    spy_message_count < 4 || !spy_roles[2] ||
+		    strcmp(spy_roles[2], "assistant") != 0 || strcmp(spy_content[2], kept) != 0) {
+			fprintf(stderr, "FAIL: tool limit case %zu did not replay the notice\n", i);
+			goto cleanup;
+		}
+	}
+	failed = 0;
+cleanup:
+	spy_provider.cleanup();
+	config_free(cfg);
+	remove(config_path);
+	remove(db_path);
+	memory_cleanup();
 	return failed;
 }
 
@@ -1628,6 +1722,71 @@ cleanup_early:
 	return failed;
 }
 
+static const char *mock_summary_body;
+static int blank_summary_chat(const provider_message_t *messages, size_t message_count,
+	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
+{
+	if (message_count == 2) {
+		response->content = mock_summary_body ? strdup(mock_summary_body) : NULL;
+		return mock_summary_body && !response->content ? -1 : 0;
+	}
+	return spy_chat(messages, message_count, tools, tool_count, response);
+}
+
+static const provider_t blank_summary_provider = {
+	.name = "blank_summary",
+	.init = spy_init,
+	.chat = blank_summary_chat,
+	.cleanup = spy_cleanup,
+};
+
+static int test_blank_compaction_summary_keeps_history(void)
+{
+	const char *db_path = "build/test_blank_summary.db";
+	const char *config_path = "build/test_blank_summary.toml";
+	const char *session_id = "cli:blank-summary";
+	const char *bodies[] = { "", " \t\r\n", NULL };
+	config_t *cfg = NULL;
+	char before[4096];
+	char after[4096];
+	char response[32];
+	char err[256];
+	int failed = 1;
+
+	memory_cleanup();
+	FILE *cf = fopen(config_path, "w");
+	if (!cf) goto cleanup;
+	fputs("[agent]\nmodel = \"test\"\nmax_context_messages = 4\n", cf);
+	fclose(cf);
+	if (memory_init(db_path) != 0 ||
+	    config_load(config_path, &cfg, err, sizeof(err)) != 0)
+		goto cleanup;
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		mock_summary_body = bodies[i];
+		if (save_alternating_session(session_id, 6) != 0 ||
+		    session_load(session_id, before, sizeof(before)) != 0 ||
+		    agent_run(cfg, session_id, "new prompt", &blank_summary_provider, NULL, 0,
+		              response, sizeof(response)) != 0 ||
+		    session_load(session_id, after, sizeof(after)) != 0)
+			goto cleanup;
+		if (strcmp(response, "ok") != 0 || strlen(before) == 0 ||
+		    strncmp(before, after, strlen(before) - 1) != 0 ||
+		    strcmp(after + strlen(before) - 1, ",{\"role\":\"user\",\"content\":\"new prompt\"},"
+		           "{\"role\":\"assistant\",\"content\":\"ok\"}]") != 0) {
+			fprintf(stderr, "FAIL: blank summary case %zu changed prior history or lost the new turn\n", i);
+			goto cleanup;
+		}
+	}
+	failed = 0;
+cleanup:
+	spy_cleanup();
+	config_free(cfg);
+	memory_cleanup();
+	remove(config_path);
+	remove(db_path);
+	return failed;
+}
+
 /* Odd max_context_messages cuts the tail on a user turn. A separate summary
  * user message then makes every later Anthropic call a 400. */
 static int test_compaction_merges_summary_when_tail_starts_with_user(void)
@@ -1706,6 +1865,79 @@ cleanup_early:
 	return failed;
 }
 
+
+static int test_history_replay_preserves_assistant_role(void)
+{
+	const char *db_path = "build/test_history_replay.db";
+	const char *config_path = "build/test_history_replay.toml";
+	const char *session_id = "cli:history-replay";
+	const char *folded_head = "[{\"role\":\"assistant\",\"content\":\"Summary of earlier";
+	enum { REPLY = 65500, CAP = 128 * 1024 };
+	config_t *cfg = NULL;
+	char err[256];
+	char response[32];
+	char *json = malloc(CAP);
+	char *reply = malloc(REPLY + 1);
+	int failed = 1;
+
+	memory_cleanup();
+	if (!json || !reply || memory_init(db_path) != 0) goto cleanup;
+	FILE *cf = fopen(config_path, "w");
+	if (!cf) goto cleanup;
+	fputs("[agent]\nmodel = \"test\"\nmax_context_messages = 5\n", cf);
+	fclose(cf);
+	if (config_load(config_path, &cfg, err, sizeof(err)) != 0) goto cleanup;
+	memset(reply, 'B', REPLY);
+	memcpy(reply + REPLY - 11, "BIGASST_END", 11);
+	reply[REPLY] = '\0';
+	/* One folded history fits the window. The other needs a second cut. */
+	for (int count = 6; count <= 8; count += 2) {
+		size_t off = (size_t)snprintf(json, CAP,
+			"[{\"role\":\"user\",\"content\":\"Please compare the options above.\"},"
+			"{\"role\":\"assistant\",\"content\":\"%s\"}", reply);
+		for (int i = 2; i < count; i++) {
+			off += (size_t)snprintf(json + off, CAP - off,
+				",{\"role\":\"%s\",\"content\":\"msg_%d\"}",
+				i % 2 ? "assistant" : "user", i);
+		}
+		snprintf(json + off, CAP - off, "]");
+		if (session_save(session_id, json) != 0 ||
+		    agent_run(cfg, session_id, "new prompt", &compaction_provider, NULL, 0,
+		              response, sizeof(response)) != 0 ||
+		    session_load(session_id, json, CAP) != 0)
+			goto cleanup;
+		const char *expected = count == 6 ? "Summary of earlier" : "msg_3";
+		if (!spy_roles[1] || strcmp(spy_roles[1], "user") != 0 ||
+		    !spy_roles[2] || strcmp(spy_roles[2], "assistant") != 0 ||
+		    strncmp(spy_content[2], expected, strlen(expected)) != 0 ||
+		    strncmp(json, folded_head, strlen(folded_head)) != 0 ||
+		    strstr(json, "BIGASST_END") == NULL) {
+			fprintf(stderr, "FAIL: replay changed the role or content of a folded turn (%d messages)\n", count);
+			goto cleanup;
+		}
+	}
+	/* Older rows can already start with an assistant message. */
+	if (session_save(session_id, "[{\"role\":\"assistant\",\"content\":\"old reply\"}]") != 0 ||
+	    agent_run(cfg, session_id, "new prompt", &spy_provider, NULL, 0,
+	              response, sizeof(response)) != 0)
+		goto cleanup;
+	if (!spy_roles[1] || strcmp(spy_roles[1], "user") != 0 ||
+	    !spy_roles[2] || strcmp(spy_roles[2], "assistant") != 0 ||
+	    strcmp(spy_content[2], "old reply") != 0) {
+		fprintf(stderr, "FAIL: replay changed the role or content of a stored assistant turn\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	spy_cleanup();
+	config_free(cfg);
+	free(reply);
+	free(json);
+	memory_cleanup();
+	remove(config_path);
+	remove(db_path);
+	return failed;
+}
 
 static int test_local_offline_note_when_active_is_local(void)
 {
@@ -1985,6 +2217,7 @@ static int test_local_offline_note_skipped_for_non_local(void)
 /* SESSION_JSON_MAX in agent.c is 128 KiB. A reply this large plus a near-full
  * prior session forces append_exchange_to_session_json over the cap. */
 #define OVERFLOW_REPLY_BYTES (16 * 1024)
+static const char overflow_reply_suffix[] = "\xC3\xA9\xE6\x97\xA5";
 
 static int overflow_reply_init(const config_t *cfg) { (void)cfg; return 0; }
 static int overflow_reply_chat(const provider_message_t *messages, size_t message_count,
@@ -2000,8 +2233,9 @@ static int overflow_reply_chat(const provider_message_t *messages, size_t messag
 	response->tool_calls_count = 0;
 	big = malloc(OVERFLOW_REPLY_BYTES);
 	if (!big) return -1;
-	memset(big, 'R', OVERFLOW_REPLY_BYTES - 1);
-	big[OVERFLOW_REPLY_BYTES - 1] = '\0';
+	memset(big, 'R', OVERFLOW_REPLY_BYTES - sizeof(overflow_reply_suffix));
+	memcpy(big + OVERFLOW_REPLY_BYTES - sizeof(overflow_reply_suffix),
+	       overflow_reply_suffix, sizeof(overflow_reply_suffix));
 	response->content = big;
 	return 0;
 }
@@ -2013,6 +2247,8 @@ static const provider_t overflow_reply_provider = {
 	.cleanup = overflow_reply_cleanup,
 };
 
+static const char *expected_history_reply;
+static int replayed_history_reply;
 static int keep_history_init(const config_t *cfg) { (void)cfg; return 0; }
 static int keep_history_chat(const provider_message_t *messages, size_t message_count,
 	const provider_tool_def_t *tools, size_t tool_count, provider_response_t *response)
@@ -2029,6 +2265,9 @@ static int keep_history_chat(const provider_message_t *messages, size_t message_
 		spy_roles[i] = messages[i].role ? strdup(messages[i].role) : NULL;
 		if (messages[i].content) {
 			size_t n = strlen(messages[i].content);
+			if (expected_history_reply && spy_roles[i] && strcmp(spy_roles[i], "assistant") == 0 &&
+			    strcmp(messages[i].content, expected_history_reply) == 0)
+				replayed_history_reply = 1;
 			if (n >= SPY_CONTENT_SIZE) n = SPY_CONTENT_SIZE - 1;
 			memcpy(spy_content[i], messages[i].content, n);
 			spy_content[i][n] = '\0';
@@ -2045,12 +2284,50 @@ static const provider_t keep_history_provider = {
 	.cleanup = keep_history_cleanup,
 };
 
-/**
- * Concrete trigger: near-cap session JSON + fat assistant reply.
- * Before the fix, append truncated mid-JSON, session_save persisted corrupt
- * payload, and the next agent_run parse wiped history. After the fix, overflow
- * refuses to save and prior history remains parseable.
- */
+static int oversized_exchange_keeps_shortened_history(const config_t *cfg)
+{
+	const char *session_id = "cli:large-exchange";
+	const char *marker = "[truncated]";
+	enum { REPEATS = 18 * 1024 + 3, CAP = 128 * 1024 };
+	char *input = malloc(REPEATS * 3 + 3);
+	char *loaded = malloc(CAP);
+	char response[OVERFLOW_REPLY_BYTES + 64];
+	cJSON *parsed = NULL;
+	int failed = 1;
+
+	if (!input || !loaded) goto cleanup;
+	/* JSON escapes the control byte. The accented character uses two bytes. */
+	for (size_t i = 0; i < REPEATS; i++)
+		memcpy(input + i * 3, "\x01\xC3\xA9", 3);
+	memcpy(input + REPEATS * 3, "xx", 3);
+	if (agent_run(cfg, session_id, input, &overflow_reply_provider, NULL, 0,
+	              response, sizeof(response)) != 0 ||
+	    strlen(response) != OVERFLOW_REPLY_BYTES - 1 ||
+	    session_load(session_id, loaded, CAP) != 0) {
+		fprintf(stderr, "FAIL: the oversized exchange did not save both turns\n");
+		goto cleanup;
+	}
+	parsed = cJSON_Parse(loaded);
+	const cJSON *user = cJSON_GetObjectItem(cJSON_GetArrayItem(parsed, 0), "content");
+	const cJSON *assistant = cJSON_GetObjectItem(cJSON_GetArrayItem(parsed, 1), "content");
+	const char *suffix = cJSON_IsString(user) ? strstr(user->valuestring, marker) : NULL;
+	if (!json_roles_alternate_from_user(loaded) || cJSON_GetArraySize(parsed) != 2 ||
+	    !suffix || strcmp(suffix, marker) != 0 || !cJSON_IsString(assistant) ||
+	    strcmp(assistant->valuestring, response) != 0)
+		goto cleanup;
+	size_t preserved = (size_t)(suffix - user->valuestring);
+	if (preserved == 0 || strncmp(input, user->valuestring, preserved) != 0 ||
+	    ((unsigned char)input[preserved] & 0xC0) == 0x80)
+		goto cleanup;
+	failed = 0;
+cleanup:
+	cJSON_Delete(parsed);
+	free(loaded);
+	free(input);
+	return failed;
+}
+
+/* A new reply can exceed the byte limit before the message count triggers compaction. */
 static int test_session_overflow_does_not_corrupt_history(void)
 {
 	int failed = 1;
@@ -2059,7 +2336,7 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	const char *config_path = "build/test_agent_overflow.toml";
 	const char *session_id = "cli:overflow";
 	const char *marker = "UNIQUE_HISTORY_MARKER_xyz";
-	/* Two large messages keep msg_count under max_context so compaction does not shrink first. */
+	/* Both large messages belong to the oldest exchange. */
 	enum { PAD_A = 62 * 1024, PAD_B = 62 * 1024, LOAD_CAP = 130 * 1024 };
 	char *session_json = NULL;
 	char *pad_a = NULL;
@@ -2067,8 +2344,9 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	char *loaded = NULL;
 	size_t need;
 	size_t off = 0;
-	char response_buf[OVERFLOW_REPLY_BYTES + 64];
-	cJSON *parsed;
+	/* The response buffer cuts inside the last character of the reply. */
+	char response_buf[OVERFLOW_REPLY_BYTES - 2];
+	cJSON *parsed = NULL;
 
 	memory_cleanup();
 	if (memory_init(db_path) != 0) goto cleanup;
@@ -2079,12 +2357,13 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	pad_a[PAD_A] = '\0';
 	memset(pad_b, 'B', PAD_B);
 	pad_b[PAD_B] = '\0';
-	need = strlen(marker) + PAD_A + PAD_B + 128;
+	need = strlen(marker) + PAD_A + PAD_B + 256;
 	session_json = malloc(need);
 	if (!session_json) goto cleanup;
 	off = (size_t)snprintf(session_json, need,
-		"[{\"role\":\"user\",\"content\":\"%s%s\"},{\"role\":\"assistant\",\"content\":\"%s\"}]",
-		marker, pad_a, pad_b);
+		"[{\"role\":\"user\",\"content\":\"old prompt%s\"},{\"role\":\"assistant\",\"content\":\"old reply%s\"},"
+		"{\"role\":\"user\",\"content\":\"%s\"},{\"role\":\"assistant\",\"content\":\"recent reply\"}]",
+		pad_a, pad_b, marker);
 	if (off == 0 || off >= need) goto cleanup;
 	if (session_save(session_id, session_json) != 0) goto cleanup;
 
@@ -2107,6 +2386,11 @@ static int test_session_overflow_does_not_corrupt_history(void)
 		fprintf(stderr, "FAIL: tests/test_agent.c: overflow agent_run failed\n");
 		goto cleanup;
 	}
+	if (strlen(response_buf) != OVERFLOW_REPLY_BYTES - 4 ||
+	    strcmp(response_buf + OVERFLOW_REPLY_BYTES - 6, "\xC3\xA9") != 0) {
+		fprintf(stderr, "FAIL: response ends inside a UTF-8 character\n");
+		goto cleanup;
+	}
 
 	loaded = malloc(LOAD_CAP);
 	if (!loaded) goto cleanup;
@@ -2114,31 +2398,35 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	if (session_load(session_id, loaded, LOAD_CAP) != 0) goto cleanup;
 	parsed = cJSON_Parse(loaded);
 	if (!parsed || !cJSON_IsArray(parsed)) {
-		if (parsed) cJSON_Delete(parsed);
 		fprintf(stderr, "FAIL: tests/test_agent.c: overflow session JSON unparseable\n");
 		goto cleanup;
 	}
-	cJSON_Delete(parsed);
-	if (strstr(loaded, marker) == NULL) goto cleanup;
+	const cJSON *stored_reply = cJSON_GetObjectItem(cJSON_GetArrayItem(parsed, 3), "content");
+	if (!cJSON_IsString(stored_reply) || strcmp(stored_reply->valuestring, response_buf) != 0)
+		goto cleanup;
+	if (!json_roles_alternate_from_user(loaded) || count_session_messages(loaded) != 4 ||
+	    strstr(loaded, "old prompt") || strstr(loaded, "old reply") ||
+	    strstr(loaded, "recent reply") == NULL || strstr(loaded, "push over the limit") == NULL) {
+		fprintf(stderr, "FAIL: overflow did not retain the two newest complete exchanges\n");
+		goto cleanup;
+	}
 
-	/* Next turn must still see prior history (not wiped to empty []). */
+	/* The next request starts with the most recent retained prompt. */
 	spy_roles_clear();
+	expected_history_reply = stored_reply->valuestring;
+	replayed_history_reply = 0;
 	response_buf[0] = '\0';
 	if (agent_run(cfg, session_id, "still there?", &keep_history_provider, NULL, 0,
 	              response_buf, sizeof(response_buf)) != 0)
 		goto cleanup;
-	{
-		int found = 0;
-		for (size_t j = 0; j < spy_message_count && j < SPY_SLOTS; j++) {
-			if (strstr(spy_content[j], marker) != NULL) {
-				found = 1;
-				break;
-			}
-		}
-		if (!found) goto cleanup;
-	}
-	failed = 0;
+	if (!spy_roles[1] || strcmp(spy_roles[1], "user") != 0 ||
+	    strcmp(spy_content[1], marker) != 0 ||
+	    strcmp(spy_content[3], "push over the limit") != 0 || !replayed_history_reply)
+		goto cleanup;
+	failed = oversized_exchange_keeps_shortened_history(cfg);
 cleanup:
+	expected_history_reply = NULL;
+	cJSON_Delete(parsed);
 	config_free(cfg);
 	free(session_json);
 	free(pad_a);
@@ -2438,6 +2726,7 @@ int main(void)
 	RUN(test_context_assembly_system_prompt_history_memories());
 	RUN(test_react_loop_tool_then_text());
 	RUN(test_react_loop_max_iterations());
+	RUN(test_tool_cap_blank_reply_stays_replayable());
 	RUN(test_react_loop_preserves_prior_tool_results());
 	RUN(test_session_persisted_after_exchange());
 	RUN(test_context_compaction_when_history_exceeds_max());
@@ -2450,7 +2739,9 @@ int main(void)
 	RUN(test_compaction_folds_assistant_line_that_fits_a_fresh_source());
 	RUN(test_compaction_progresses_when_assistant_message_is_oversized());
 	RUN(test_compaction_failure_keeps_original_session());
+	RUN(test_blank_compaction_summary_keeps_history());
 	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
+	RUN(test_history_replay_preserves_assistant_role());
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());
 	RUN(test_session_overflow_does_not_corrupt_history());

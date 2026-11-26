@@ -175,12 +175,46 @@ static int test_parse_api_error_object_sets_error(void)
 	return 0;
 }
 
-static int test_parse_empty_choices_returns_zero(void)
+static int test_parse_invalid_completion_returns_error(void)
 {
-	const char *body = "{\"choices\":[]}";
+	const char *bodies[] = {
+		"{}", "{\"choices\":{}}", "{\"choices\":[]}",
+		"{\"choices\":[{}]}", "{\"choices\":[{\"message\":{}}]}",
+		"{\"choices\":[{\"message\":{\"content\":42}}]}",
+		"{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":{}}}]}",
+		"{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[null]}}]}",
+		"{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":3,\"function\":{\"name\":\"echo\",\"arguments\":\"{}\"}}]}}]}",
+		"{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"x\",\"function\":{\"name\":\"echo\",\"arguments\":{}}}]}}]}",
+	};
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		provider_response_t response = {0};
+		ASSERT(openai_parse_response_for_test(bodies[i], &response) == -1);
+		ASSERT(response.error != 0 && response.content && response.content[0]);
+		provider_response_clear(&response);
+	}
+	return 0;
+}
+
+static int test_parse_silent_and_tool_only_messages(void)
+{
+	const char *silent[] = {
+		"{\"choices\":[{\"message\":{\"content\":null}}]}",
+		"{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":null}}]}",
+		"{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[]}}]}",
+	};
+	const char *tool_only = "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"call_1\","
+		"\"function\":{\"name\":\"echo\",\"arguments\":\"{}\"}}]}}]}";
 	provider_response_t response = {0};
-	ASSERT(openai_parse_response_for_test(body, &response) == 0);
-	ASSERT(response.error == 0);
+	for (size_t i = 0; i < sizeof(silent) / sizeof(silent[0]); i++) {
+		ASSERT(openai_parse_response_for_test(silent[i], &response) == 0);
+		ASSERT(response.error == 0 && provider_text_is_blank(response.content));
+		ASSERT(response.tool_calls_count == 0);
+		provider_response_clear(&response);
+	}
+	ASSERT(openai_parse_response_for_test(tool_only, &response) == 0);
+	ASSERT(response.error == 0 && provider_text_is_blank(response.content));
+	ASSERT(response.tool_calls_count == 1 && response.tool_calls[0].name &&
+	       strcmp(response.tool_calls[0].name, "echo") == 0);
 	provider_response_clear(&response);
 	return 0;
 }
@@ -326,7 +360,8 @@ int main(void)
 #ifdef SHELLCLAW_TEST
 	RUN(test_parse_malformed_json_sets_error());
 	RUN(test_parse_api_error_object_sets_error());
-	RUN(test_parse_empty_choices_returns_zero());
+	RUN(test_parse_invalid_completion_returns_error());
+	RUN(test_parse_silent_and_tool_only_messages());
 	RUN(test_parse_valid_message_returns_content());
 	RUN(test_parse_null_json_returns_error());
 	RUN(test_build_chat_body_serializes_tool_calls());

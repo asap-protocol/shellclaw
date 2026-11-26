@@ -11,11 +11,12 @@
 #include "gateway/uri_match.h"
 #include "gateway/static.h"
 #include "gateway/ws.h"
-#include "cJSON.h"
+#include "gateway/ws_rx.h"
 #include <libwebsockets.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static void http_lws_tx_completed(struct lws *wsi)
 {
@@ -129,41 +130,32 @@ const char *http_request_bearer_token(struct lws *wsi, char *buf, size_t buf_siz
 	return buf + 7;
 }
 
-/** WebSocket upgrade: Bearer from Authorization (or custom header); browser may send bearer.<token> subprotocol. */
-static int ws_copy_upgrade_token(struct lws *wsi, char *token_out, size_t token_size)
+/* Browsers offer ws for negotiation and bearer.<token> for authentication. */
+static const char *ws_subprotocol_token(char *list)
 {
-	char auth_buf[256];
-	const char *token;
-	if (!wsi || !token_out || token_size == 0) return -1;
-	token_out[0] = '\0';
-	token = http_request_bearer_token(wsi, auth_buf, sizeof(auth_buf));
-	if (!token) {
-		int n = lws_hdr_custom_copy(wsi, auth_buf, sizeof(auth_buf), "authorization", 13);
-		if (n > 7 && strncmp(auth_buf, "Bearer ", 7) == 0)
-			token = auth_buf + 7;
+	char *next = NULL;
+	for (char *entry = strtok_r(list, ",", &next); entry;
+	     entry = strtok_r(NULL, ",", &next)) {
+		entry += strspn(entry, " \t");
+		char *end = entry + strlen(entry);
+		while (end > entry && (end[-1] == ' ' || end[-1] == '\t'))
+			end--;
+		*end = '\0';
+		if (end - entry > 7 && strncmp(entry, "bearer.", 7) == 0)
+			return entry + 7;
 	}
-	if (token && token[0] != '\0') {
-		size_t len = strlen(token);
-		if (len >= token_size) len = token_size - 1;
-		memcpy(token_out, token, len);
-		token_out[len] = '\0';
+	return NULL;
+}
+
+static int ws_upgrade_allowed(const http_server_ctx_t *ctx, struct lws *wsi)
+{
+	char header[512];
+	if (!ctx || !ctx->auth)
 		return 0;
-	}
-	{
-		char proto[512];
-		int n = lws_hdr_copy(wsi, proto, sizeof(proto), WSI_TOKEN_COLON_PROTOCOL);
-		if (n <= 0)
-			n = lws_hdr_custom_copy(wsi, proto, sizeof(proto), "sec-websocket-protocol", 22);
-		if (n > 7 && strncmp(proto, "bearer.", 7) == 0) {
-			const char *sub = proto + 7;
-			size_t len = (size_t)(n - 7);
-			if (len >= token_size) len = token_size - 1;
-			memcpy(token_out, sub, len);
-			token_out[len] = '\0';
-			return token_out[0] != '\0' ? 0 : -1;
-		}
-	}
-	return -1;
+	const char *token = http_request_bearer_token(wsi, header, sizeof(header));
+	if (!token && lws_hdr_copy(wsi, header, sizeof(header), WSI_TOKEN_PROTOCOL) > 0)
+		token = ws_subprotocol_token(header);
+	return token && auth_validate_token(ctx->auth, token);
 }
 
 static int is_static_path(const char *uri, int uri_len, int method)
@@ -190,6 +182,10 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 {
 	http_server_ctx_t *ctx = http_ctx_get();
 	(void)user;
+	/* libwebsockets calls the HTTP protocol before it selects ws. */
+	if (reason == LWS_CALLBACK_HTTP_CONFIRM_UPGRADE && in &&
+	    strcasecmp(in, "websocket") == 0)
+		return ws_upgrade_allowed(ctx, wsi) ? 0 : -1;
 	if (!ctx) return 0;
 	switch (reason) {
 	case LWS_CALLBACK_HTTP: {
@@ -341,11 +337,13 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 				conn->headers_sent = 1;
 			}
 			if (conn->static_sent < conn->static_len) {
+				unsigned char chunk[LWS_PRE + 4096];
+				const size_t capacity = sizeof(chunk) - LWS_PRE;
 				size_t to_send = conn->static_len - conn->static_sent;
-				if (to_send > 4096) to_send = 4096;
-				int m = lws_write(wsi,
-				                  (unsigned char *)(conn->static_data + conn->static_sent),
-				                  to_send,
+				if (to_send > capacity) to_send = capacity;
+				/* HTTP/2 writes a frame header before the payload. */
+				memcpy(chunk + LWS_PRE, conn->static_data + conn->static_sent, to_send);
+				int m = lws_write(wsi, chunk + LWS_PRE, to_send,
 				                  conn->static_sent + to_send >= conn->static_len ?
 				                  LWS_WRITE_HTTP_FINAL : LWS_WRITE_HTTP);
 				if (m < 0) return -1;
@@ -355,6 +353,8 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 				free(conn);
 				lws_set_wsi_user(wsi, NULL);
 				http_lws_tx_completed(wsi);
+			} else {
+				lws_callback_on_writable(wsi);
 			}
 			return 0;
 		}
@@ -435,59 +435,45 @@ int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                       void *in, size_t len)
 {
 	http_server_ctx_t *ctx = http_ctx_get();
-	(void)user;
+	ws_session_t *session = user;
 	switch (reason) {
-	case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE: {
-		char token_buf[256] = {0};
-		if (!ctx || !ctx->auth) return -1;
-		if (ws_copy_upgrade_token(wsi, token_buf, sizeof(token_buf)) != 0)
-			return -1;
-		if (!auth_validate_token(ctx->auth, token_buf))
-			return -1;
-		return 0;
-	}
+	case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE:
+	case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
+		return ws_upgrade_allowed(ctx, wsi) ? 0 : -1;
 	case LWS_CALLBACK_ESTABLISHED: {
+		if (!session)
+			return -1;
 		int conn_id = ws_next_conn_id();
-		lws_set_wsi_user(wsi, (void *)(intptr_t)conn_id);
 		if (ws_register_conn(conn_id, (ws_conn_t)wsi) != 0) {
 			fprintf(stderr, "shellclaw: ws: connection table full\n");
 			return -1;
 		}
+		session->conn_id = conn_id;
 		break;
 	}
-	case LWS_CALLBACK_SERVER_WRITEABLE: {
-		int conn_id = (int)(intptr_t)lws_wsi_user(wsi);
-		if (conn_id <= 0) break;
-		ws_on_writable(wsi, conn_id);
+	case LWS_CALLBACK_SERVER_WRITEABLE:
+		if (session && session->conn_id > 0)
+			ws_on_writable(wsi, session->conn_id);
 		break;
-	}
 	case LWS_CALLBACK_RECEIVE: {
-		int conn_id = (int)(intptr_t)lws_wsi_user(wsi);
-		if (conn_id <= 0) break;
-		if (len > 0 && in) {
-			char *buf = malloc(len + 1);
-			if (buf) {
-				memcpy(buf, in, len);
-				buf[len] = '\0';
-				cJSON *root = cJSON_Parse(buf);
-				free(buf);
-				if (root) {
-					cJSON *type = cJSON_GetObjectItem(root, "type");
-					cJSON *text = cJSON_GetObjectItem(root, "text");
-					if (cJSON_IsString(type) && strcmp(type->valuestring, "message") == 0 &&
-					    cJSON_IsString(text) && text->valuestring)
-						ws_push_incoming(conn_id, text->valuestring);
-					cJSON_Delete(root);
-				}
-			}
+		if (!session || session->conn_id <= 0)
+			break;
+		char *text = NULL;
+		int result = ws_rx_feed(&session->rx, in, len, lws_is_final_fragment(wsi), &text);
+		if (result < 0)
+			return -1;
+		if (result == 1) {
+			ws_push_incoming(session->conn_id, text);
+			free(text);
 		}
 		break;
 	}
-	case LWS_CALLBACK_CLOSED: {
-		int conn_id = (int)(intptr_t)lws_wsi_user(wsi);
-		if (conn_id > 0) ws_unregister_conn(conn_id);
+	case LWS_CALLBACK_CLOSED:
+		if (session && session->conn_id > 0) {
+			ws_rx_clear(&session->rx);
+			ws_unregister_conn(session->conn_id);
+		}
 		break;
-	}
 	case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
 		/* wsi here is not a client socket. Mark real conns from our table. */
 		ws_on_service_cancel();

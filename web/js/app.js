@@ -29,13 +29,17 @@
     });
   }
 
-  function wsConnect(onMessage) {
+  function wsConnect(onMessage, repliesOnly = false) {
     const token = getToken();
     if (!token) return null;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    /* Browsers cannot set Authorization on WebSocket; server accepts bearer.<token> subprotocol. */
-    const ws = new WebSocket(proto + '//' + location.host + '/ws', ['bearer.' + token]);
-    ws.onmessage = e => { try { const d = JSON.parse(e.data); onMessage(d); } catch (_) {} };
+    const path = repliesOnly ? '/ws?view=chat' : '/ws';
+    const ws = new WebSocket(proto + '//' + location.host + path, ['ws', 'bearer.' + token]);
+    if (repliesOnly) {
+      ws.onmessage = e => onMessage(e.data);
+    } else {
+      ws.onmessage = e => { try { const d = JSON.parse(e.data); onMessage(d); } catch (_) {} };
+    }
     return ws;
   }
 
@@ -134,10 +138,10 @@
     render(app, '<h1>Chat</h1><div id="chat-log"></div><input id="chat-input" placeholder="Type message...">');
     const log = document.getElementById('chat-log');
     const input = document.getElementById('chat-input');
-    const ws = wsConnect(function (msg) {
-      if (msg.type === 'message') log.textContent += (msg.text || '') + '\n';
+    const ws = wsConnect(function (text) {
+      log.textContent += text + '\n';
       log.scrollTop = log.scrollHeight;
-    });
+    }, true);
     if (!ws) { log.textContent = 'Not authenticated. Go to pairing.'; return; }
     input.onkeydown = function (e) {
       if (e.key !== 'Enter') return;
