@@ -82,8 +82,15 @@ static int copy_printed_session_json(char *dst, size_t dst_size, char *printed,
 
 static const char SUMMARIZE_SYSTEM[] = "Summarize the following conversation in one short paragraph. Output only the summary, no preamble.";
 
-/** Marker appended by summary_source_append_truncated when a line was cut. */
-static const char SUMMARY_TRUNC_MARKER[] = "[truncated]";
+static const char TRUNCATED_MARKER[] = "[truncated]";
+
+/* If the cut splits a UTF-8 character, exclude that character. */
+static size_t utf8_prefix_bytes(const char *text, size_t cut)
+{
+	while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80)
+		cut--;
+	return cut;
+}
 
 /** Append one "role: content" line, or roll back if the whole line does not fit. */
 static int summary_source_append(char *buf, size_t cap, size_t *used,
@@ -129,21 +136,15 @@ static int summary_source_append_truncated(char *buf, size_t cap, size_t *used,
 	if (!buf || !used || *used + 1 >= cap)
 		return 0;
 	remain = cap - *used;
-	fixed = strlen(r) + 2 + strlen(SUMMARY_TRUNC_MARKER) + 1 + 1; /* ": " "\n" NUL */
+	fixed = strlen(r) + 2 + sizeof(TRUNCATED_MARKER) + 1; /* ": " and newline */
 	if (remain <= fixed)
 		return 0;
 	cut = remain - fixed;
 	if (cut > strlen(c))
 		cut = strlen(c);
-	/* The cut is a byte count, so it can land inside a multibyte UTF-8
-	 * codepoint. Back it up while the first dropped byte is a continuation
-	 * byte: invalid UTF-8 in the stub makes providers reject the summarizer
-	 * request, and compaction then returns -1 on every turn for that
-	 * session. */
-	while (cut > 0 && ((unsigned char)c[cut] & 0xC0) == 0x80)
-		cut--;
+	cut = utf8_prefix_bytes(c, cut);
 	n = snprintf(buf + *used, remain, "%s: %.*s%s\n", r, (int)cut, c,
-		SUMMARY_TRUNC_MARKER);
+		TRUNCATED_MARKER);
 	if (n < 0 || (size_t)n >= remain) {
 		buf[*used] = '\0';
 		return 0;
@@ -165,9 +166,8 @@ static int kept_tail_starts_with_user(const cJSON *root, int start)
 	return cJSON_IsString(role) && role->valuestring && strcmp(role->valuestring, "user") == 0;
 }
 
-/** Fold the summary into the first kept message: a user turn (a second user
- *  message 400s on Anthropic) or the oversized line a partial pass broke on,
- *  so the next pass starts on it with an empty source for the full stub. */
+/* Fold the summary into the first retained message. This gives a large
+ * message the full source buffer on the next pass. */
 static int fold_summary_into_message(cJSON *item, const char *summary)
 {
 	const cJSON *content;
@@ -207,25 +207,17 @@ static int fold_summary_into_message(cJSON *item, const char *summary)
 	return 0;
 }
 
-static int append_summary_user(cJSON *arr, const char *summary)
+static cJSON *append_session_message(cJSON *arr, const char *role, const char *text)
 {
-	cJSON *obj;
-	cJSON *role;
-	cJSON *content;
-
-	obj = cJSON_CreateObject();
-	role = cJSON_CreateString("user");
-	content = cJSON_CreateString(summary ? summary : "");
-	if (!obj || !role || !content) {
+	cJSON *obj = cJSON_CreateObject();
+	if (!obj ||
+	    !cJSON_AddStringToObject(obj, "role", role) ||
+	    !cJSON_AddStringToObject(obj, "content", text ? text : "") ||
+	    !cJSON_AddItemToArray(arr, obj)) {
 		cJSON_Delete(obj);
-		cJSON_Delete(role);
-		cJSON_Delete(content);
-		return -1;
+		return NULL;
 	}
-	cJSON_AddItemToObject(obj, "role", role);
-	cJSON_AddItemToObject(obj, "content", content);
-	cJSON_AddItemToArray(arr, obj);
-	return 0;
+	return obj;
 }
 
 /** Summarize oldest messages when over max_ctx; replace with one summary + trailing.
@@ -322,14 +314,11 @@ static int compact_session_via_llm(const char *session_id, char *session_buf, si
 	int merge;
 	int folded = 0;
 	if (start < 0) start = 0;
-	/* Tail can start on a user turn (odd max_context_messages, or a cut that
-	 * lands on user). Inserting another user role makes Anthropic reject the
-	 * session on this turn and every later one. fold_into_oversized breaks on
-	 * that rule for the line that stopped the pass: it is not a user turn, so
-	 * the summary folds into it instead of a prepended wrapper (see the loop). */
+	/* Fold into a user turn when possible. If the first pass stops at the
+	 * second message, fold there so a later pass has room to summarize it. */
 	merge = kept_tail_starts_with_user(root, start);
 	if (!new_arr) { cJSON_Delete(root); return -1; }
-	if (!merge && !fold_into_oversized && append_summary_user(new_arr, summary_buf) != 0) {
+	if (!merge && !fold_into_oversized && !append_session_message(new_arr, "user", summary_buf)) {
 		cJSON_Delete(new_arr);
 		cJSON_Delete(root);
 		return -1;
@@ -414,7 +403,8 @@ static void copy_response_to_buf(const char *content, char *response_buf, size_t
 	if (!response_buf || response_size == 0) return;
 	if (content) {
 		size_t n = strlen(content);
-		if (n >= response_size) n = response_size - 1;
+		if (n >= response_size)
+			n = utf8_prefix_bytes(content, response_size - 1);
 		memcpy(response_buf, content, n);
 		response_buf[n] = '\0';
 	} else
@@ -520,7 +510,47 @@ static void free_tool_calls_copy(const provider_tool_call_t *copy, size_t n)
 	free(owned);
 }
 
-/** Append user+assistant exchange to session JSON. Invalid or empty existing becomes []. */
+/* Drop the oldest exchanges until the JSON fits. If the newest exchange
+ * alone exceeds the limit, shorten its larger message and try again. */
+static char *print_session_within_limit(cJSON *arr, cJSON *user, cJSON *assistant,
+	size_t cap)
+{
+	char *printed = cJSON_PrintUnformatted(arr);
+	if (!printed || strlen(printed) < cap)
+		return printed;
+
+	size_t len = strlen(printed);
+	cJSON_free(printed);
+	while (arr->child != user && (len >= cap || !kept_tail_starts_with_user(arr, 0))) {
+		char *head = cJSON_PrintUnformatted(arr->child);
+		if (!head)
+			return NULL;
+		len -= strlen(head) + 1; /* Include the separator after the removed message. */
+		cJSON_free(head);
+		cJSON_DeleteItemFromArray(arr, 0);
+	}
+	if (len < cap)
+		return cJSON_PrintUnformatted(arr);
+
+	char *user_text = cJSON_GetObjectItem(user, "content")->valuestring;
+	char *assistant_text = cJSON_GetObjectItem(assistant, "content")->valuestring;
+	for (;;) {
+		size_t user_len = strlen(user_text);
+		size_t assistant_len = strlen(assistant_text);
+		char *text = user_len >= assistant_len ? user_text : assistant_text;
+		size_t text_len = user_len >= assistant_len ? user_len : assistant_len;
+		size_t cut = utf8_prefix_bytes(text, text_len / 2);
+		if (cut + sizeof(TRUNCATED_MARKER) > text_len)
+			return NULL;
+		memcpy(text + cut, TRUNCATED_MARKER, sizeof(TRUNCATED_MARKER));
+		printed = cJSON_PrintUnformatted(arr);
+		if (!printed || strlen(printed) < cap)
+			return printed;
+		cJSON_free(printed);
+	}
+}
+
+/** Append a complete exchange to session JSON. Invalid or empty input becomes []. */
 static int append_exchange_to_session_json(const char *existing_json, const char *user_message,
 	const char *assistant_content, char *out_buf, size_t out_size, const char *session_id)
 {
@@ -534,19 +564,10 @@ static int append_exchange_to_session_json(const char *existing_json, const char
 	}
 	if (!arr) arr = cJSON_CreateArray();
 	if (!arr) return -1;
-	cJSON *user_obj = cJSON_CreateObject();
-	if (user_obj) {
-		cJSON_AddItemToObject(user_obj, "role", cJSON_CreateString("user"));
-		cJSON_AddItemToObject(user_obj, "content", cJSON_CreateString(user_message ? user_message : ""));
-		cJSON_AddItemToArray(arr, user_obj);
-	}
-	cJSON *asst_obj = cJSON_CreateObject();
-	if (asst_obj) {
-		cJSON_AddItemToObject(asst_obj, "role", cJSON_CreateString("assistant"));
-		cJSON_AddItemToObject(asst_obj, "content", cJSON_CreateString(assistant_content ? assistant_content : ""));
-		cJSON_AddItemToArray(arr, asst_obj);
-	}
-	char *printed = cJSON_PrintUnformatted(arr);
+	cJSON *user = append_session_message(arr, "user", user_message);
+	cJSON *assistant = append_session_message(arr, "assistant", assistant_content);
+	char *printed = user && assistant
+		? print_session_within_limit(arr, user, assistant, out_size) : NULL;
 	cJSON_Delete(arr);
 	return copy_printed_session_json(out_buf, out_size, printed, session_id);
 }
@@ -674,14 +695,17 @@ static int agent_prepare_context(agent_run_ctx_t *ctx)
 	return 0;
 }
 
-/** Build provider message array: system + history + current user turn. */
+/** Build the provider request from the system prompt, history, and current turn. */
 static int agent_build_messages(agent_run_ctx_t *ctx)
 {
 	ctx->history_count = 0;
 	parse_session_into_messages(ctx->session_buf, ctx->max_ctx, ctx->history_msgs,
 	                            ctx->history_roles_buf, MAX_HISTORY_MESSAGES * ROLE_LEN,
 	                            ctx->history_content, HISTORY_CONTENT_MAX, &ctx->history_count);
-	ctx->total_msgs = 1 + (size_t)ctx->history_count + 1;
+	/* Some providers require a user message first. A cut can leave an
+	 * assistant message at the front of the window. Keep its original role. */
+	int needs_prefix = ctx->history_count > 0 && strcmp(ctx->history_msgs[0].role, "assistant") == 0;
+	ctx->total_msgs = 2 + (size_t)ctx->history_count + (size_t)needs_prefix;
 	ctx->messages = malloc(ctx->total_msgs * sizeof(provider_message_t));
 	if (!ctx->messages) {
 		agent_oom_msg(ctx);
@@ -690,12 +714,19 @@ static int agent_build_messages(agent_run_ctx_t *ctx)
 	memset(ctx->messages, 0, ctx->total_msgs * sizeof(provider_message_t));
 	ctx->messages[0].role = "system";
 	ctx->messages[0].content = ctx->system_buf;
-	for (int i = 0; i < ctx->history_count; i++) {
-		ctx->messages[1 + i].role = ctx->history_msgs[i].role;
-		ctx->messages[1 + i].content = ctx->history_msgs[i].content;
+	size_t next = 1;
+	if (needs_prefix) {
+		ctx->messages[next].role = "user";
+		ctx->messages[next].content = "[Earlier user messages are unavailable.]";
+		next++;
 	}
-	ctx->messages[1 + ctx->history_count].role = "user";
-	ctx->messages[1 + ctx->history_count].content = ctx->user_message;
+	for (int i = 0; i < ctx->history_count; i++) {
+		ctx->messages[next].role = ctx->history_msgs[i].role;
+		ctx->messages[next].content = ctx->history_msgs[i].content;
+		next++;
+	}
+	ctx->messages[next].role = "user";
+	ctx->messages[next].content = ctx->user_message;
 	ctx->base_msg_count = ctx->total_msgs;
 	return 0;
 }
