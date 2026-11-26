@@ -398,7 +398,8 @@ static void copy_response_to_buf(const char *content, char *response_buf, size_t
 	if (!response_buf || response_size == 0) return;
 	if (content) {
 		size_t n = strlen(content);
-		if (n >= response_size) n = response_size - 1;
+		if (n >= response_size)
+			n = utf8_prefix_bytes(content, response_size - 1);
 		memcpy(response_buf, content, n);
 		response_buf[n] = '\0';
 	} else
