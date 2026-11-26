@@ -17,7 +17,13 @@
 #include <unistd.h>
 
 #ifdef __linux__
+#include <errno.h>
+#include <stddef.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
 #include <linux/landlock.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #endif
 
@@ -34,6 +40,11 @@ int sandbox_landlock_prepare(const char *workspace)
     return 0;
 }
 #else
+
+#ifndef LANDLOCK_ACCESS_FS_TRUNCATE
+/* This UAPI bit also applies to binaries built with older headers. */
+#define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
+#endif
 
 #ifndef LANDLOCK_ACCESS_FS_IOCTL_DEV
 #define LANDLOCK_ACCESS_FS_IOCTL_DEV (1ULL << 15)
@@ -72,10 +83,8 @@ static int landlock_handled_fs(__u64 *handled_out)
     if (abi >= 2)
         handled |= LANDLOCK_ACCESS_FS_REFER;
 #endif
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
     if (abi >= 3)
         handled |= LANDLOCK_ACCESS_FS_TRUNCATE;
-#endif
     if (abi >= 5)
         handled |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
     *handled_out = handled;
@@ -141,15 +150,13 @@ static __u64 mask_workspace_access(__u64 handled)
 #ifdef LANDLOCK_ACCESS_FS_REFER
     access |= (LANDLOCK_ACCESS_FS_REFER & handled);
 #endif
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
     access |= (LANDLOCK_ACCESS_FS_TRUNCATE & handled);
-#endif
     return access;
 }
 
 #define LANDLOCK_FD_SKIP (-2)
 
-static int landlock_make_ruleset(const char *workspace)
+static int landlock_make_ruleset(const char *workspace, int *handles_truncate)
 {
     static const char *const RO_PATHS[] = {
         "/bin", "/usr", "/usr/local", "/lib", "/lib64", "/lib32",
@@ -185,9 +192,7 @@ static int landlock_make_ruleset(const char *workspace)
     rw_file = (LANDLOCK_ACCESS_FS_EXECUTE |
                LANDLOCK_ACCESS_FS_READ_FILE |
                LANDLOCK_ACCESS_FS_WRITE_FILE) & handled;
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
     rw_file |= (LANDLOCK_ACCESS_FS_TRUNCATE & handled);
-#endif
     memset(&attr, 0, sizeof(attr));
     attr.handled_access_fs = handled;
     ruleset_fd = (int)syscall(__NR_landlock_create_ruleset, &attr,
@@ -217,13 +222,60 @@ static int landlock_make_ruleset(const char *workspace)
             return -1;
         }
     }
+    if (handles_truncate)
+        *handles_truncate = (handled & LANDLOCK_ACCESS_FS_TRUNCATE) != 0;
     return ruleset_fd;
+}
+
+#if defined(__aarch64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define SHELLCLAW_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#elif defined(__arm__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define SHELLCLAW_AUDIT_ARCH AUDIT_ARCH_ARM
+#elif defined(__x86_64__) && !defined(__ILP32__)
+#define SHELLCLAW_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__i386__)
+#define SHELLCLAW_AUDIT_ARCH AUDIT_ARCH_I386
+#endif
+
+int sandbox_landlock_guard_truncate(int ruleset_handles_truncate)
+{
+    if (ruleset_handles_truncate)
+        return 0;
+#if defined(SHELLCLAW_AUDIT_ARCH) && (defined(__NR_truncate) || defined(__NR_truncate64))
+    /* Use the native system call table for this process and its children. */
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SHELLCLAW_AUDIT_ARCH, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+#if defined(__x86_64__) && defined(__X32_SYSCALL_BIT)
+        BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, __X32_SYSCALL_BIT, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_truncate
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_truncate, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_truncate64
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_truncate64, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog program = {
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter,
+    };
+    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program, 0L, 0L);
+#else
+    return -1;
+#endif
 }
 
 int sandbox_landlock_prepare(const char *workspace)
 {
     int fd;
-    fd = landlock_make_ruleset(workspace);
+    fd = landlock_make_ruleset(workspace, NULL);
     if (fd == LANDLOCK_FD_SKIP)
         return 0;
     if (fd < 0)
@@ -235,15 +287,18 @@ int sandbox_landlock_prepare(const char *workspace)
 int sandbox_landlock_restrict_to_workspace(const char *workspace)
 {
     int fd;
+    int handles_truncate = 0;
     long rc;
-    fd = landlock_make_ruleset(workspace);
+    fd = landlock_make_ruleset(workspace, &handles_truncate);
     if (fd == LANDLOCK_FD_SKIP)
         return 0;
     if (fd < 0)
         return -1;
     rc = syscall(__NR_landlock_restrict_self, fd, 0);
     close(fd);
-    return (rc == 0) ? 0 : -1;
+    if (rc != 0)
+        return -1;
+    return sandbox_landlock_guard_truncate(handles_truncate);
 }
 
 #endif /* __linux__ */

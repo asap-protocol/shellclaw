@@ -32,6 +32,15 @@ int sandbox_landlock_restrict_to_workspace(const char *workspace);
  */
 int sandbox_landlock_prepare(const char *workspace);
 
+#ifdef __linux__
+/**
+ * Install a system call filter when the Landlock ruleset cannot control truncation.
+ * The caller must set PR_SET_NO_NEW_PRIVS before it calls this function.
+ * @return 0 on success or -1 if the kernel cannot install the filter.
+ */
+int sandbox_landlock_guard_truncate(int ruleset_handles_truncate);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

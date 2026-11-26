@@ -1039,8 +1039,41 @@ static int test_scrubbed_env_child_loses_secrets(void)
 	return 0;
 }
 
+#ifdef __linux__
+static int test_truncate_policy_on_private_file(int ruleset_handles_truncate)
+{
+	char path[] = "/tmp/shellclaw-truncate-XXXXXX";
+	int fd = mkstemp(path);
+	int status = 0;
+	pid_t child;
+
+	ASSERT(fd >= 0);
+	child = fork();
+	ASSERT(child >= 0);
+	if (child == 0) {
+		int rc;
+		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+		    sandbox_landlock_guard_truncate(ruleset_handles_truncate) != 0)
+			_exit(1);
+		rc = truncate(path, 1);
+		if (ruleset_handles_truncate ? rc != 0 : (rc != -1 || errno != EPERM))
+			_exit(2);
+		_exit(ftruncate(fd, 2) != 0);
+	}
+	ASSERT(waitpid(child, &status, 0) == child);
+	close(fd);
+	unlink(path);
+	ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	return 0;
+}
+#endif
+
 int main(void)
 {
+#ifdef __linux__
+	RUN(test_truncate_policy_on_private_file(0));
+	RUN(test_truncate_policy_on_private_file(1));
+#endif
 	RUN(test_isolation_denied_helper());
 	RUN(test_fail_closed_reports_isolation_error());
 	RUN(test_output_capture());

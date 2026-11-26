@@ -100,6 +100,10 @@ The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened 
 
 ### JetPack 6 / kernel 5.15 note
 
+Landlock ABI 3 and later can restrict file truncation by path to the workspace. ABI 1 and 2 cannot express this rule.
+On those kernels, the sandbox applies a seccomp filter before it starts the command. The filter disables truncation by path, including inside the workspace.
+Programs can still resize a workspace file through a writable file descriptor. If the kernel cannot install the filter, ShellClaw stops the command.
+
 Namespace behavior above was verified by **source audit**. On-device validation on JetPack 6.2.x is a [known pending](JETSON_SIGNOFF.md) item (not a CI or merge-to-`main` gate).
 
 ---
