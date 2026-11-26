@@ -4,6 +4,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
+#include "channels/channel.h"
 #include "core/agent.h"
 #include "core/memory.h"
 #include "gateway/http_lws.h"
@@ -50,11 +51,15 @@ static int test_dashboard_sqlite_holds_agent_lock(void)
 	const char *path = "/tmp/shellclaw_test_gateway_db_lock.db";
 	const char *create_body =
 		"{\"id\":\"job_lock\",\"schedule\":\"interval:3600\",\"message\":\"ping\"}";
+	const char *invalid_body =
+		"{\"schedule\":\"interval:3600\",\"message\":\"ping\",\"channel\":\"unknown\"}";
+	char response[128];
 	int status = 0;
 
 	memset(&ctx, 0, sizeof(ctx));
 	remove(path);
 	ASSERT(memory_init(path) == 0);
+	channel_register("cli", channel_cli_get());
 	g_sqlite_hits = 0;
 	g_sqlite_unlocked = 0;
 	memory_sqlite_entry_set_hook_for_test(sqlite_probe);
@@ -69,6 +74,10 @@ static int test_dashboard_sqlite_holds_agent_lock(void)
 	ASSERT(status == 200);
 	ASSERT(call_route(&ctx, HTTP_POST, "/api/cron", create_body, &status) == 0);
 	ASSERT(status == 201);
+	ASSERT(dispatch_route(&ctx, NULL, HTTP_POST, "/api/cron", 9, invalid_body,
+			      strlen(invalid_body), response, sizeof(response), &status) == 0);
+	ASSERT(status == 400);
+	ASSERT(strstr(response, "Invalid cron destination") != NULL);
 	ASSERT(call_route(&ctx, HTTP_POST, "/api/cron/job_lock/toggle", NULL, &status) == 0);
 	ASSERT(status == 200);
 	ASSERT(call_route(&ctx, HTTP_DELETE, "/api/cron/job_lock", NULL, &status) == 0);

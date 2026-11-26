@@ -23,6 +23,20 @@ void provider_router_active_backend_snapshot(char *dst, size_t dst_sz)
 		dst[0] = '\0';
 }
 
+static char g_cron_recipient[128];
+
+static int capture_send(const char *recipient, const char *text,
+			const channel_attachment_t *attachments, size_t count)
+{
+	(void)text;
+	(void)attachments;
+	(void)count;
+	snprintf(g_cron_recipient, sizeof(g_cron_recipient), "%s", recipient);
+	return 0;
+}
+
+static const channel_t test_delivery_channel = {.send = capture_send};
+
 static void cron_test_reset_offers(void)
 {
 	const channel_t *cron_ch = channel_cron_get();
@@ -754,8 +768,85 @@ static int test_cron_poll_delivers_17th_after_ack(void)
 	return 0;
 }
 
+static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
+{
+	const channel_t *cron = channel_cron_get();
+	channel_incoming_msg_t msg = {0};
+	const long long due = (long long)time(NULL) - 1;
+	struct timespec start;
+	struct timespec end;
+	cron_job_row_t row = {0};
+	char id[16];
+
+	cron_test_reset_offers();
+	ASSERT(memory_init(":memory:") == 0);
+	ASSERT(cron_job_create("bad", "at:1", "old", "unknown", "", due - 2, 1) == 0);
+	for (int i = 0; i < 65; i++) {
+		snprintf(id, sizeof(id), "waiting%02d", i);
+		ASSERT(cron_job_create(id, "at:1", "old", "telegram", "-42", due - 1, 1) == 0);
+	}
+	ASSERT(cron_job_create("ready", "at:1", "ready", "cli", "", due, 1) == 0);
+	ASSERT(cron->poll(&msg, 0) == 1);
+	ASSERT(strcmp(msg.user_id, "ready") == 0);
+	ASSERT(cron_ack_delivery(msg.user_id) == 0);
+	channel_incoming_msg_clear(&msg);
+	ASSERT(cron_job_get_by_id("bad", &row) == 1 && row.enabled == 0);
+	cron_job_row_free(&row);
+	ASSERT(cron_job_get_by_id("waiting00", &row) == 1 && row.enabled == 1);
+	ASSERT(row.next_run == due - 1);
+	cron_job_row_free(&row);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	ASSERT(cron->poll(&msg, 80) == 0);
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+	ASSERT((end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000 >= 40);
+	channel_register("telegram", &test_delivery_channel);
+	ASSERT(cron->poll(&msg, 0) == 1);
+	ASSERT(strcmp(msg.user_id, "waiting00") == 0);
+	channel_incoming_msg_clear(&msg);
+	memory_cleanup();
+	return 0;
+}
+
+static int test_cron_target_validation_and_routing(void)
+{
+	const channel_t *cron = channel_cron_get();
+	char id[32];
+	struct {
+		const char *channel;
+		const char *recipient;
+	} bad_targets[] = {
+		{"cron", "cli:default"}, {"heartbeat", "default"}, {"unknown", "abc"},
+		{"webchat", "default"}, {"webchat", "12abc"}, {"webchat", "99999999999"},
+		{"discord", "default"}, {"telegram", "default"},
+	};
+
+	ASSERT(memory_init(":memory:") == 0);
+	for (size_t i = 0; i < sizeof(bad_targets) / sizeof(bad_targets[0]); i++) {
+		id[0] = '\0';
+		ASSERT(cron_create_job("at:1", "message", bad_targets[i].channel,
+				       bad_targets[i].recipient, id, sizeof(id)) == CRON_INVALID_DESTINATION);
+	}
+	id[0] = '\0';
+	ASSERT(cron_create_job("at:1", "message", "discord", "1234", id, sizeof(id)) == 0);
+	channel_register("discord", &test_delivery_channel);
+	channel_register("webchat", &test_delivery_channel);
+	channel_register("custom", &test_delivery_channel);
+	id[0] = '\0';
+	ASSERT(cron_create_job("at:1", "message", "custom", "my-id", id, sizeof(id)) == 0);
+	const char *routes[][2] = {{"webchat:42", "webchat:42"}, {"webchat:webchat:42", "webchat:42"},
+				   {"discord:discord:c:1234", "discord:c:1234"}, {"discord:1234", "discord:c:1234"},
+				   {"custom:my-id", "my-id"}};
+	for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+		ASSERT(cron->send(routes[i][0], "message", NULL, 0) == 0);
+		ASSERT(strcmp(g_cron_recipient, routes[i][1]) == 0);
+	}
+	memory_cleanup();
+	return 0;
+}
+
 int main(void)
 {
+	channel_register("cli", &test_delivery_channel);
 	RUN(test_interval_next_run());
 	RUN(test_at_one_shot());
 	RUN(test_cron_expr_next_run());
@@ -781,6 +872,8 @@ int main(void)
 	RUN(test_cron_poll_waits_when_offer_table_is_full());
 	RUN(test_cron_poll_delivers_17th_after_ack());
 	RUN(test_cron_list_orders_ties_by_id());
+	RUN(test_cron_unavailable_targets_do_not_block_ready_jobs());
+	RUN(test_cron_target_validation_and_routing());
 	printf("test_cron: all tests passed\n");
 	return 0;
 }

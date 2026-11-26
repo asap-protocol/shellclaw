@@ -181,6 +181,9 @@ int cron_job_delete(const char *id);
  */
 int cron_job_toggle(const char *id);
 
+/** Disable the stored job. Returns 0 if the update succeeds. */
+int cron_job_disable(const char *id);
+
 /**
  * Update next_run for a job.
  *
@@ -191,21 +194,26 @@ int cron_job_update_next_run(const char *id, long long next_run);
 /**
  * Key of a due cron job. No heap fields. Example:
  *   cron_due_key_t keys[8];
- *   int n = cron_job_list_due(now, keys, 8);
+ *   int n = cron_job_list_due(now, NULL, keys, 8);
  */
 typedef struct cron_due_key {
 	char id[128];
 	long long next_run;
+	char channel[sizeof(((cron_job_row_t *)0)->channel)];
+	char recipient[sizeof(((cron_job_row_t *)0)->recipient)];
+	int target_truncated;
 } cron_due_key_t;
 
 /**
  * List enabled jobs with next_run <= now, ordered by next_run then id.
  *
+ * @param after     Optional last key from the previous page.
  * @param out       Array to fill (caller-allocated).
  * @param max_count Maximum keys to return.
  * @return Number of keys written, or -1 on error.
  */
-int cron_job_list_due(long long now, cron_due_key_t *out, int max_count);
+int cron_job_list_due(long long now, const cron_due_key_t *after,
+		      cron_due_key_t *out, int max_count);
 
 /**
  * List cron jobs into output array.
