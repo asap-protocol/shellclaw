@@ -2118,12 +2118,50 @@ static const provider_t keep_history_provider = {
 	.cleanup = keep_history_cleanup,
 };
 
-/**
- * Concrete trigger: near-cap session JSON + fat assistant reply.
- * Before the fix, append truncated mid-JSON, session_save persisted corrupt
- * payload, and the next agent_run parse wiped history. After the fix, overflow
- * refuses to save and prior history remains parseable.
- */
+static int oversized_exchange_keeps_shortened_history(const config_t *cfg)
+{
+	const char *session_id = "cli:large-exchange";
+	const char *marker = "[truncated]";
+	enum { REPEATS = 18 * 1024 + 3, CAP = 128 * 1024 };
+	char *input = malloc(REPEATS * 3 + 3);
+	char *loaded = malloc(CAP);
+	char response[OVERFLOW_REPLY_BYTES + 64];
+	cJSON *parsed = NULL;
+	int failed = 1;
+
+	if (!input || !loaded) goto cleanup;
+	/* JSON escapes the control byte. The accented character uses two bytes. */
+	for (size_t i = 0; i < REPEATS; i++)
+		memcpy(input + i * 3, "\x01\xC3\xA9", 3);
+	memcpy(input + REPEATS * 3, "xx", 3);
+	if (agent_run(cfg, session_id, input, &overflow_reply_provider, NULL, 0,
+	              response, sizeof(response)) != 0 ||
+	    strlen(response) != OVERFLOW_REPLY_BYTES - 1 ||
+	    session_load(session_id, loaded, CAP) != 0) {
+		fprintf(stderr, "FAIL: the oversized exchange did not save both turns\n");
+		goto cleanup;
+	}
+	parsed = cJSON_Parse(loaded);
+	const cJSON *user = cJSON_GetObjectItem(cJSON_GetArrayItem(parsed, 0), "content");
+	const cJSON *assistant = cJSON_GetObjectItem(cJSON_GetArrayItem(parsed, 1), "content");
+	const char *suffix = cJSON_IsString(user) ? strstr(user->valuestring, marker) : NULL;
+	if (!json_roles_alternate_from_user(loaded) || cJSON_GetArraySize(parsed) != 2 ||
+	    !suffix || strcmp(suffix, marker) != 0 || !cJSON_IsString(assistant) ||
+	    strcmp(assistant->valuestring, response) != 0)
+		goto cleanup;
+	size_t preserved = (size_t)(suffix - user->valuestring);
+	if (preserved == 0 || strncmp(input, user->valuestring, preserved) != 0 ||
+	    ((unsigned char)input[preserved] & 0xC0) == 0x80)
+		goto cleanup;
+	failed = 0;
+cleanup:
+	cJSON_Delete(parsed);
+	free(loaded);
+	free(input);
+	return failed;
+}
+
+/* A new reply can exceed the byte limit before the message count triggers compaction. */
 static int test_session_overflow_does_not_corrupt_history(void)
 {
 	int failed = 1;
@@ -2132,7 +2170,7 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	const char *config_path = "build/test_agent_overflow.toml";
 	const char *session_id = "cli:overflow";
 	const char *marker = "UNIQUE_HISTORY_MARKER_xyz";
-	/* Two large messages keep msg_count under max_context so compaction does not shrink first. */
+	/* Both large messages belong to the oldest exchange. */
 	enum { PAD_A = 62 * 1024, PAD_B = 62 * 1024, LOAD_CAP = 130 * 1024 };
 	char *session_json = NULL;
 	char *pad_a = NULL;
@@ -2152,12 +2190,13 @@ static int test_session_overflow_does_not_corrupt_history(void)
 	pad_a[PAD_A] = '\0';
 	memset(pad_b, 'B', PAD_B);
 	pad_b[PAD_B] = '\0';
-	need = strlen(marker) + PAD_A + PAD_B + 128;
+	need = strlen(marker) + PAD_A + PAD_B + 256;
 	session_json = malloc(need);
 	if (!session_json) goto cleanup;
 	off = (size_t)snprintf(session_json, need,
-		"[{\"role\":\"user\",\"content\":\"%s%s\"},{\"role\":\"assistant\",\"content\":\"%s\"}]",
-		marker, pad_a, pad_b);
+		"[{\"role\":\"user\",\"content\":\"old prompt%s\"},{\"role\":\"assistant\",\"content\":\"old reply%s\"},"
+		"{\"role\":\"user\",\"content\":\"%s\"},{\"role\":\"assistant\",\"content\":\"recent reply\"}]",
+		pad_a, pad_b, marker);
 	if (off == 0 || off >= need) goto cleanup;
 	if (session_save(session_id, session_json) != 0) goto cleanup;
 
@@ -2192,25 +2231,24 @@ static int test_session_overflow_does_not_corrupt_history(void)
 		goto cleanup;
 	}
 	cJSON_Delete(parsed);
-	if (strstr(loaded, marker) == NULL) goto cleanup;
+	if (!json_roles_alternate_from_user(loaded) || count_session_messages(loaded) != 4 ||
+	    strstr(loaded, "old prompt") || strstr(loaded, "old reply") ||
+	    strstr(loaded, "recent reply") == NULL || strstr(loaded, "push over the limit") == NULL) {
+		fprintf(stderr, "FAIL: overflow did not retain the two newest complete exchanges\n");
+		goto cleanup;
+	}
 
-	/* Next turn must still see prior history (not wiped to empty []). */
+	/* The next request starts with the most recent retained prompt. */
 	spy_roles_clear();
 	response_buf[0] = '\0';
 	if (agent_run(cfg, session_id, "still there?", &keep_history_provider, NULL, 0,
 	              response_buf, sizeof(response_buf)) != 0)
 		goto cleanup;
-	{
-		int found = 0;
-		for (size_t j = 0; j < spy_message_count && j < SPY_SLOTS; j++) {
-			if (strstr(spy_content[j], marker) != NULL) {
-				found = 1;
-				break;
-			}
-		}
-		if (!found) goto cleanup;
-	}
-	failed = 0;
+	if (!spy_roles[1] || strcmp(spy_roles[1], "user") != 0 ||
+	    strcmp(spy_content[1], marker) != 0 ||
+	    strcmp(spy_content[3], "push over the limit") != 0 || spy_content[4][0] != 'R')
+		goto cleanup;
+	failed = oversized_exchange_keeps_shortened_history(cfg);
 cleanup:
 	config_free(cfg);
 	free(session_json);
