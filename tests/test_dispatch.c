@@ -16,6 +16,7 @@ void bootstrap_add_tool_for_test(const tool_t *tool);
 #include "core/memory.h"
 #include "core/version.h"
 #include "providers/provider.h"
+#include "tools/cron.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,7 @@ static char g_last_text[SEND_BUF_SIZE];
 static int g_send_calls;
 static int g_send_error;
 static const char *g_spy_reply;
+static const char *g_spy_openai_body;
 static size_t g_last_provider_tool_count;
 static int g_agent_mutex_held_during_chat;
 static int g_agent_mutex_held_during_reset;
@@ -90,6 +92,8 @@ static int spy_chat(const provider_message_t *messages, size_t message_count,
 	(void)message_count;
 	(void)tools;
 	g_last_provider_tool_count = tool_count;
+	if (g_spy_openai_body)
+		return provider_parse_chat_completions_json(g_spy_openai_body, response);
 	response->error = 0;
 	response->content = g_spy_reply ? strdup(g_spy_reply) : NULL;
 	response->tool_calls = NULL;
@@ -445,6 +449,7 @@ static int test_cron_agent_failure_does_not_ack(void)
 
 static int test_cron_blank_reply_acks_without_sending(void)
 {
+	const channel_t *cron = channel_cron_get();
 	const char *db_path = "build/test_dispatch_cron_blank.db";
 	const char *replies[] = {NULL, "", " \t\r\n\v\f", "reminder"};
 	const char *schedules[] = {"at:1", "interval:60", "interval:60", "interval:60"};
@@ -465,6 +470,7 @@ static int test_cron_blank_reply_acks_without_sending(void)
 	bootstrap_set_cfg(cfg);
 	bootstrap_set_provider_for_test(&spy_provider);
 	bootstrap_reset_tools_for_test();
+	channel_register("cli", &mock_channel);
 	for (size_t i = 0; i < sizeof(replies) / sizeof(replies[0]); i++) {
 		cron_job_row_t row = {0};
 		char id[16];
@@ -475,19 +481,44 @@ static int test_cron_blank_reply_acks_without_sending(void)
 		g_spy_reply = replies[i];
 		g_send_error = -3;
 		if (i < 3) {
-			ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+			ASSERT(handle_message(cron, &msg) == 0);
 			ASSERT(g_send_calls == 0);
 			ASSERT(cron_job_get_by_id(id, &row) == (i > 0 ? 1 : 0));
 			if (i > 0)
 				ASSERT(row.next_run > due_at);
 		} else {
-			ASSERT(handle_message(&cron_mock_channel, &msg) == -3);
+			ASSERT(handle_message(cron, &msg) == -3);
 			ASSERT(g_send_calls == 1);
 			ASSERT(cron_job_get_by_id(id, &row) == 1);
 			ASSERT(row.next_run == due_at);
 		}
 		cron_job_row_free(&row);
 	}
+	const char *valid_blank = "{\"choices\":[{\"message\":{\"content\":null}}]}";
+	const char *bodies[] = { valid_blank, "{}", valid_blank };
+	const char *channels[] = { "telegram", "cli", "cli" };
+	const char *recipients[] = { "42", "malformed", "silent" };
+	const char *routes[] = { "telegram:42", "cli:malformed", "cli:silent" };
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		cron_job_row_t row = {0};
+		char history[512];
+		char id[16];
+		snprintf(id, sizeof(id), "parsed_%zu", i);
+		ASSERT(cron_job_create(id, "at:1", msg.text, channels[i], recipients[i], due_at, 1) == 0);
+		reset_send_spy();
+		g_spy_openai_body = bodies[i];
+		msg.user_id = id;
+		msg.session_id = (char *)routes[i];
+		ASSERT(handle_message(cron, &msg) == (i == 0 ? -1 : 0));
+		ASSERT(g_send_calls == (i == 1 ? 1 : 0));
+		ASSERT(cron_job_get_by_id(id, &row) == (i < 2 ? 1 : 0));
+		if (i < 2)
+			ASSERT(row.next_run == due_at && row.enabled);
+		if (i == 1)
+			ASSERT(session_load(routes[i], history, sizeof(history)) != 0);
+		cron_job_row_free(&row);
+	}
+	g_spy_openai_body = NULL;
 	reset_send_spy();
 	msg.user_id = NULL;
 	g_spy_reply = "";

@@ -28,6 +28,21 @@ static int maybe_ack_cron(const char *job_id)
 	return ack_err;
 }
 
+static int cron_target_available(const char *session_id)
+{
+	const char *separator = session_id ? strchr(session_id, ':') : NULL;
+	char name[64];
+	if (!separator)
+		return 0;
+	size_t length = (size_t)(separator - session_id);
+	if (length >= sizeof(name))
+		return 0;
+	memcpy(name, session_id, length);
+	name[length] = '\0';
+	const channel_t *target = channel_get_by_name(name);
+	return target && target->send;
+}
+
 static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_msg_t *msg,
 				    const char *text, int agent_err)
 {
@@ -36,9 +51,12 @@ static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_
 	if (!ch || !ch->send || !msg)
 		return -1;
 	cron_job_id = ch->name && strcmp(ch->name, "cron") == 0 ? msg->user_id : NULL;
-	/* A successful cron run with no text has nothing to send. */
-	if (cron_job_id && agent_err == 0 && provider_text_is_blank(text))
+	/* Keep a silent job due until its destination is available. */
+	if (cron_job_id && agent_err == 0 && provider_text_is_blank(text)) {
+		if (!cron_target_available(msg->session_id))
+			return -1;
 		return maybe_ack_cron(cron_job_id);
+	}
 	send_err = ch->send(msg->session_id, text, NULL, 0);
 	if (send_err != 0)
 		return send_err;
