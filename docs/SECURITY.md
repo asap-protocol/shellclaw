@@ -100,6 +100,12 @@ The task checklist references `unshare(CLONE_NEWNS) + pivot_root` as a hardened 
 
 ### JetPack 6 / kernel 5.15 note
 
+Landlock ABI 3 and later restrict regular file truncation to the workspace. On ABI 1 and 2, including JetPack 6 with Linux 5.15, ShellClaw adds a read-only mount policy.
+The policy applies in the command's private mount namespace. The workspace and its submounts keep their original mount permissions. The command can still resize files on writable workspace mounts.
+ShellClaw removes `CAP_SYS_ADMIN` before it starts the command. The command and its descendants cannot change the protected mounts.
+The legacy policy requires `open_tree`, `mount_setattr`, and `move_mount`. ShellClaw stops before it starts the command if the setup fails or the workspace is the root directory.
+Linux 5.15 requires the system to mount its root filesystem during boot. If the system runs directly from the initial initramfs, ShellClaw stops before it starts the command.
+
 Namespace behavior above was verified by **source audit**. On-device validation on JetPack 6.2.x is a [known pending](JETSON_SIGNOFF.md) item (not a CI or merge-to-`main` gate).
 
 ---

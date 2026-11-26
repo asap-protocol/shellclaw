@@ -31,9 +31,13 @@
 #include <sys/stat.h>
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <linux/capability.h>
 #include <netinet/in.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/statvfs.h>
+#include <sys/syscall.h>
 #endif
 
 #define ASSERT(c) do { \
@@ -1039,6 +1043,89 @@ static int test_scrubbed_env_child_loses_secrets(void)
 	return 0;
 }
 
+#ifdef __linux__
+int sandbox_isolate_namespaces(void);
+int sandbox_seal_workspace_mounts(const char *workspace);
+
+static int mount_admin_was_removed(void)
+{
+	struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3};
+	struct __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3];
+	unsigned int index = CAP_TO_INDEX(CAP_SYS_ADMIN);
+	__u32 mask = CAP_TO_MASK(CAP_SYS_ADMIN);
+
+	return prctl(PR_CAPBSET_READ, CAP_SYS_ADMIN, 0, 0, 0) == 0 &&
+	       syscall(__NR_capget, &header, caps) == 0 &&
+	       ((caps[index].effective | caps[index].permitted | caps[index].inheritable) & mask) == 0;
+}
+
+static int test_legacy_workspace_mount_guard(void)
+{
+	char parent[] = "/tmp/sc_mount_guard_XXXXXX";
+	char workspace[sizeof(parent) + sizeof("/workspace")];
+	char nested[sizeof(workspace) + sizeof("/locked")];
+	char output[sizeof(workspace) + sizeof("/result")];
+	struct statvfs original;
+	struct statvfs after;
+	int status = 0;
+	pid_t child;
+
+	ASSERT(mkdtemp(parent) != NULL);
+	snprintf(workspace, sizeof(workspace), "%s/workspace", parent);
+	snprintf(nested, sizeof(nested), "%s/locked", workspace);
+	snprintf(output, sizeof(output), "%s/result", workspace);
+	ASSERT(mkdir(workspace, 0700) == 0);
+	ASSERT(mkdir(nested, 0700) == 0);
+	ASSERT(statvfs(parent, &original) == 0);
+	child = fork();
+	ASSERT(child >= 0);
+	if (child == 0) {
+		pid_t command;
+		int fd;
+		if (sandbox_isolate_namespaces() != 0)
+			_exit(77);
+		if (mount("tmpfs", nested, "tmpfs", MS_NOSUID | MS_NODEV, "size=4k") != 0)
+			_exit(77);
+		if (mount(NULL, nested, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV,
+		          NULL) != 0 ||
+		    sandbox_seal_workspace_mounts(workspace) != 0)
+			_exit(1);
+		if (statvfs(parent, &after) != 0 || !(after.f_flag & ST_RDONLY) ||
+		    statvfs(".", &after) != 0 || (after.f_flag & ST_RDONLY) ||
+		    statvfs("locked", &after) != 0 ||
+		    (after.f_flag & (ST_RDONLY | ST_NOSUID)) != (ST_RDONLY | ST_NOSUID))
+			_exit(2);
+		fd = open("result", O_CREAT | O_WRONLY, 0600);
+		if (fd < 0 || write(fd, "sample", 6) != 6 || close(fd) != 0)
+			_exit(3);
+		command = fork();
+		if (command == 0) {
+			if (!mount_admin_was_removed())
+				_exit(1);
+			_exit(truncate("result", 2) != 0);
+		}
+		if (command < 0 || waitpid(command, &status, 0) != command ||
+		    !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+			_exit(4);
+		_exit(0);
+	}
+	ASSERT(waitpid(child, &status, 0) == child);
+	ASSERT(statvfs(parent, &after) == 0 && original.f_flag == after.f_flag);
+	unlink(output);
+	ASSERT(rmdir(nested) == 0);
+	ASSERT(rmdir(workspace) == 0);
+	ASSERT(rmdir(parent) == 0);
+	if (WIFEXITED(status) && WEXITSTATUS(status) == 77) {
+		fprintf(stderr, "test_sandbox: skip legacy mount guard (namespaces unavailable)\n");
+		return 0;
+	}
+	if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+		fprintf(stderr, "test_sandbox: legacy mount guard child exit=%d\n", WEXITSTATUS(status));
+	ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	return 0;
+}
+#endif
+
 int main(void)
 {
 	RUN(test_isolation_denied_helper());
@@ -1063,6 +1150,7 @@ int main(void)
 	RUN(test_timeout_kills_trickle_output());
 	RUN(test_timeout_kills_process());
 #ifdef __linux__
+	RUN(test_legacy_workspace_mount_guard());
 	RUN(test_landlock_probe_without_restrict());
 	RUN(test_command_inherits_cgroup());
 	RUN(test_inherited_fd_is_closed());

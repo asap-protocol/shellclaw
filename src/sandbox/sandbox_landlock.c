@@ -35,6 +35,11 @@ int sandbox_landlock_prepare(const char *workspace)
 }
 #else
 
+#ifndef LANDLOCK_ACCESS_FS_TRUNCATE
+/* This UAPI bit also applies to binaries built with older headers. */
+#define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
+#endif
+
 #ifndef LANDLOCK_ACCESS_FS_IOCTL_DEV
 #define LANDLOCK_ACCESS_FS_IOCTL_DEV (1ULL << 15)
 #endif
@@ -56,6 +61,19 @@ static __u64 landlock_abi1_fs_rights(void)
            LANDLOCK_ACCESS_FS_MAKE_SYM;
 }
 
+static int landlock_abi(void)
+{
+    return (int)syscall(__NR_landlock_create_ruleset, NULL, 0,
+                       LANDLOCK_CREATE_RULESET_VERSION);
+}
+
+int sandbox_landlock_needs_mount_guard(void)
+{
+    int abi = landlock_abi();
+
+    return abi < 1 ? -1 : abi < 3;
+}
+
 static int landlock_handled_fs(__u64 *handled_out)
 {
     int abi;
@@ -63,8 +81,7 @@ static int landlock_handled_fs(__u64 *handled_out)
 
     if (!handled_out)
         return -1;
-    abi = (int)syscall(__NR_landlock_create_ruleset, NULL, 0,
-                       LANDLOCK_CREATE_RULESET_VERSION);
+    abi = landlock_abi();
     if (abi < 1)
         return -1;
     handled = landlock_abi1_fs_rights();
@@ -72,10 +89,8 @@ static int landlock_handled_fs(__u64 *handled_out)
     if (abi >= 2)
         handled |= LANDLOCK_ACCESS_FS_REFER;
 #endif
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
     if (abi >= 3)
         handled |= LANDLOCK_ACCESS_FS_TRUNCATE;
-#endif
     if (abi >= 5)
         handled |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
     *handled_out = handled;
@@ -141,9 +156,7 @@ static __u64 mask_workspace_access(__u64 handled)
 #ifdef LANDLOCK_ACCESS_FS_REFER
     access |= (LANDLOCK_ACCESS_FS_REFER & handled);
 #endif
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
     access |= (LANDLOCK_ACCESS_FS_TRUNCATE & handled);
-#endif
     return access;
 }
 
@@ -185,9 +198,7 @@ static int landlock_make_ruleset(const char *workspace)
     rw_file = (LANDLOCK_ACCESS_FS_EXECUTE |
                LANDLOCK_ACCESS_FS_READ_FILE |
                LANDLOCK_ACCESS_FS_WRITE_FILE) & handled;
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
     rw_file |= (LANDLOCK_ACCESS_FS_TRUNCATE & handled);
-#endif
     memset(&attr, 0, sizeof(attr));
     attr.handled_access_fs = handled;
     ruleset_fd = (int)syscall(__NR_landlock_create_ruleset, &attr,
@@ -243,7 +254,7 @@ int sandbox_landlock_restrict_to_workspace(const char *workspace)
         return -1;
     rc = syscall(__NR_landlock_restrict_self, fd, 0);
     close(fd);
-    return (rc == 0) ? 0 : -1;
+    return rc == 0 ? 0 : -1;
 }
 
 #endif /* __linux__ */
