@@ -669,14 +669,17 @@ static int agent_prepare_context(agent_run_ctx_t *ctx)
 	return 0;
 }
 
-/** Build provider message array: system + history + current user turn. */
+/** Build the provider request from the system prompt, history, and current turn. */
 static int agent_build_messages(agent_run_ctx_t *ctx)
 {
 	ctx->history_count = 0;
 	parse_session_into_messages(ctx->session_buf, ctx->max_ctx, ctx->history_msgs,
 	                            ctx->history_roles_buf, MAX_HISTORY_MESSAGES * ROLE_LEN,
 	                            ctx->history_content, HISTORY_CONTENT_MAX, &ctx->history_count);
-	ctx->total_msgs = 1 + (size_t)ctx->history_count + 1;
+	/* Some providers require a user message first. A cut can leave an
+	 * assistant message at the front of the window. Keep its original role. */
+	int needs_prefix = ctx->history_count > 0 && strcmp(ctx->history_msgs[0].role, "assistant") == 0;
+	ctx->total_msgs = 2 + (size_t)ctx->history_count + (size_t)needs_prefix;
 	ctx->messages = malloc(ctx->total_msgs * sizeof(provider_message_t));
 	if (!ctx->messages) {
 		agent_oom_msg(ctx);
@@ -685,12 +688,19 @@ static int agent_build_messages(agent_run_ctx_t *ctx)
 	memset(ctx->messages, 0, ctx->total_msgs * sizeof(provider_message_t));
 	ctx->messages[0].role = "system";
 	ctx->messages[0].content = ctx->system_buf;
-	for (int i = 0; i < ctx->history_count; i++) {
-		ctx->messages[1 + i].role = ctx->history_msgs[i].role;
-		ctx->messages[1 + i].content = ctx->history_msgs[i].content;
+	size_t next = 1;
+	if (needs_prefix) {
+		ctx->messages[next].role = "user";
+		ctx->messages[next].content = "[Earlier user messages are unavailable.]";
+		next++;
 	}
-	ctx->messages[1 + ctx->history_count].role = "user";
-	ctx->messages[1 + ctx->history_count].content = ctx->user_message;
+	for (int i = 0; i < ctx->history_count; i++) {
+		ctx->messages[next].role = ctx->history_msgs[i].role;
+		ctx->messages[next].content = ctx->history_msgs[i].content;
+		next++;
+	}
+	ctx->messages[next].role = "user";
+	ctx->messages[next].content = ctx->user_message;
 	ctx->base_msg_count = ctx->total_msgs;
 	return 0;
 }

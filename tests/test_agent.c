@@ -1707,6 +1707,79 @@ cleanup_early:
 }
 
 
+static int test_history_replay_preserves_assistant_role(void)
+{
+	const char *db_path = "build/test_history_replay.db";
+	const char *config_path = "build/test_history_replay.toml";
+	const char *session_id = "cli:history-replay";
+	const char *folded_head = "[{\"role\":\"assistant\",\"content\":\"Summary of earlier";
+	enum { REPLY = 65500, CAP = 128 * 1024 };
+	config_t *cfg = NULL;
+	char err[256];
+	char response[32];
+	char *json = malloc(CAP);
+	char *reply = malloc(REPLY + 1);
+	int failed = 1;
+
+	memory_cleanup();
+	if (!json || !reply || memory_init(db_path) != 0) goto cleanup;
+	FILE *cf = fopen(config_path, "w");
+	if (!cf) goto cleanup;
+	fputs("[agent]\nmodel = \"test\"\nmax_context_messages = 5\n", cf);
+	fclose(cf);
+	if (config_load(config_path, &cfg, err, sizeof(err)) != 0) goto cleanup;
+	memset(reply, 'B', REPLY);
+	memcpy(reply + REPLY - 11, "BIGASST_END", 11);
+	reply[REPLY] = '\0';
+	/* One folded history fits the window. The other needs a second cut. */
+	for (int count = 6; count <= 8; count += 2) {
+		size_t off = (size_t)snprintf(json, CAP,
+			"[{\"role\":\"user\",\"content\":\"Please compare the options above.\"},"
+			"{\"role\":\"assistant\",\"content\":\"%s\"}", reply);
+		for (int i = 2; i < count; i++) {
+			off += (size_t)snprintf(json + off, CAP - off,
+				",{\"role\":\"%s\",\"content\":\"msg_%d\"}",
+				i % 2 ? "assistant" : "user", i);
+		}
+		snprintf(json + off, CAP - off, "]");
+		if (session_save(session_id, json) != 0 ||
+		    agent_run(cfg, session_id, "new prompt", &compaction_provider, NULL, 0,
+		              response, sizeof(response)) != 0 ||
+		    session_load(session_id, json, CAP) != 0)
+			goto cleanup;
+		const char *expected = count == 6 ? "Summary of earlier" : "msg_3";
+		if (!spy_roles[1] || strcmp(spy_roles[1], "user") != 0 ||
+		    !spy_roles[2] || strcmp(spy_roles[2], "assistant") != 0 ||
+		    strncmp(spy_content[2], expected, strlen(expected)) != 0 ||
+		    strncmp(json, folded_head, strlen(folded_head)) != 0 ||
+		    strstr(json, "BIGASST_END") == NULL) {
+			fprintf(stderr, "FAIL: replay changed the role or content of a folded turn (%d messages)\n", count);
+			goto cleanup;
+		}
+	}
+	/* Older rows can already start with an assistant message. */
+	if (session_save(session_id, "[{\"role\":\"assistant\",\"content\":\"old reply\"}]") != 0 ||
+	    agent_run(cfg, session_id, "new prompt", &spy_provider, NULL, 0,
+	              response, sizeof(response)) != 0)
+		goto cleanup;
+	if (!spy_roles[1] || strcmp(spy_roles[1], "user") != 0 ||
+	    !spy_roles[2] || strcmp(spy_roles[2], "assistant") != 0 ||
+	    strcmp(spy_content[2], "old reply") != 0) {
+		fprintf(stderr, "FAIL: replay changed the role or content of a stored assistant turn\n");
+		goto cleanup;
+	}
+	failed = 0;
+cleanup:
+	spy_cleanup();
+	config_free(cfg);
+	free(reply);
+	free(json);
+	memory_cleanup();
+	remove(config_path);
+	remove(db_path);
+	return failed;
+}
+
 static int test_local_offline_note_when_active_is_local(void)
 {
 	const char *path = "build/test_agent_local_note.toml";
@@ -2451,6 +2524,7 @@ int main(void)
 	RUN(test_compaction_progresses_when_assistant_message_is_oversized());
 	RUN(test_compaction_failure_keeps_original_session());
 	RUN(test_compaction_merges_summary_when_tail_starts_with_user());
+	RUN(test_history_replay_preserves_assistant_role());
 	RUN(test_local_offline_note_when_active_is_local());
 	RUN(test_local_offline_note_skipped_for_non_local());
 	RUN(test_session_overflow_does_not_corrupt_history());
