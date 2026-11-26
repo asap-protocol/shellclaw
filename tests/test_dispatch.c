@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "channels/channel.h"
+#include "channels/heartbeat.h"
 #include "core/bootstrap.h"
 
 void bootstrap_set_provider_for_test(const provider_t *provider);
@@ -45,6 +46,7 @@ static int g_send_calls;
 static int g_send_error;
 static const char *g_spy_reply;
 static const char *g_spy_openai_body;
+static const config_t *g_reload_during_send;
 static size_t g_last_provider_tool_count;
 static int g_agent_mutex_held_during_chat;
 static int g_agent_mutex_held_during_reset;
@@ -59,6 +61,12 @@ static int mock_send(const char *session_id, const char *text,
 	g_last_session[sizeof(g_last_session) - 1] = '\0';
 	strncpy(g_last_text, text ? text : "", sizeof(g_last_text) - 1);
 	g_last_text[sizeof(g_last_text) - 1] = '\0';
+	if (g_reload_during_send) {
+		agent_lock();
+		heartbeat_set_live_config(g_reload_during_send);
+		agent_unlock();
+		g_reload_during_send = NULL;
+	}
 	return g_send_error;
 }
 
@@ -563,6 +571,78 @@ static int test_handle_message_holds_agent_mutex(void)
 	return 0;
 }
 
+static config_t *load_heartbeat_cfg(const char *path, const char *destination)
+{
+	FILE *file = fopen(path, "w");
+	if (!file)
+		return NULL;
+	int written = fprintf(file, "[agent]\nmodel = \"test\"\n[heartbeat]\n"
+	                            "enabled = true\ndefault_channel = \"%s\"\n", destination);
+	if (fclose(file) != 0 || written < 0)
+		return NULL;
+	return load_minimal_cfg(path);
+}
+
+static int test_cron_rechecks_heartbeat_only_for_silent_delivery(void)
+{
+	const channel_t *heartbeat = channel_heartbeat_get();
+	const channel_t *cron = channel_cron_get();
+	char path[] = "/tmp/shellclaw_test_dispatch_heartbeat_XXXXXX";
+	int fd = mkstemp(path);
+	ASSERT(fd >= 0);
+	close(fd);
+	config_t *ready = load_heartbeat_cfg(path, "cli");
+	config_t *unavailable = load_heartbeat_cfg(path, "webchat");
+	ASSERT(ready && unavailable);
+	ASSERT(memory_init(":memory:") == 0);
+	ASSERT(heartbeat->init(ready) == 0 && cron->init(ready) == 0);
+	channel_register("cli", &mock_channel);
+	channel_register("heartbeat", heartbeat);
+	bootstrap_set_cfg(ready);
+	bootstrap_set_provider_for_test(&spy_provider);
+	bootstrap_reset_tools_for_test();
+	for (int silent = 1; silent >= 0; silent--) {
+		char id[32];
+		channel_incoming_msg_t msg = {0};
+		cron_job_row_t row = {0};
+		long long due_at = (long long)time(NULL) - 1;
+		snprintf(id, sizeof(id), "heartbeat_%d", silent);
+		reset_send_spy();
+		agent_lock();
+		heartbeat_set_live_config(ready);
+		agent_unlock();
+		ASSERT(cron_job_create(id, "at:1", "remind me", "heartbeat", "default", due_at, 1) == 0);
+		ASSERT(cron->poll(&msg, 0) == 1);
+		g_spy_reply = silent ? "" : "delivered";
+		if (silent) {
+			agent_lock();
+			heartbeat_set_live_config(unavailable);
+			agent_unlock();
+		} else {
+			g_reload_during_send = unavailable;
+		}
+		ASSERT(handle_message(cron, &msg) == (silent ? -1 : 0));
+		ASSERT(g_send_calls == (silent ? 0 : 1) && !g_reload_during_send);
+		ASSERT(cron_job_get_by_id(id, &row) == silent);
+		if (silent) {
+			ASSERT(row.enabled && row.next_run == due_at);
+			ASSERT(cron_job_delete(id) == 0);
+		} else {
+			ASSERT(strcmp(g_last_text, "delivered") == 0);
+		}
+		cron_job_row_free(&row);
+		channel_incoming_msg_clear(&msg);
+	}
+	reset_send_spy();
+	cron->cleanup();
+	heartbeat->cleanup();
+	memory_cleanup();
+	config_free(ready);
+	config_free(unavailable);
+	unlink(path);
+	return 0;
+}
+
 static int test_api_session_delete_holds_agent_mutex(void)
 {
 	const char *db_path = "build/test_dispatch_api_delete.db";
@@ -598,6 +678,7 @@ int main(void)
 	RUN(test_cron_slash_commands_ack_jobs());
 	RUN(test_cron_agent_failure_does_not_ack());
 	RUN(test_cron_blank_reply_acks_without_sending());
+	RUN(test_cron_rechecks_heartbeat_only_for_silent_delivery());
 	puts("test_dispatch OK");
 	return 0;
 }

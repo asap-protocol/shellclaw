@@ -4,6 +4,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
+#include "channels/heartbeat.h"
 #include "core/dispatch.h"
 #include "core/agent.h"
 #include "core/bootstrap.h"
@@ -15,18 +16,6 @@
 #include <string.h>
 
 #define RESPONSE_BUF_SIZE (32 * 1024)
-
-static int maybe_ack_cron(const char *job_id)
-{
-	int ack_err;
-	if (!job_id)
-		return 0;
-	/* SQLITE_THREADSAFE=0: serialize ack SQL with other g_db writers. */
-	agent_lock();
-	ack_err = cron_ack_delivery(job_id);
-	agent_unlock();
-	return ack_err;
-}
 
 static int cron_target_available(const char *session_id)
 {
@@ -40,7 +29,24 @@ static int cron_target_available(const char *session_id)
 	memcpy(name, session_id, length);
 	name[length] = '\0';
 	const channel_t *target = channel_get_by_name(name);
+	if (strcmp(name, "heartbeat") == 0 || target == channel_heartbeat_get())
+		target = target == channel_heartbeat_get() ? heartbeat_local_delivery() : NULL;
 	return target && target->send;
+}
+
+static int maybe_ack_cron(const char *job_id, const channel_incoming_msg_t *silent_reply)
+{
+	int ack_err;
+	if (!job_id)
+		return 0;
+	/* Check the current destination and acknowledge a silent reply under one lock. */
+	agent_lock();
+	if (silent_reply && !cron_target_available(silent_reply->session_id))
+		ack_err = -1;
+	else
+		ack_err = cron_ack_delivery(job_id);
+	agent_unlock();
+	return ack_err;
 }
 
 static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_msg_t *msg,
@@ -52,15 +58,12 @@ static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_
 		return -1;
 	cron_job_id = ch->name && strcmp(ch->name, "cron") == 0 ? msg->user_id : NULL;
 	/* Keep a silent job due until its destination is available. */
-	if (cron_job_id && agent_err == 0 && provider_text_is_blank(text)) {
-		if (!cron_target_available(msg->session_id))
-			return -1;
-		return maybe_ack_cron(cron_job_id);
-	}
+	if (cron_job_id && agent_err == 0 && provider_text_is_blank(text))
+		return maybe_ack_cron(cron_job_id, msg);
 	send_err = ch->send(msg->session_id, text, NULL, 0);
 	if (send_err != 0)
 		return send_err;
-	return agent_err == 0 ? maybe_ack_cron(cron_job_id) : 0;
+	return agent_err == 0 ? maybe_ack_cron(cron_job_id, NULL) : 0;
 }
 
 int dispatch_delete_session(const char *session_id)
