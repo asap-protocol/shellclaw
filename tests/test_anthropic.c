@@ -130,6 +130,18 @@ static int test_parse_api_error_object_sets_error(void)
 	return 0;
 }
 
+static int test_parse_missing_or_invalid_content_returns_error(void)
+{
+	const char *bodies[] = { "{}", "{\"content\":null}", "{\"content\":{}}" };
+	for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+		provider_response_t response = {0};
+		ASSERT(anthropic_parse_response_for_test(bodies[i], &response) == -1);
+		ASSERT(response.error != 0 && response.content && response.content[0]);
+		provider_response_clear(&response);
+	}
+	return 0;
+}
+
 static int test_parse_empty_content_array_returns_zero(void)
 {
 	const char *body = "{\"content\":[]}";
@@ -589,6 +601,7 @@ int main(void)
 #ifdef SHELLCLAW_TEST
 	RUN(test_parse_malformed_json_sets_error());
 	RUN(test_parse_api_error_object_sets_error());
+	RUN(test_parse_missing_or_invalid_content_returns_error());
 	RUN(test_parse_empty_content_array_returns_zero());
 	RUN(test_parse_valid_text_block_returns_content());
 	RUN(test_parse_null_json_returns_error());

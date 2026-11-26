@@ -176,26 +176,34 @@ int provider_parse_chat_completions_json(const char *response_body, provider_res
 	}
 	choices = cJSON_GetObjectItem(root, "choices");
 	if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
+		provider_set_error(response, "OpenAI response has no completion choices");
 		cJSON_Delete(root);
-		return 0;
+		return -1;
 	}
 	choice = cJSON_GetArrayItem(choices, 0);
 	msg_obj = cJSON_GetObjectItem(choice, "message");
 	if (!cJSON_IsObject(msg_obj)) {
+		provider_set_error(response, "OpenAI completion choice has no message");
 		cJSON_Delete(root);
-		return 0;
+		return -1;
 	}
-	response->content = NULL;
+	content_item = cJSON_GetObjectItem(msg_obj, "content");
+	tool_calls_arr = cJSON_GetObjectItem(msg_obj, "tool_calls");
+	int has_tool_calls = cJSON_IsArray(tool_calls_arr) && cJSON_GetArraySize(tool_calls_arr) > 0;
+	if (!cJSON_IsString(content_item) && !cJSON_IsNull(content_item) &&
+	    (content_item || !has_tool_calls)) {
+		provider_set_error(response, "OpenAI message has invalid content");
+		cJSON_Delete(root);
+		return -1;
+	}
+	response->content = provider_dup_str(cJSON_IsString(content_item) ? content_item->valuestring : "");
 	response->tool_calls = NULL;
 	response->tool_calls_count = 0;
-	content_item = cJSON_GetObjectItem(msg_obj, "content");
-	if (cJSON_IsString(content_item) && content_item->valuestring)
-		response->content = provider_dup_str(content_item->valuestring);
-	else
-		response->content = malloc(1);
-	if (response->content && !cJSON_IsString(content_item))
-		response->content[0] = '\0';
-	tool_calls_arr = cJSON_GetObjectItem(msg_obj, "tool_calls");
+	if (!response->content) {
+		provider_set_error(response, "Out of memory reading OpenAI message");
+		cJSON_Delete(root);
+		return -1;
+	}
 	if (cJSON_IsArray(tool_calls_arr)) {
 		int n = cJSON_GetArraySize(tool_calls_arr);
 		if (n > 0) {

@@ -198,10 +198,8 @@ static int parse_response_body(const char *response_buf, provider_response_t *re
 		return -1;
 	}
 	content = cJSON_GetObjectItem(root, "content");
-	if (!cJSON_IsArray(content)) {
-		cJSON_Delete(root);
-		return 0;
-	}
+	if (!cJSON_IsArray(content))
+		return parse_fail(root, NULL, NULL, 0, response, "Anthropic response has no content array");
 	text = malloc(text_cap);
 	if (!text)
 		return parse_fail(root, NULL, NULL, 0, response,
