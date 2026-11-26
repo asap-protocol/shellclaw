@@ -478,7 +478,7 @@ $(HARDWARE_I2C_O): src/hardware/hardware_i2c.c src/hardware/hardware_i2c.h
 $(HARDWARE_CAMERA_O): src/hardware/hardware_camera.c src/hardware/hardware_camera.h src/hardware/board_detect.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/hardware/hardware_camera.c
 
-$(CRON_O): src/tools/cron.c src/tools/cron.h src/crypto/crypto.h src/core/agent.h src/core/memory.h src/channels/channel.h src/core/config.h
+$(CRON_O): src/tools/cron.c src/tools/cron.h src/crypto/crypto.h src/core/agent.h src/core/memory.h src/channels/channel.h src/channels/heartbeat.h src/core/config.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/tools/cron.c
 
 $(ASAP_INVOKE_O): src/tools/asap_invoke.c src/tools/asap_invoke.h src/tools/tool.h src/asap/envelope.h src/asap/client.h src/asap/registry.h src/asap/ulid.h src/asap/asap_version.h src/core/config.h vendor/cJSON/cJSON.h
@@ -642,9 +642,9 @@ test_web_search: tests/test_web_search.c $(WEBSEARCH_O) $(CONFIG_O) $(TOML_O) $(
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_web_search.c $(WEBSEARCH_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(LDLIBS)
 	$(DSYM_SCRIPT)
 
-test_cron: tests/test_cron.c $(CRON_O) $(CRYPTO_LINK) $(MEMORY_O) $(SQLITE3_O) $(CHANNEL_COMMON_O) $(CJSON_O) $(AGENT_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(PROVIDER_COMMON_O)
+test_cron: tests/test_cron.c $(CRON_O) $(CRYPTO_LINK) $(MEMORY_O) $(SQLITE3_O) $(CHANNEL_COMMON_O) $(CHANNEL_HEARTBEAT_O) $(CJSON_O) $(AGENT_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(PROVIDER_COMMON_O)
 	@mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_cron.c $(CRON_O) $(CRYPTO_LINK) $(MEMORY_O) $(SQLITE3_O) $(CHANNEL_COMMON_O) $(CJSON_O) $(AGENT_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(PROVIDER_COMMON_O) $(LDLIBS) -pthread
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ $^ $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
 
 test_ws: tests/test_ws.c $(WS_TEST_O)
@@ -657,9 +657,9 @@ test_context: tests/test_context.c $(CONTEXT_TEST_OBJS) $(CONFIG_O) $(TOML_O) $(
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -DSHELLCLAW_CONTEXT_TEST -o $(BINDIR)/$@ tests/test_context.c $(CONTEXT_TEST_OBJS) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
 
-test_dispatch: tests/test_dispatch.c $(DISPATCH_O) $(BOOTSTRAP_DISPATCH_STUB_O) $(AGENT_O) $(ROUTER_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(PROVIDER_COMMON_O) $(MEMORY_O) $(SQLITE3_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(CRON_O) $(CRYPTO_LINK) $(CHANNEL_COMMON_O)
+test_dispatch: tests/test_dispatch.c $(DISPATCH_O) $(BOOTSTRAP_DISPATCH_STUB_O) $(AGENT_O) $(ROUTER_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(PROVIDER_COMMON_O) $(MEMORY_O) $(SQLITE3_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(CRON_O) $(CRYPTO_LINK) $(CHANNEL_COMMON_O) $(CHANNEL_HEARTBEAT_O)
 	@mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_dispatch.c $(DISPATCH_O) $(BOOTSTRAP_DISPATCH_STUB_O) $(AGENT_O) $(ROUTER_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(PROVIDER_COMMON_O) $(MEMORY_O) $(SQLITE3_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(CRON_O) $(CRYPTO_LINK) $(CHANNEL_COMMON_O) $(LDLIBS) -pthread
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ $^ $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
 
 RELOAD_TEST_OBJS := $(RELOAD_O) $(BOOTSTRAP_DISPATCH_STUB_O) $(TOOL_RELOAD_STUB_O) $(RELOAD_CHANNEL_STUB_O) $(HTTP_RELOAD_STUB_O) $(CONFIG_O) $(TOML_O) \

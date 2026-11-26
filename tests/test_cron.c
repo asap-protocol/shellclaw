@@ -6,8 +6,10 @@
 
 #include "tools/cron.h"
 #include "core/agent.h"
+#include "core/config.h"
 #include "core/memory.h"
 #include "channels/channel.h"
+#include "channels/heartbeat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -782,8 +784,9 @@ static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
 	ASSERT(memory_init(":memory:") == 0);
 	ASSERT(cron_job_create("old-chat", "at:1", "old", "webchat", "webchat:42", due - 2, 1) == 0);
 	for (int i = 0; i < 65; i++) {
+		const char *channel = i == 0 ? "extension" : "telegram";
 		snprintf(id, sizeof(id), "waiting%02d", i);
-		ASSERT(cron_job_create(id, "at:1", "old", "telegram", "-42", due - 1, 1) == 0);
+		ASSERT(cron_job_create(id, "at:1", "old", channel, "-42", due - 1, 1) == 0);
 	}
 	ASSERT(cron_job_create("ready", "at:1", "ready", "cli", "", due, 1) == 0);
 	ASSERT(cron->poll(&msg, 0) == 1);
@@ -801,9 +804,16 @@ static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
 	ASSERT(cron->poll(&msg, 80) == 0);
 	ASSERT(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
 	ASSERT((end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000 >= 40);
-	channel_register("telegram", &test_delivery_channel);
+	channel_register("extension", &test_delivery_channel);
 	ASSERT(cron->poll(&msg, 0) == 1);
 	ASSERT(strcmp(msg.user_id, "waiting00") == 0);
+	ASSERT(cron->send(msg.session_id, "reply", NULL, 0) == 0);
+	ASSERT(strcmp(g_cron_recipient, "-42") == 0);
+	ASSERT(cron_ack_delivery(msg.user_id) == 0);
+	channel_incoming_msg_clear(&msg);
+	channel_register("telegram", &test_delivery_channel);
+	ASSERT(cron->poll(&msg, 0) == 1);
+	ASSERT(strcmp(msg.user_id, "waiting01") == 0);
 	channel_incoming_msg_clear(&msg);
 	memory_cleanup();
 	return 0;
@@ -839,6 +849,59 @@ static int test_cron_target_validation_and_routing(void)
 	return 0;
 }
 
+static int test_cron_heartbeat_delivers_only_to_local_destinations(void)
+{
+	const channel_t *cron = channel_cron_get();
+	const channel_t *heartbeat = channel_heartbeat_get();
+	const char *targets[] = {"log", "webchat", "heartbeat", "cron", "cli"};
+	const char *path = "build/test_cron_heartbeat.toml";
+	channel_incoming_msg_t msg = {0};
+	cron_job_row_t row = {0};
+	long long now = (long long)time(NULL);
+	char error[256];
+
+	cron_test_reset_offers();
+	ASSERT(memory_init(":memory:") == 0);
+	channel_register("heartbeat", heartbeat);
+	ASSERT(cron_job_create("legacy_heartbeat", "at:1", "reminder", "heartbeat", "old",
+			       now - 1, 1) == 0);
+	for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
+		config_t *cfg = NULL;
+		FILE *f = fopen(path, "w");
+		char id[16];
+		int is_log = strcmp(targets[i], "log") == 0;
+		int is_local = is_log || strcmp(targets[i], "cli") == 0;
+		ASSERT(f != NULL);
+		fprintf(f, "[agent]\nmodel = \"test\"\n"
+			   "[heartbeat]\nenabled = true\ndefault_channel = \"%s\"\n", targets[i]);
+		ASSERT(fclose(f) == 0);
+		ASSERT(config_load(path, &cfg, error, sizeof(error)) == 0);
+		ASSERT(heartbeat->init(cfg) == 0);
+		snprintf(id, sizeof(id), "new_%zu", i);
+		ASSERT(cron_create_job("interval:600", "new", "heartbeat", NULL, id, sizeof(id)) ==
+		       (is_local ? 0 : CRON_INVALID_DESTINATION));
+		if (is_local) {
+			g_cron_recipient[0] = '\0';
+			ASSERT(cron->poll(&msg, 0) == 1);
+			ASSERT(strcmp(msg.user_id, "legacy_heartbeat") == 0);
+			ASSERT(cron->send(msg.session_id, "reminder reply", NULL, 0) == 0);
+			ASSERT(strcmp(g_cron_recipient, is_log ? "" : "default") == 0);
+			channel_incoming_msg_clear(&msg);
+		} else {
+			ASSERT(cron->poll(&msg, 0) == 0);
+			ASSERT(cron->send("heartbeat:old", "reminder reply", NULL, 0) == -1);
+		}
+		ASSERT(cron_job_get_by_id("legacy_heartbeat", &row) == 1 && row.enabled == 1);
+		ASSERT(row.next_run == now - 1);
+		cron_job_row_free(&row);
+		heartbeat->cleanup();
+		config_free(cfg);
+	}
+	remove(path);
+	memory_cleanup();
+	return 0;
+}
+
 int main(void)
 {
 	channel_register("cli", &test_delivery_channel);
@@ -870,6 +933,7 @@ int main(void)
 	RUN(test_cron_list_orders_ties_by_id());
 	RUN(test_cron_unavailable_targets_do_not_block_ready_jobs());
 	RUN(test_cron_target_validation_and_routing());
+	RUN(test_cron_heartbeat_delivers_only_to_local_destinations());
 	printf("test_cron: all tests passed\n");
 	return 0;
 }

@@ -57,7 +57,9 @@ const tool_t *tool_cron_get(void);
 /**
  * Create a cron job (shared by tool and HTTP handler).
  * If id_out[0] == '\0', a random ID is generated.
- * If a known channel is unavailable, its job keeps its due time.
+ * Register an extension channel before creating a job for it.
+ * If a stored channel is unavailable, its job keeps its due time.
+ * Heartbeat jobs require a configured log or CLI destination.
  * If a send fails, a later poll can run the agent and its tools again.
  * WebChat IDs identify connections. A restart can reuse an ID for another client.
  * The poller disables stored WebChat jobs and keeps their data.

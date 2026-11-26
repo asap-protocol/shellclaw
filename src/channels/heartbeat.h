@@ -20,6 +20,11 @@ typedef struct channel channel_t;
 /** Get the heartbeat channel (poll returns tick when interval elapsed, send routes to default or log). */
 const channel_t *channel_heartbeat_get(void);
 
+/** Return the configured log or CLI delivery channel for cron, or NULL.
+ * Call with the agent lock held to serialize access with configuration reload.
+ */
+const channel_t *heartbeat_local_delivery(void);
+
 /** After config reload without channel re-init (SIGHUP); updates live pointers only. */
 void heartbeat_set_live_config(const config_t *cfg);
 
