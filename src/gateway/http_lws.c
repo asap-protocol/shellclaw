@@ -11,7 +11,7 @@
 #include "gateway/uri_match.h"
 #include "gateway/static.h"
 #include "gateway/ws.h"
-#include "cJSON.h"
+#include "gateway/ws_rx.h"
 #include <libwebsockets.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -435,7 +435,7 @@ int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                       void *in, size_t len)
 {
 	http_server_ctx_t *ctx = http_ctx_get();
-	(void)user;
+	ws_session_t *session = user;
 	switch (reason) {
 	case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE: {
 		char token_buf[256] = {0};
@@ -447,47 +447,39 @@ int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		return 0;
 	}
 	case LWS_CALLBACK_ESTABLISHED: {
+		if (!session)
+			return -1;
 		int conn_id = ws_next_conn_id();
-		lws_set_wsi_user(wsi, (void *)(intptr_t)conn_id);
 		if (ws_register_conn(conn_id, (ws_conn_t)wsi) != 0) {
 			fprintf(stderr, "shellclaw: ws: connection table full\n");
 			return -1;
 		}
+		session->conn_id = conn_id;
 		break;
 	}
-	case LWS_CALLBACK_SERVER_WRITEABLE: {
-		int conn_id = (int)(intptr_t)lws_wsi_user(wsi);
-		if (conn_id <= 0) break;
-		ws_on_writable(wsi, conn_id);
+	case LWS_CALLBACK_SERVER_WRITEABLE:
+		if (session && session->conn_id > 0)
+			ws_on_writable(wsi, session->conn_id);
 		break;
-	}
 	case LWS_CALLBACK_RECEIVE: {
-		int conn_id = (int)(intptr_t)lws_wsi_user(wsi);
-		if (conn_id <= 0) break;
-		if (len > 0 && in) {
-			char *buf = malloc(len + 1);
-			if (buf) {
-				memcpy(buf, in, len);
-				buf[len] = '\0';
-				cJSON *root = cJSON_Parse(buf);
-				free(buf);
-				if (root) {
-					cJSON *type = cJSON_GetObjectItem(root, "type");
-					cJSON *text = cJSON_GetObjectItem(root, "text");
-					if (cJSON_IsString(type) && strcmp(type->valuestring, "message") == 0 &&
-					    cJSON_IsString(text) && text->valuestring)
-						ws_push_incoming(conn_id, text->valuestring);
-					cJSON_Delete(root);
-				}
-			}
+		if (!session || session->conn_id <= 0)
+			break;
+		char *text = NULL;
+		int result = ws_rx_feed(&session->rx, in, len, lws_is_final_fragment(wsi), &text);
+		if (result < 0)
+			return -1;
+		if (result == 1) {
+			ws_push_incoming(session->conn_id, text);
+			free(text);
 		}
 		break;
 	}
-	case LWS_CALLBACK_CLOSED: {
-		int conn_id = (int)(intptr_t)lws_wsi_user(wsi);
-		if (conn_id > 0) ws_unregister_conn(conn_id);
+	case LWS_CALLBACK_CLOSED:
+		if (session && session->conn_id > 0) {
+			ws_rx_clear(&session->rx);
+			ws_unregister_conn(session->conn_id);
+		}
 		break;
-	}
 	case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
 		/* wsi here is not a client socket. Mark real conns from our table. */
 		ws_on_service_cancel();
