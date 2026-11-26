@@ -39,6 +39,8 @@ static int capture_send(const char *recipient, const char *text,
 
 static const channel_t test_delivery_channel = {.send = capture_send};
 
+static const char long_target[] = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl";
+
 static void cron_test_reset_offers(void)
 {
 	const channel_t *cron_ch = channel_cron_get();
@@ -782,6 +784,9 @@ static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
 
 	cron_test_reset_offers();
 	ASSERT(memory_init(":memory:") == 0);
+	ASSERT(cron_job_create("old-channel", "at:1", "old", long_target, "", due - 5, 1) == 0);
+	ASSERT(cron_job_create("old-remote", "at:1", "old", "extension", long_target, due - 4, 1) == 0);
+	ASSERT(cron_job_create("old-cli", "at:1", "old", "cli", long_target, due - 3, 1) == 0);
 	ASSERT(cron_job_create("old-chat", "at:1", "old", "webchat", "webchat:42", due - 2, 1) == 0);
 	for (int i = 0; i < 65; i++) {
 		const char *channel = i == 0 ? "extension" : "telegram";
@@ -790,12 +795,21 @@ static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
 	}
 	ASSERT(cron_job_create("ready", "at:1", "ready", "cli", "", due, 1) == 0);
 	ASSERT(cron->poll(&msg, 0) == 1);
+	ASSERT(strcmp(msg.user_id, "old-cli") == 0);
+	ASSERT(cron->send(msg.session_id, "legacy CLI reply", NULL, 0) == 0);
+	ASSERT(cron_ack_delivery(msg.user_id) == 0);
+	channel_incoming_msg_clear(&msg);
+	ASSERT(cron->poll(&msg, 0) == 1);
 	ASSERT(strcmp(msg.user_id, "ready") == 0);
 	ASSERT(cron_ack_delivery(msg.user_id) == 0);
 	channel_incoming_msg_clear(&msg);
 	ASSERT(cron_job_get_by_id("old-chat", &row) == 1 && row.enabled == 0);
 	ASSERT(strcmp(row.channel, "webchat") == 0 && strcmp(row.recipient, "webchat:42") == 0);
 	ASSERT(strcmp(row.message, "old") == 0 && strcmp(row.schedule, "at:1") == 0 && row.next_run == due - 2);
+	cron_job_row_free(&row);
+	ASSERT(cron_job_get_by_id("old-channel", &row) == 1 && row.enabled == 0);
+	cron_job_row_free(&row);
+	ASSERT(cron_job_get_by_id("old-remote", &row) == 1 && row.enabled == 0);
 	cron_job_row_free(&row);
 	ASSERT(cron_job_get_by_id("waiting00", &row) == 1 && row.enabled == 1);
 	ASSERT(row.next_run == due - 1);
@@ -827,6 +841,7 @@ static int test_cron_target_validation_and_routing(void)
 		{"cron", "cli:default"}, {"heartbeat", "default"}, {"unknown", "abc"},
 		{"webchat", NULL}, {"webchat", "42"}, {"webchat", "webchat:42"},
 		{"discord", "default"}, {"telegram", "default"},
+		{"cli", long_target}, {long_target, "default"},
 	};
 
 	ASSERT(memory_init(":memory:") == 0);
@@ -862,9 +877,12 @@ static int test_cron_heartbeat_delivers_only_to_local_destinations(void)
 
 	cron_test_reset_offers();
 	ASSERT(memory_init(":memory:") == 0);
-	channel_register("heartbeat", heartbeat);
-	ASSERT(cron_job_create("legacy_heartbeat", "at:1", "reminder", "heartbeat", "old",
+	ASSERT(cron_job_create("legacy_heartbeat", "at:1", "reminder", "heartbeat", long_target,
 			       now - 1, 1) == 0);
+	ASSERT(cron->poll(&msg, 0) == 0);
+	ASSERT(cron_job_get_by_id("legacy_heartbeat", &row) == 1 && row.enabled == 1);
+	cron_job_row_free(&row);
+	channel_register("heartbeat", heartbeat);
 	for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
 		config_t *cfg = NULL;
 		FILE *f = fopen(path, "w");
@@ -878,6 +896,8 @@ static int test_cron_heartbeat_delivers_only_to_local_destinations(void)
 		ASSERT(config_load(path, &cfg, error, sizeof(error)) == 0);
 		ASSERT(heartbeat->init(cfg) == 0);
 		snprintf(id, sizeof(id), "new_%zu", i);
+		ASSERT(cron_create_job("interval:600", "new", "heartbeat", long_target,
+				       id, sizeof(id)) == CRON_INVALID_DESTINATION);
 		ASSERT(cron_create_job("interval:600", "new", "heartbeat", NULL, id, sizeof(id)) ==
 		       (is_local ? 0 : CRON_INVALID_DESTINATION));
 		if (is_local) {
@@ -885,7 +905,7 @@ static int test_cron_heartbeat_delivers_only_to_local_destinations(void)
 			ASSERT(cron->poll(&msg, 0) == 1);
 			ASSERT(strcmp(msg.user_id, "legacy_heartbeat") == 0);
 			ASSERT(cron->send(msg.session_id, "reminder reply", NULL, 0) == 0);
-			ASSERT(strcmp(g_cron_recipient, is_log ? "" : "default") == 0);
+			ASSERT(g_cron_recipient[0] == '\0');
 			channel_incoming_msg_clear(&msg);
 		} else {
 			ASSERT(cron->poll(&msg, 0) == 0);
@@ -904,7 +924,7 @@ static int test_cron_heartbeat_delivers_only_to_local_destinations(void)
 
 int main(void)
 {
-	channel_register("cli", &test_delivery_channel);
+	channel_register("cli", channel_cli_get());
 	channel_register("webchat", &test_delivery_channel);
 	RUN(test_interval_next_run());
 	RUN(test_at_one_shot());

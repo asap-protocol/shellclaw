@@ -271,6 +271,26 @@ static cron_target_status_t cron_resolve_target(const char *channel, const char 
 	return CRON_TARGET_READY;
 }
 
+static cron_target_status_t cron_stored_target(const char *channel, const char *recipient,
+					       int channel_truncated, int recipient_truncated)
+{
+	if (channel_truncated)
+		return CRON_TARGET_INVALID;
+	if (recipient_truncated) {
+		/* Only the native local channels ignore a legacy recipient. */
+		const char *name = cron_default(channel, "cli");
+		const channel_t *dest = channel_get_by_name(name);
+		const channel_t *local = NULL;
+		if (strcmp(name, "cli") == 0)
+			local = channel_cli_get();
+		else if (strcmp(name, "heartbeat") == 0)
+			local = channel_heartbeat_get();
+		if (!local || (dest && dest != local))
+			return CRON_TARGET_INVALID;
+	}
+	return cron_resolve_target(channel, recipient, CRON_TARGET_STORED, NULL);
+}
+
 int cron_create_job(const char *schedule, const char *message,
                     const char *channel, const char *recipient,
                     char *id_out, size_t id_size)
@@ -454,8 +474,8 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 	do {
 		n = cron_job_list_due(now, after, keys, CRON_DUE_SCAN_MAX);
 		for (int i = 0; i < n; i++) {
-			cron_target_status_t target = keys[i].target_truncated ? CRON_TARGET_INVALID
-				: cron_resolve_target(keys[i].channel, keys[i].recipient, CRON_TARGET_STORED, NULL);
+			cron_target_status_t target = cron_stored_target(keys[i].channel, keys[i].recipient,
+				keys[i].channel_truncated, keys[i].recipient_truncated);
 			if (target == CRON_TARGET_INVALID) {
 				if (cron_job_disable(keys[i].id) == 0)
 					fprintf(stderr, "shellclaw: cron: disabled job '%s' with an invalid destination\n",
@@ -495,7 +515,8 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 		cron_sleep_ms((long)timeout_ms);
 	agent_lock();
 	found = cron_job_get_by_id(first, row) == 1 && row->enabled && row->next_run <= now &&
-		cron_resolve_target(row->channel, row->recipient, CRON_TARGET_STORED, NULL) == CRON_TARGET_READY;
+		cron_stored_target(row->channel, row->recipient, row->channel_truncated,
+				   row->recipient_truncated) == CRON_TARGET_READY;
 	agent_unlock();
 	if (found)
 		return 1;

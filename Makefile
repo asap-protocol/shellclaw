@@ -642,7 +642,7 @@ test_web_search: tests/test_web_search.c $(WEBSEARCH_O) $(CONFIG_O) $(TOML_O) $(
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_web_search.c $(WEBSEARCH_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(LDLIBS)
 	$(DSYM_SCRIPT)
 
-test_cron: tests/test_cron.c $(CRON_O) $(CRYPTO_LINK) $(MEMORY_O) $(SQLITE3_O) $(CHANNEL_COMMON_O) $(CHANNEL_HEARTBEAT_O) $(CJSON_O) $(AGENT_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(PROVIDER_COMMON_O)
+test_cron: tests/test_cron.c $(CRON_O) $(CRYPTO_LINK) $(MEMORY_O) $(SQLITE3_O) $(CHANNEL_COMMON_O) $(CHANNEL_HEARTBEAT_O) $(CHANNEL_CLI_O) $(CJSON_O) $(AGENT_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(PROVIDER_COMMON_O)
 	@mkdir -p $(BINDIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ $^ $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
@@ -657,7 +657,7 @@ test_context: tests/test_context.c $(CONTEXT_TEST_OBJS) $(CONFIG_O) $(TOML_O) $(
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -DSHELLCLAW_CONTEXT_TEST -o $(BINDIR)/$@ tests/test_context.c $(CONTEXT_TEST_OBJS) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
 
-test_dispatch: tests/test_dispatch.c $(DISPATCH_O) $(BOOTSTRAP_DISPATCH_STUB_O) $(AGENT_O) $(ROUTER_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(PROVIDER_COMMON_O) $(MEMORY_O) $(SQLITE3_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(CRON_O) $(CRYPTO_LINK) $(CHANNEL_COMMON_O) $(CHANNEL_HEARTBEAT_O)
+test_dispatch: tests/test_dispatch.c $(DISPATCH_O) $(BOOTSTRAP_DISPATCH_STUB_O) $(AGENT_O) $(ROUTER_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(PROVIDER_COMMON_O) $(MEMORY_O) $(SQLITE3_O) $(SKILL_O) $(CONFIG_O) $(TOML_O) $(CJSON_O) $(CRON_O) $(CRYPTO_LINK) $(CHANNEL_COMMON_O) $(CHANNEL_HEARTBEAT_O) $(CHANNEL_CLI_O)
 	@mkdir -p $(BINDIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ $^ $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)

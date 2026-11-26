@@ -148,6 +148,8 @@ typedef struct cron_job_row {
 	char *message;
 	char channel[64];
 	char recipient[64];
+	int channel_truncated;
+	int recipient_truncated;
 	long long next_run;
 	int enabled;
 } cron_job_row_t;
@@ -201,7 +203,8 @@ typedef struct cron_due_key {
 	long long next_run;
 	char channel[sizeof(((cron_job_row_t *)0)->channel)];
 	char recipient[sizeof(((cron_job_row_t *)0)->recipient)];
-	int target_truncated;
+	int channel_truncated;
+	int recipient_truncated;
 } cron_due_key_t;
 
 /**
