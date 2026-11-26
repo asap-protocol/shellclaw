@@ -341,11 +341,13 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 				conn->headers_sent = 1;
 			}
 			if (conn->static_sent < conn->static_len) {
+				unsigned char chunk[LWS_PRE + 4096];
+				const size_t capacity = sizeof(chunk) - LWS_PRE;
 				size_t to_send = conn->static_len - conn->static_sent;
-				if (to_send > 4096) to_send = 4096;
-				int m = lws_write(wsi,
-				                  (unsigned char *)(conn->static_data + conn->static_sent),
-				                  to_send,
+				if (to_send > capacity) to_send = capacity;
+				/* HTTP/2 writes a frame header before the payload. */
+				memcpy(chunk + LWS_PRE, conn->static_data + conn->static_sent, to_send);
+				int m = lws_write(wsi, chunk + LWS_PRE, to_send,
 				                  conn->static_sent + to_send >= conn->static_len ?
 				                  LWS_WRITE_HTTP_FINAL : LWS_WRITE_HTTP);
 				if (m < 0) return -1;
@@ -355,6 +357,8 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 				free(conn);
 				lws_set_wsi_user(wsi, NULL);
 				http_lws_tx_completed(wsi);
+			} else {
+				lws_callback_on_writable(wsi);
 			}
 			return 0;
 		}
