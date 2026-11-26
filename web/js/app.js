@@ -33,8 +33,7 @@
     const token = getToken();
     if (!token) return null;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    /* Browsers cannot set Authorization on WebSocket; server accepts bearer.<token> subprotocol. */
-    const ws = new WebSocket(proto + '//' + location.host + '/ws', ['bearer.' + token]);
+    const ws = new WebSocket(proto + '//' + location.host + '/ws', ['ws', 'bearer.' + token]);
     ws.onmessage = e => { try { const d = JSON.parse(e.data); onMessage(d); } catch (_) {} };
     return ws;
   }
