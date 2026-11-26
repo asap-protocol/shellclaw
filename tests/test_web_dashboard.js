@@ -5,6 +5,9 @@
  */
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const dash = require('../web/js/dashboardView.js');
 const hw = require('../web/js/hardwareView.js');
 const escapeHtml = dash.escapeHtml;
@@ -18,6 +21,26 @@ function assert(cond, msg) {
     process.exit(1);
   }
 }
+
+function testPairedChatProtocols() {
+  let connection;
+  const location = { protocol: 'https:', host: 'localhost', hash: '#/chat' };
+  const elements = { app: {}, 'chat-log': {}, 'chat-input': {} };
+  const token = '1234567890abcdef1234567890abcdef';
+  const script = fs.readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
+  vm.runInNewContext(script, {
+    location,
+    window: { location, addEventListener() {} },
+    document: { getElementById: id => elements[id], querySelectorAll: () => [] },
+    localStorage: { getItem: key => key === 'shellclaw_token' ? token : null },
+    WebSocket: function (url, protocols) { connection = { url, protocols }; },
+  });
+  assert(connection && connection.url === 'wss://localhost/ws', 'paired chat WebSocket URL');
+  assert(connection.protocols.length === 2 && connection.protocols[0] === 'ws' &&
+    connection.protocols[1] === 'bearer.' + token, 'paired chat offers both WebSocket protocols');
+}
+
+testPairedChatProtocols();
 
 assert(escapeHtml(null) === '', 'null');
 assert(escapeHtml(undefined) === '', 'undefined');

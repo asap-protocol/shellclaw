@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static void http_lws_tx_completed(struct lws *wsi)
 {
@@ -129,41 +130,32 @@ const char *http_request_bearer_token(struct lws *wsi, char *buf, size_t buf_siz
 	return buf + 7;
 }
 
-/** WebSocket upgrade: Bearer from Authorization (or custom header); browser may send bearer.<token> subprotocol. */
-static int ws_copy_upgrade_token(struct lws *wsi, char *token_out, size_t token_size)
+/* Browsers offer ws for negotiation and bearer.<token> for authentication. */
+static const char *ws_subprotocol_token(char *list)
 {
-	char auth_buf[256];
-	const char *token;
-	if (!wsi || !token_out || token_size == 0) return -1;
-	token_out[0] = '\0';
-	token = http_request_bearer_token(wsi, auth_buf, sizeof(auth_buf));
-	if (!token) {
-		int n = lws_hdr_custom_copy(wsi, auth_buf, sizeof(auth_buf), "authorization", 13);
-		if (n > 7 && strncmp(auth_buf, "Bearer ", 7) == 0)
-			token = auth_buf + 7;
+	char *next = NULL;
+	for (char *entry = strtok_r(list, ",", &next); entry;
+	     entry = strtok_r(NULL, ",", &next)) {
+		entry += strspn(entry, " \t");
+		char *end = entry + strlen(entry);
+		while (end > entry && (end[-1] == ' ' || end[-1] == '\t'))
+			end--;
+		*end = '\0';
+		if (end - entry > 7 && strncmp(entry, "bearer.", 7) == 0)
+			return entry + 7;
 	}
-	if (token && token[0] != '\0') {
-		size_t len = strlen(token);
-		if (len >= token_size) len = token_size - 1;
-		memcpy(token_out, token, len);
-		token_out[len] = '\0';
+	return NULL;
+}
+
+static int ws_upgrade_allowed(const http_server_ctx_t *ctx, struct lws *wsi)
+{
+	char header[512];
+	if (!ctx || !ctx->auth)
 		return 0;
-	}
-	{
-		char proto[512];
-		int n = lws_hdr_copy(wsi, proto, sizeof(proto), WSI_TOKEN_COLON_PROTOCOL);
-		if (n <= 0)
-			n = lws_hdr_custom_copy(wsi, proto, sizeof(proto), "sec-websocket-protocol", 22);
-		if (n > 7 && strncmp(proto, "bearer.", 7) == 0) {
-			const char *sub = proto + 7;
-			size_t len = (size_t)(n - 7);
-			if (len >= token_size) len = token_size - 1;
-			memcpy(token_out, sub, len);
-			token_out[len] = '\0';
-			return token_out[0] != '\0' ? 0 : -1;
-		}
-	}
-	return -1;
+	const char *token = http_request_bearer_token(wsi, header, sizeof(header));
+	if (!token && lws_hdr_copy(wsi, header, sizeof(header), WSI_TOKEN_PROTOCOL) > 0)
+		token = ws_subprotocol_token(header);
+	return token && auth_validate_token(ctx->auth, token);
 }
 
 static int is_static_path(const char *uri, int uri_len, int method)
@@ -190,6 +182,10 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 {
 	http_server_ctx_t *ctx = http_ctx_get();
 	(void)user;
+	/* libwebsockets calls the HTTP protocol before it selects ws. */
+	if (reason == LWS_CALLBACK_HTTP_CONFIRM_UPGRADE && in &&
+	    strcasecmp(in, "websocket") == 0)
+		return ws_upgrade_allowed(ctx, wsi) ? 0 : -1;
 	if (!ctx) return 0;
 	switch (reason) {
 	case LWS_CALLBACK_HTTP: {
@@ -441,15 +437,9 @@ int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 	http_server_ctx_t *ctx = http_ctx_get();
 	(void)user;
 	switch (reason) {
-	case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE: {
-		char token_buf[256] = {0};
-		if (!ctx || !ctx->auth) return -1;
-		if (ws_copy_upgrade_token(wsi, token_buf, sizeof(token_buf)) != 0)
-			return -1;
-		if (!auth_validate_token(ctx->auth, token_buf))
-			return -1;
-		return 0;
-	}
+	case LWS_CALLBACK_HTTP_CONFIRM_UPGRADE:
+	case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
+		return ws_upgrade_allowed(ctx, wsi) ? 0 : -1;
 	case LWS_CALLBACK_ESTABLISHED: {
 		int conn_id = ws_next_conn_id();
 		lws_set_wsi_user(wsi, (void *)(intptr_t)conn_id);
