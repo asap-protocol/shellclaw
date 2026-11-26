@@ -272,6 +272,34 @@ static int test_pop_incoming_invalid_args(void)
 extern int ws_test_writable_count(void);
 extern int ws_test_cancel_count(void);
 extern void ws_test_reset_wake_counts(void);
+extern int ws_test_register_reply_conn(int conn_id, ws_conn_t wsi);
+
+static int test_chat_sockets_receive_only_direct_replies(void)
+{
+	const char event[] = "{\"type\":\"provider_status\",\"providers\":[]}";
+	char buf[sizeof(event)];
+	size_t len;
+
+	ws_cleanup();
+	ASSERT(ws_test_register_reply_conn(1, (ws_conn_t)(intptr_t)1) == 0);
+	ASSERT(ws_register_conn(2, (ws_conn_t)(intptr_t)2) == 0);
+	ws_broadcast_text(event);
+	ASSERT(!ws_has_pending_outgoing(1));
+	ASSERT(ws_dequeue_outgoing(2, buf, sizeof(buf), &len) == 1);
+	ASSERT(len == strlen(event) && strcmp(buf, event) == 0);
+
+	ASSERT(ws_send_to("webchat:1", event) == 0);
+	ASSERT(ws_dequeue_outgoing(1, buf, sizeof(buf), &len) == 1);
+	ASSERT(len == strlen(event) && strcmp(buf, event) == 0);
+	ASSERT(!ws_has_pending_outgoing(2));
+
+	ws_unregister_conn(1);
+	ASSERT(ws_register_conn(3, (ws_conn_t)(intptr_t)3) == 0);
+	ws_broadcast_text(event);
+	ASSERT(ws_has_pending_outgoing(3));
+	ws_cleanup();
+	return 0;
+}
 
 /**
  * Agent replies run on the main thread while lws_service runs on the gateway
@@ -408,6 +436,7 @@ int main(void)
 	RUN(test_send_to_rejects_bad_session());
 	RUN(test_dequeue_outgoing_and_pending());
 	RUN(test_broadcast_enqueues_per_conn());
+	RUN(test_chat_sockets_receive_only_direct_replies());
 	RUN(test_push_incoming_rejects_empty());
 	RUN(test_pop_incoming_invalid_args());
 	RUN(test_shutdown_stops_pop());
