@@ -242,6 +242,47 @@ static int test_sdk_unknown_skill(void)
 	return 0;
 }
 
+static int test_sdk_echo_preserves_wire_values(void)
+{
+	const char input[] =
+		"{\"samples\": [5000000000000001, -9007199254740993, "
+		"{\"mean\":1.234567890123456789e-12,\"label\":\"test \\\"A\\\"\","
+		"\"ready\":true,\"retry\":false,\"note\":null}]}";
+	char request[512];
+	int len = snprintf(request, sizeof request,
+		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":9007199254740993,"
+		"\"params\":{\"envelope\":{\"id\":\"sdk-echo\",\"asap_version\":\"0.1\","
+		"\"sender\":\"urn:asap:agent:peer\",\"recipient\":\"urn:asap:agent:shellclaw\","
+		"\"payload_type\":\"TaskRequest\",\"payload\":{\"conversation_id\":\"c\","
+		"\"skill_id\":\"echo\",\"input\": %s}}}}\n", input);
+	ASSERT(len > 0 && (size_t)len < sizeof request);
+
+	asap_envelope_t in;
+	asap_envelope_t out = {0};
+	asap_request_wire_t wire;
+	asap_server_ctx_t ctx = {0};
+	char error[128];
+
+	ASSERT(asap_envelope_parse_request(request, &in, NULL, &wire) == 0);
+	ASSERT(asap_server_handle(&in, &out, &ctx, error, sizeof error) == 0);
+	cJSON *response = asap_envelope_to_jsonrpc(&out, in.jsonrpc_request_id);
+	char *json = asap_jsonrpc_print_response(response, &wire);
+	ASSERT(json != NULL);
+
+	char result[sizeof input + sizeof "\"result\":"];
+	snprintf(result, sizeof result, "\"result\":%s", input);
+	ASSERT(strstr(json, result) != NULL);
+	ASSERT(strstr(json, "\"id\":9007199254740993}") != NULL);
+	ASSERT(strstr(json, "\"status\":\"completed\"") != NULL);
+	ASSERT(strstr(json, "\"task_id\":\"sdk-echo\"") != NULL);
+
+	free(json);
+	cJSON_Delete(response);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
 static int test_task_request_hook(void)
 {
 	asap_envelope_t in;
@@ -1085,6 +1126,7 @@ int main(void)
 {
 	int r = 0;
 	r |= test_sdk_unknown_skill();
+	r |= test_sdk_echo_preserves_wire_values();
 	r |= test_task_request_hook();
 	r |= test_task_cancel_stub();
 	r |= test_state_query_hook();
