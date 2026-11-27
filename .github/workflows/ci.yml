@@ -55,13 +55,15 @@ jobs:
           fi
           echo "Binary size: $size bytes (OK)"
 
+      - name: Set up Python for ASAP compliance
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Check ASAP compliance against a live gateway
+        run: |
+          python3 -m pip install 'asap-compliance==1.4.0' 'asap-protocol==2.6.0'
+          python3 scripts/run_asap_ci.py build/shellclaw
+
       - name: Coverage (agent core >= 80%, hardware excluded)
         run: GATEWAY=1 make coverage
-
-      - name: ASAP compliance check
-        # Pin: asap-compliance >= 1.0.0 (https://pypi.org/project/asap-compliance/)
-        # Requires Python 3.10+. Gracefully skips if package not yet published.
-        run: |
-          pip install --quiet 'asap-compliance>=1.0.0' 2>/dev/null \
-            && asap-compliance --config tests/fixtures/ci_asap_test.toml build/shellclaw \
-            || echo "asap-compliance unavailable or skipped (non-blocking until v0.3.0 release)"

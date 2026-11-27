@@ -78,12 +78,10 @@ description = "C-native edge-AI ASAP agent on NVIDIA Jetson Orin Nano Super (CUD
 # Production: set to your HTTPS origin before marketplace registration (example.com is dev-only).
 public_base_url = "https://shellclaw.example.com"
 registry_url = "https://raw.githubusercontent.com/asap-protocol/asap-protocol/main/registry.json"
-# POST /asap is protocol-public (rate-limited, not Bearer). Empty trusted_senders
-# allows every sender URN. After inbound dispatch is wired, a trusted (or, with
-# an empty list, any) sender can run task.request (agent_run + tool table) and
-# mcp.tool_call (direct tool execute, no LLM). Default gateway bind is 127.0.0.1.
-# Set this in production before exposing the gateway so sessions keyed as
-# asap:<sender> cannot be spoofed and local tools are not open to any URN.
+# The gateway compares the sender URN on every /asap request with this list.
+# If the list is empty, the gateway accepts all sender URNs.
+# Control network access to legacy ASAP requests that can use local tools.
+# The SDK envelope format supports the built-in echo skill.
 # trusted_senders = ["urn:asap:agent:peer"]
 
 [asap.skill_descriptions]
