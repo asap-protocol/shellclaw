@@ -6,13 +6,15 @@ DSYMDIR ?= tests-dSYM
 INC    := -I. -I tests -I src -I vendor/tomlc99 -I vendor/sqlite3 -I vendor/cJSON -Isrc/vendor/tweetnacl
 LDLIBS := -lcurl -lm
 # Gateway (Phase 2): libwebsockets for HTTP+WebSocket on same port
-# Install: brew install libwebsockets
+# Install: brew install libwebsockets brotli zlib
 # Set GATEWAY=0 to build without gateway when libwebsockets not installed
 GATEWAY ?= $(shell pkg-config --exists libwebsockets 2>/dev/null && echo 1 || echo 0)
 GATEWAY_CFLAGS := $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --cflags libwebsockets 2>/dev/null),)
 GATEWAY_CFLAGS += $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --cflags openssl 2>/dev/null),)
+GATEWAY_CFLAGS += $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --cflags libbrotlidec zlib),)
 GATEWAY_LDLIBS := $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --libs libwebsockets 2>/dev/null),)
 GATEWAY_LDLIBS += $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --libs openssl 2>/dev/null),)
+GATEWAY_LDLIBS += $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --libs libbrotlidec zlib),)
 # Hardware GPIO (Phase 5): libgpiod v2 API for Jetson / RPi (JetPack 6 / Bookworm)
 # Set LIBGPIOD=0 when libgpiod-dev is not installed (stub backend only).
 # pkg-config may find libgpiod 1.x on older distros; we require >= 2.0.
@@ -379,7 +381,7 @@ $(HTTP_O): src/gateway/http.c src/gateway/http.h src/gateway/http_lws.h src/gate
 $(HTTP_LWS_O): src/gateway/http_lws.c src/gateway/http_lws.h src/gateway/asap_http_body.h src/gateway/routes.h src/gateway/auth.h src/gateway/static.h src/gateway/ws.h src/gateway/ws_rx.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/http_lws.c
 
-$(ROUTES_O): src/gateway/routes.c src/gateway/routes.h src/gateway/routes_hardware.h src/gateway/http.h src/gateway/http_lws.h src/gateway/auth.h src/gateway/rate_limit.h src/tools/context.h src/asap/manifest.h src/asap/envelope.h src/asap/server.h src/asap/log.h src/core/bootstrap.h src/core/agent.h src/core/config.h src/core/config_patch.h src/core/dispatch.h src/core/reload.h src/core/memory.h src/core/skill.h src/providers/provider.h src/channels/channel.h src/tools/cron.h src/tools/tool.h
+$(ROUTES_O): src/gateway/routes.c src/gateway/routes.h src/gateway/asap_http_body.h src/gateway/routes_hardware.h src/gateway/http.h src/gateway/http_lws.h src/gateway/auth.h src/gateway/rate_limit.h src/tools/context.h src/asap/manifest.h src/asap/envelope.h src/asap/server.h src/asap/log.h src/core/bootstrap.h src/core/agent.h src/core/config.h src/core/config_patch.h src/core/dispatch.h src/core/reload.h src/core/memory.h src/core/skill.h src/providers/provider.h src/channels/channel.h src/tools/cron.h src/tools/tool.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/routes.c
 
 $(ROUTES_HARDWARE_O): src/gateway/routes_hardware.c src/gateway/routes_hardware.h src/gateway/routes.h src/gateway/http_lws.h src/gateway/uri_match.h src/hardware/hardware.h src/hardware/hardware_gpio_snapshot.h src/hardware/hardware_tegrastats.h src/hardware/board_detect.h src/core/config.h

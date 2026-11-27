@@ -59,7 +59,7 @@ ShellClaw is **not another OpenClaw clone** in a different language. It is a **h
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for PR workflow, coding standards, and the pre-tag `gpio-mockup` release ritual.
 
-**Configuration:** copy [`config.example.toml`](config.example.toml) to `~/.shellclaw/config.toml` and [`.env.example`](.env.example) to `.env`. Phase 3+ keys (ASAP, sandbox, gateway) and the Jetson `[hardware]` block are documented there. Install **libwebsockets** (`pkg-config` must find it) to build the gateway and run `GATEWAY=1 make test_gateway_http`.
+**Configuration:** copy [`config.example.toml`](config.example.toml) to `~/.shellclaw/config.toml` and [`.env.example`](.env.example) to `.env`. Phase 3+ keys (ASAP, sandbox, gateway) and the Jetson `[hardware]` block are documented there. Install libwebsockets, Brotli, and zlib to build the gateway. Make sure that `pkg-config` finds `libwebsockets`, `libbrotlidec`, and `zlib`. Run `GATEWAY=1 make test_gateway_http` to test the gateway.
 
 **Jetson install (v1.0):** `./scripts/install.sh`, `./scripts/build_llama_jetson.sh`, `./scripts/download_model.sh phi3` — details in [`docs/HARDWARE_JETSON.md`](docs/HARDWARE_JETSON.md) and [`docs/LOCAL_INFERENCE.md`](docs/LOCAL_INFERENCE.md).
 

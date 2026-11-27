@@ -8,6 +8,7 @@
 #include "gateway/routes_hardware.h"
 #include "gateway/http.h"
 #include "gateway/auth.h"
+#include "gateway/asap_http_body.h"
 #include "gateway/rate_limit.h"
 #include "channels/channel.h"
 #include "asap/manifest.h"
@@ -804,7 +805,7 @@ static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_js
 	return 0;
 }
 
-static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
+static void handle_asap(http_server_ctx_t *ctx, struct lws *wsi, const char *client_ip,
 	const char *body, size_t body_len, char *buf, size_t size, int *status)
 {
 	asap_envelope_t in;
@@ -814,13 +815,32 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 	char err_msg[256];
 	char *snippet;
 	int rc;
-	(void)body_len;
 	if (rate_limit_asap(client_ip, time(NULL))) {
 		jsonrpc_error(buf, size, status, 429, -32000, "rate limit exceeded", NULL);
 		return;
 	}
+	char *decoded = NULL;
+	size_t decoded_len;
+	int decode_status = asap_http_body_decode(wsi, body, body_len, &decoded, &decoded_len);
+	if (decode_status != 0) {
+		const char *message = "Cannot decode request body";
+		if (decode_status == 413)
+			message = "Decoded request body too large";
+		else if (decode_status == 415)
+			message = "Unsupported Content-Encoding";
+		jsonrpc_error(buf, size, status, decode_status,
+			decode_status == 500 ? -32603 : -32700, message, NULL);
+		return;
+	}
+	body = decoded ? decoded : body;
 	asap_envelope_init(&in);
+	if (!body || memchr(body, '\0', decoded_len)) {
+		jsonrpc_error(buf, size, status, 400, -32700, "Parse error", NULL);
+		free(decoded);
+		return;
+	}
 	rc = asap_envelope_parse(body, &in, &parse_err);
+	free(decoded);
 	if (rc != 0) {
 		write_asap_error(buf, size, status, 400, parse_err);
 		asap_envelope_clear(&in);
@@ -1088,7 +1108,7 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 	if (uri_exact_eq(uri, uri_len, "/asap") && method == HTTP_POST) {
 		char client_ip[64] = {0};
 		lws_get_peer_simple(wsi, client_ip, sizeof client_ip);
-		handle_asap(ctx, client_ip, body, body_len, buf, size, status);
+		handle_asap(ctx, wsi, client_ip, body, body_len, buf, size, status);
 		return 0;
 	}
 	json_error(buf, size, status, 404, "Not found");

@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libgpiod-dev
+          sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libbrotli-dev zlib1g-dev libgpiod-dev
 
       - name: Build shellclaw (gateway)
         run: make clean && GATEWAY=1 make shellclaw
@@ -99,7 +99,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libgpiod-dev
+          sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libbrotli-dev zlib1g-dev libgpiod-dev
 
       - name: Build shellclaw (gateway)
         run: make clean && GATEWAY=1 make shellclaw

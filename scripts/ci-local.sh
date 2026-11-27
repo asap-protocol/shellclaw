@@ -8,7 +8,7 @@ export GATEWAY=1
 if command -v apt-get >/dev/null 2>&1; then
 	echo "==> apt-get (CI deps incl. libgpiod-dev >= 2.x, i2c-tools; use Ubuntu 24.04+)"
 	sudo apt-get update
-	sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libgpiod-dev i2c-tools cppcheck lcov nodejs
+	sudo apt-get install -y build-essential libcurl4-openssl-dev libwebsockets-dev libbrotli-dev zlib1g-dev libgpiod-dev i2c-tools cppcheck lcov nodejs
 fi
 echo "==> cppcheck (make static)"
 make static
