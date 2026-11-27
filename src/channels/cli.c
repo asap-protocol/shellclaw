@@ -19,6 +19,11 @@
 
 static char *g_one_shot;
 static int g_verbose;
+static int g_one_shot_mode;
+static char g_input[LINE_BUF_SIZE - 1];
+static size_t g_input_length;
+static int g_prompt_written;
+static int g_input_closed;
 
 void channel_cli_set_one_shot(const char *msg)
 {
@@ -34,46 +39,104 @@ void channel_cli_set_verbose(int v)
 static int cli_init(const config_t *cfg)
 {
 	(void)cfg;
+	g_one_shot_mode = g_one_shot != NULL;
+	g_input_length = 0;
+	g_prompt_written = 0;
+	g_input_closed = 0;
 	return 0;
 }
 
-static int cli_poll(channel_incoming_msg_t *out, int timeout_ms)
+static int cli_message(channel_incoming_msg_t *out, const char *text)
 {
-	if (!out) return -1;
-	memset(out, 0, sizeof(*out));
-	if (g_one_shot) {
-		out->session_id = strdup(CLI_SESSION_ID);
-		out->user_id = strdup(CLI_USER_ID);
-		out->text = strdup(g_one_shot);
-		out->attachments = NULL;
-		out->attachments_count = 0;
-		free(g_one_shot);
-		g_one_shot = NULL;
-		return 1;
+	out->session_id = strdup(CLI_SESSION_ID);
+	out->user_id = strdup(CLI_USER_ID);
+	out->text = strdup(text);
+	if (!out->session_id || !out->user_id || !out->text) {
+		channel_incoming_msg_clear(out);
+		return -1;
 	}
+	return 1;
+}
+
+static int cli_read_input(int timeout_ms)
+{
 	fd_set rfds;
 	struct timeval tv;
 	FD_ZERO(&rfds);
 	FD_SET(STDIN_FILENO, &rfds);
 	tv.tv_sec = timeout_ms / 1000;
 	tv.tv_usec = (timeout_ms % 1000) * 1000;
-	int r = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
-	if (r <= 0) return r;
-	if (!FD_ISSET(STDIN_FILENO, &rfds)) return 0;
-	if (isatty(STDIN_FILENO))
-		fprintf(stdout, "You: ");
-	fflush(stdout);
-	char line[LINE_BUF_SIZE];
-	if (!fgets(line, sizeof(line), stdin)) return 0;
-	size_t len = strlen(line);
-	while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-		line[--len] = '\0';
-	out->session_id = strdup(CLI_SESSION_ID);
-	out->user_id = strdup(CLI_USER_ID);
-	out->text = strdup(line);
-	out->attachments = NULL;
-	out->attachments_count = 0;
+	int result = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+	if (result == 0 || (result < 0 && errno == EINTR))
+		return 0;
+	if (result < 0) {
+		g_input_closed = 1;
+		return 1;
+	}
+
+	ssize_t count = read(STDIN_FILENO, g_input + g_input_length, sizeof(g_input) - g_input_length);
+	if (count < 0 && (errno == EINTR || errno == EAGAIN))
+		return 0;
+	if (count <= 0)
+		g_input_closed = 1;
+	else
+		g_input_length += (size_t)count;
 	return 1;
+}
+
+static size_t cli_line_length(void)
+{
+	const char *newline = memchr(g_input, '\n', g_input_length);
+	if (newline)
+		return (size_t)(newline - g_input) + 1U;
+	return g_input_closed || g_input_length == sizeof(g_input) ? g_input_length : 0;
+}
+
+static int cli_poll(channel_incoming_msg_t *out, int timeout_ms)
+{
+	if (!out) return -1;
+	memset(out, 0, sizeof(*out));
+	if (g_one_shot_mode) {
+		if (!g_one_shot)
+			return 0;
+		int result = cli_message(out, g_one_shot);
+		free(g_one_shot);
+		g_one_shot = NULL;
+		return result;
+	}
+	if (!g_input_closed && !g_prompt_written && isatty(STDIN_FILENO)) {
+		fputs("You: ", stdout);
+		fflush(stdout);
+		g_prompt_written = 1;
+	}
+
+	size_t length = cli_line_length();
+	if (!length && !g_input_closed && cli_read_input(timeout_ms))
+		length = cli_line_length();
+	if (!length)
+		return g_input_closed ? CHANNEL_POLL_CLOSED : 0;
+
+	char line[LINE_BUF_SIZE];
+	memcpy(line, g_input, length);
+	g_input_length -= length;
+	memmove(g_input, g_input + length, g_input_length);
+	while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r'))
+		length--;
+	line[length] = '\0';
+	g_prompt_written = 0;
+	if (strcmp(line, "/quit") == 0) {
+		g_input_length = 0;
+		g_input_closed = 1;
+		return CHANNEL_POLL_CLOSED;
+	}
+	if (strcmp(line, "/help") == 0) {
+		puts("/status Show the provider status.\n"
+		     "/reset Clear this conversation.\n"
+		     "/quit Close terminal input.");
+		fflush(stdout);
+		return 0;
+	}
+	return cli_message(out, line);
 }
 
 static int cli_send(const char *recipient, const char *text,

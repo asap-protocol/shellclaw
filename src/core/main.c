@@ -27,6 +27,7 @@
 #include "channels/channel.h"
 #include "hardware/board_detect.h"
 #include "providers/provider.h"
+#include "tools/cron.h"
 #include <curl/curl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -41,6 +42,7 @@ static volatile sig_atomic_t g_shutdown;
 static const char *g_cli_one_shot;
 static int g_verbose;
 static int g_want_daemon;
+static int g_headless;
 
 static void on_signal(int sig)
 {
@@ -63,8 +65,20 @@ static void setup_signals(void)
 		fprintf(stderr, "warning: sigaction(SIGHUP) failed\n");
 }
 
+static int has_background_channels(void)
+{
+	for (int i = 0; i < bootstrap_channel_count(); i++) {
+		const channel_t *channel = bootstrap_channel_at(i);
+		if (channel != channel_cli_get() && channel != channel_cron_get())
+			return 1;
+	}
+	return 0;
+}
+
 static int main_loop(int one_shot, config_t **pcfg)
 {
+	int cli_closed = g_headless || g_want_daemon;
+	int keep_running = cli_closed || has_background_channels();
 	while (!g_shutdown) {
 		if (g_reload_requested) {
 			g_reload_requested = 0;
@@ -80,9 +94,15 @@ static int main_loop(int one_shot, config_t **pcfg)
 		int nch = bootstrap_channel_count();
 		for (int i = 0; i < nch && !got; i++) {
 			const channel_t *ch = bootstrap_channel_at(i);
-			if (!ch)
+			if (!ch || (cli_closed && ch == channel_cli_get()))
 				continue;
 			int r = ch->poll(&msg, POLL_TIMEOUT_MS);
+			if (r == CHANNEL_POLL_CLOSED) {
+				cli_closed = 1;
+				if (!keep_running)
+					return one_shot ? EXIT_FAILURE : EXIT_SUCCESS;
+				continue;
+			}
 			if (r == 1) {
 				got = 1;
 				which = ch;
@@ -96,15 +116,19 @@ static int main_loop(int one_shot, config_t **pcfg)
 			channel_incoming_msg_clear(&msg);
 			if (one_shot)
 				return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+		} else if (cli_closed && !g_shutdown) {
+			/* Cron and heartbeat can return at once when no job is due. */
+			const struct timespec delay = { .tv_sec = 0, .tv_nsec = 50000000L };
+			(void)nanosleep(&delay, NULL);
 		}
 	}
 	return one_shot ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
-static void print_usage(const char *prog)
+static void print_usage(FILE *stream, const char *prog)
 {
-	fprintf(stderr,
-	        "Usage: %s [--config <path>] [--verbose] [--daemon] [--detect-board] [--rotate-keys] [--version] [-m \"message\"]\n",
+	fprintf(stream,
+	        "Usage: %s [--config <path>] [--verbose] [--daemon | --headless] [--detect-board] [--rotate-keys] [--version] [--help] [-m \"message\"]\n",
 	        prog);
 }
 
@@ -115,6 +139,11 @@ static int parse_args(int argc, char **argv, const char **config_path_out)
 	g_want_daemon = 0;
 	daemon_set_want(0);
 	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+			print_usage(stdout, argv[0]);
+			puts("Run with --headless to keep the process open without terminal input.");
+			exit(0);
+		}
 		if (strcmp(argv[i], "--version") == 0) {
 			printf("%s\n", SHELLCLAW_RELEASE_VERSION);
 			exit(0);
@@ -142,6 +171,10 @@ static int parse_args(int argc, char **argv, const char **config_path_out)
 			daemon_set_want(1);
 			continue;
 		}
+		if (strcmp(argv[i], "--headless") == 0) {
+			g_headless = 1;
+			continue;
+		}
 		if (strcmp(argv[i], "--config") == 0) {
 			if (i + 1 >= argc) {
 				fprintf(stderr, "Error: --config requires a path argument\n");
@@ -159,7 +192,7 @@ static int parse_args(int argc, char **argv, const char **config_path_out)
 			continue;
 		}
 		fprintf(stderr, "Error: unknown option '%s'\n", argv[i]);
-		print_usage(argv[0]);
+		print_usage(stderr, argv[0]);
 		return -1;
 	}
 	return 0;
@@ -173,6 +206,11 @@ int main(int argc, char **argv)
 	char errbuf[256] = {0};
 	if (config_load(config_path, &cfg, errbuf, sizeof(errbuf)) != 0) {
 		fprintf(stderr, "Error: %s\n", errbuf[0] ? errbuf : "failed to load config");
+		return 1;
+	}
+	if (g_headless && g_cli_one_shot) {
+		fprintf(stderr, "Error: Use -m without --headless.\n");
+		config_free(cfg);
 		return 1;
 	}
 	if (g_want_daemon && g_cli_one_shot) {

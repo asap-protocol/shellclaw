@@ -96,6 +96,9 @@ int channel_send_chunked(const char *text, size_t max_bytes,
                          channel_chunk_post_fn post, void *ctx,
                          channel_chunk_fail_t *fail);
 
+/** Poll result when the channel can no longer receive input. */
+#define CHANNEL_POLL_CLOSED 2
+
 /**
  * Channel vtable: init, poll, send, cleanup. CLI and Telegram implement this.
  */
@@ -107,7 +110,7 @@ typedef struct channel {
 	 * Poll for incoming message. Block up to timeout_ms.
 	 * @param out       Filled on success; caller must channel_incoming_msg_clear().
 	 * @param timeout_ms Max wait in milliseconds.
-	 * @return 1 if message received, 0 if timeout/no message, -1 on error.
+	 * @return 1 for a message, 0 for no message, CHANNEL_POLL_CLOSED for closed input, or -1 on error.
 	 */
 	int (*poll)(channel_incoming_msg_t *out, int timeout_ms);
 	/**
