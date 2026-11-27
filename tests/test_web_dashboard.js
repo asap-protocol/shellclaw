@@ -22,6 +22,33 @@ function assert(cond, msg) {
   }
 }
 
+async function testDashboardResponseAfterNavigation() {
+  const location = { protocol: 'http:', host: 'localhost', hash: '#/' };
+  const elements = { app: {}, 'mem-q': {}, 'mem-results': {} };
+  let navigate;
+  let release;
+  let timers = 0;
+  const response = { ok: true, status: 200, json: async () => ({}) };
+  const delayed = new Promise(resolve => { release = resolve; });
+  const script = fs.readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
+  vm.runInNewContext(script, {
+    location, ShellClawDashboard: dash,
+    window: { location, addEventListener: (_, cb) => { navigate = cb; },
+      setInterval: () => ++timers, clearInterval() {} },
+    localStorage: { getItem: () => 'paired-device' },
+    document: { getElementById: id => elements[id], querySelectorAll: () => [] },
+    WebSocket: function () {},
+    fetch: url => url === '/api/status' ? delayed : Promise.resolve(response),
+  });
+  location.hash = '#/memory';
+  navigate();
+  release(response);
+  await new Promise(resolve => setImmediate(resolve));
+  assert(elements.app.innerHTML.includes('<h1>Memory</h1>'), 'late dashboard response replaced current view');
+  assert(timers === 0, 'inactive dashboard started status timers');
+}
+testDashboardResponseAfterNavigation().catch(error => { console.error(error); process.exitCode = 1; });
+
 function testPairedChatDisplaysRepliesAsText() {
   let connection;
   const location = { protocol: 'https:', host: 'localhost', hash: '#/chat' };

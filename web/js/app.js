@@ -90,44 +90,49 @@
     if (!token) { window.location.hash = '#/pair'; return; }
     stopDashboardLive();
     render(app, '<h1>Dashboard</h1><p class="status-note">Loading live status…</p>');
+    let active = true;
+    let timer, ctxTimer, ws;
+    dashboardLiveStop = function () {
+      active = false;
+      window.clearInterval(timer);
+      window.clearInterval(ctxTimer);
+      if (ws) ws.close();
+    };
     let lastHealth = {};
     let lastStatus = {};
     let lastCtx = {};
     function paint() {
-      render(app, dashboardMarkup(lastHealth, lastStatus, lastCtx));
+      if (active) render(app, dashboardMarkup(lastHealth, lastStatus, lastCtx));
     }
     Promise.all([
       api('GET', '/health'),
       api('GET', '/api/status'),
       api('GET', '/api/context/snapshot')
     ]).then(function (results) {
+      if (!active) return;
       lastHealth = results[0] || {};
       lastStatus = results[1] || {};
       lastCtx = results[2] || {};
       paint();
-      const timer = window.setInterval(function () {
+      timer = window.setInterval(function () {
         api('GET', '/api/status').then(function (st) {
           lastStatus = st || lastStatus;
           paint();
         }).catch(function () {});
       }, 12000);
-      const ctxTimer = window.setInterval(function () {
+      ctxTimer = window.setInterval(function () {
         api('GET', '/api/context/snapshot').then(function (snap) {
           lastCtx = snap || lastCtx;
           paint();
         }).catch(function () {});
       }, 45000);
-      const ws = wsConnect(function (msg) {
+      ws = wsConnect(function (msg) {
         if (!msg || msg.type !== 'provider_status') return;
         lastStatus = mergeStatusWithWs(lastStatus, msg);
         paint();
       });
-      dashboardLiveStop = function () {
-        window.clearInterval(timer);
-        window.clearInterval(ctxTimer);
-        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-      };
     }).catch(function (err) {
+      if (!active) return;
       render(app, '<h1>Dashboard</h1><p class="status-err">' + escapeHtml(err || 'Load failed') + '</p>');
     });
   }
