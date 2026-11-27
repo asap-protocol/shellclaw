@@ -11,6 +11,7 @@
 
 #define WEBCHAT_ROUTE "/api/chat"
 #define WEBCHAT_SESSION_SIZE (sizeof(WEBCHAT_DEVICE_PREFIX) + 64)
+#define WEBCHAT_REQUEST_SIZE (6u * WS_TEXT_MAX + 256u)
 #define WEBCHAT_RESPONSE_SIZE (12u * WS_TEXT_MAX + 1024u)
 
 /** Derive the session ID from the validated bearer credential in the HTTP request. */

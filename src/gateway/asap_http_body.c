@@ -1,28 +1,14 @@
 /**
  * @file asap_http_body.c
- * @brief Dynamic POST /asap body handling for libwebsockets HTTP callbacks.
+ * @brief Dynamic request buffers for libwebsockets HTTP callbacks.
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "gateway/asap_http_body.h"
-#include "gateway/uri_match.h"
 #include <errno.h>
 #include <libwebsockets.h>
 #include <stdlib.h>
 #include <string.h>
-
-static int asap_is_asap_post(struct lws *wsi)
-{
-	char uri[256];
-	int uri_len;
-
-	if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI) <= 0)
-		return 0;
-	uri_len = lws_hdr_copy(wsi, uri, sizeof(uri), WSI_TOKEN_POST_URI);
-	if (uri_len <= 0)
-		return 0;
-	return uri_exact_eq(uri, uri_len, "/asap");
-}
 
 int asap_http_body_parse_content_length(const char *cl_buf, long *cl_out)
 {
@@ -53,7 +39,7 @@ int asap_http_body_exceeds_static_cap(const asap_http_body_t *body, long content
 	return content_length > (long)BODY_BUF_SIZE;
 }
 
-int asap_http_body_init_from_request(struct lws *wsi, asap_http_body_t *body)
+int asap_http_body_init_from_request(struct lws *wsi, asap_http_body_t *body, size_t limit)
 {
 	char cl_buf[32] = {0};
 	long cl = 0;
@@ -61,13 +47,11 @@ int asap_http_body_init_from_request(struct lws *wsi, asap_http_body_t *body)
 
 	if (!body || !wsi)
 		return -2;
-	if (!asap_is_asap_post(wsi))
-		return 0;
 	has_cl = lws_hdr_copy(wsi, cl_buf, sizeof cl_buf, WSI_TOKEN_HTTP_CONTENT_LENGTH) > 0;
-	if (has_cl && asap_http_body_parse_content_length(cl_buf, &cl) != 0)
+	if (has_cl && (asap_http_body_parse_content_length(cl_buf, &cl) != 0 || (size_t)cl > limit))
 		return -1;
 	{
-		size_t cap = (cl > 0) ? (size_t)cl : (size_t)ASAP_BODY_MAX;
+		size_t cap = (cl > 0) ? (size_t)cl : limit;
 		body->body_dyn = malloc(cap + 1);
 		if (!body->body_dyn)
 			return -2;

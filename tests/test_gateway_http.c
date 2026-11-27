@@ -1439,6 +1439,37 @@ static int test_api_cron_toggle_post(const char *token)
 	return 0;
 }
 
+static int test_webchat_accepts_escaped_text(const char *token)
+{
+	char text[32 * 1024 + 1];
+	memset(text, 1, sizeof(text) - 1);
+	text[sizeof(text) - 1] = '\0';
+	cJSON *request = cJSON_CreateObject();
+	ASSERT(request != NULL);
+	ASSERT(cJSON_AddStringToObject(request, "id", "00000000000000000000000000000001"));
+	ASSERT(cJSON_AddStringToObject(request, "text", text));
+	char *json = cJSON_PrintUnformatted(request);
+	cJSON_Delete(request);
+	ASSERT(json && strlen(json) > 65536);
+	long status;
+	char *body = NULL;
+	int posted = http_post_auth(gw_url("/api/chat"), token, json, &status, &body);
+	cJSON_free(json);
+	free(body);
+	ASSERT(posted == 0 && status == 200);
+
+	ASSERT(http_get_auth(gw_url("/api/chat"), token, &status, &body) == 0);
+	ASSERT(status == 200 && body);
+	cJSON *history = cJSON_Parse(body);
+	free(body);
+	const cJSON *turn = cJSON_GetArrayItem(history, 0);
+	const char *saved = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(turn, "text"));
+	int same = saved && strcmp(saved, text) == 0;
+	cJSON_Delete(history);
+	ASSERT(same);
+	return 0;
+}
+
 static int test_api_sessions(const char *token)
 {
 	long code;
@@ -1892,6 +1923,10 @@ int main(int argc, char **argv)
 		if (test_api_cron_create_delete(token) != 0) { fprintf(stderr, "test_api_cron_create_delete failed\n"); failed++; }
 		if (test_api_cron_toggle_post(token) != 0) { fprintf(stderr, "test_api_cron_toggle_post failed\n"); failed++; }
 		if (test_api_sessions(token) != 0) { fprintf(stderr, "test_api_sessions failed\n"); failed++; }
+		if (test_webchat_accepts_escaped_text(token) != 0) {
+			fprintf(stderr, "test_webchat_accepts_escaped_text failed\n");
+			failed++;
+		}
 		if (test_api_asap_log(token) != 0) { fprintf(stderr, "test_api_asap_log failed\n"); failed++; }
 		if (test_api_hardware_board_get(token) != 0) {
 			fprintf(stderr, "test_api_hardware_board_get failed\n");

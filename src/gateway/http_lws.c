@@ -226,8 +226,9 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		conn->status = 200;
 		conn->has_body = (method == HTTP_POST || method == HTTP_PUT);
 		/* WebChat text can exceed the static cap after JSON escaping. */
-		if (conn->has_body && (chat || uri_exact_eq(uri, uri_len, "/asap"))) {
-			int body_rc = asap_http_body_init_from_request(wsi, &conn->body);
+		if (method == HTTP_POST && (chat || uri_exact_eq(uri, uri_len, "/asap"))) {
+			size_t limit = chat ? WEBCHAT_REQUEST_SIZE : ASAP_BODY_MAX;
+			int body_rc = asap_http_body_init_from_request(wsi, &conn->body, limit);
 			if (body_rc == -1) {
 				free(conn->response);
 				free(conn);
