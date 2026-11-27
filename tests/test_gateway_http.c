@@ -1414,6 +1414,44 @@ static int test_api_cron_pages(const char *token)
 	return 0;
 }
 
+static int test_cron_preview_and_delivery(const char *token)
+{
+	char *body = NULL;
+	long status;
+	const char *schedule = "{\"schedule\":\"at:4070908800\"}";
+	ASSERT(http_post_auth(gw_url("/api/cron/preview"), token, schedule, &status, &body) == 0);
+	cJSON *result = cJSON_Parse(body);
+	ASSERT(status == 200 && cJSON_GetNumberValue(cJSON_GetObjectItem(result, "next_run")) == 4070908800.0);
+	cJSON_Delete(result);
+	free(body);
+	ASSERT(http_post_auth(gw_url("/api/cron/preview"), token, "{\"schedule\":\"invalid\"}", &status, &body) == 0);
+	ASSERT(status == 400);
+	free(body);
+	ASSERT(http_post_auth(gw_url("/api/cron"), token,
+		"{\"id\":\"qa-offline\",\"schedule\":\"at:4070908800\",\"channel\":\"telegram\","
+		"\"recipient\":\"-10012\",\"message\":\"reminder\"}", &status, &body) == 0 && status == 201);
+	free(body);
+	const char *states[] = { "waiting_for_channel", "paused" };
+	for (int i = 0; i < 2; i++) {
+		ASSERT(http_get_auth(gw_url("/api/cron/page"), token, &status, &body) == 0 && status == 200);
+		result = cJSON_Parse(body);
+		cJSON *jobs = cJSON_GetObjectItem(result, "jobs");
+		ASSERT(cJSON_GetArraySize(jobs) == 1);
+		cJSON *job = cJSON_GetArrayItem(jobs, 0);
+		cJSON *state = cJSON_GetObjectItem(job, "delivery_status");
+		ASSERT(cJSON_IsString(state) && strcmp(state->valuestring, states[i]) == 0);
+		cJSON_Delete(result);
+		free(body);
+		if (i == 0) {
+			ASSERT(http_post_auth(gw_url("/api/cron/qa-offline/toggle"), token, "{}", &status, &body) == 0 && status == 200);
+			free(body);
+		}
+	}
+	ASSERT(http_delete_auth(gw_url("/api/cron/qa-offline"), token, &status, &body) == 0 && status == 200);
+	free(body);
+	return 0;
+}
+
 static int test_api_cron_create_delete(const char *token)
 {
 	long code;
@@ -1941,6 +1979,7 @@ int main(int argc, char **argv)
 		}
 		if (test_api_memory(token) != 0) { fprintf(stderr, "test_api_memory failed\n"); failed++; }
 		if (test_api_cron_list(token) != 0) { fprintf(stderr, "test_api_cron_list failed\n"); failed++; }
+		if (test_cron_preview_and_delivery(token) != 0) failed++;
 		if (test_api_cron_pages(token) != 0) failed++;
 		if (test_api_cron_create_delete(token) != 0) { fprintf(stderr, "test_api_cron_create_delete failed\n"); failed++; }
 		if (test_api_cron_toggle_post(token) != 0) { fprintf(stderr, "test_api_cron_toggle_post failed\n"); failed++; }

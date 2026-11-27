@@ -17,6 +17,7 @@ extern "C" {
  * Parse schedule and compute next_run strictly after `now`.
  * Formats: "cron:min hour dom month dow", "interval:N", "at:unix_ts".
  * Cron: 5 fields, * or N or N-M. dow 0-6 (Sun-Sat).
+ * The day of the month and day of the week must both match.
  * Cron expressions start searching at the next minute boundary so a just-fired
  * job cannot remain due in the same minute.
  *
@@ -34,6 +35,10 @@ int cron_parse_next_run(const char *schedule, long long now, long long *next_out
  * @return 1 if one-shot, 0 otherwise.
  */
 int cron_is_one_shot(const char *schedule);
+
+struct cron_job_row;
+/** Return the delivery state for a stored job while the caller holds the agent lock. */
+const char *cron_job_delivery_state(const struct cron_job_row *row);
 
 /**
  * Commit cron delivery after the agent successfully handles a fired job.

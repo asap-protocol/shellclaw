@@ -190,3 +190,10 @@ A null cursor means that the list is complete.
 
 `GET /api/cron` returns the original array with full messages when it fits in one response.
 If the list exceeds 64 jobs or the response buffer, this endpoint returns HTTP 413.
+
+Send a schedule to `POST /api/cron/preview` to see the next run before you save it.
+The gateway evaluates the expression in its local time zone. Both the day of the month and the weekday must match.
+For example, `0 9 1 * 1` runs at 09:00 when the first day of a month is a Monday.
+
+Each entry in a page includes `delivery_status`. A paused job stays paused after a restart.
+A job with `waiting_for_channel` stays in the queue until its delivery channel becomes available.

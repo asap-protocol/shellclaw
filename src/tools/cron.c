@@ -291,6 +291,16 @@ static cron_target_status_t cron_stored_target(const char *channel, const char *
 	return cron_resolve_target(channel, recipient, CRON_TARGET_STORED, NULL);
 }
 
+const char *cron_job_delivery_state(const struct cron_job_row *row)
+{
+	if (!row->enabled) return "paused";
+	switch (cron_stored_target(row->channel, row->recipient, row->channel_truncated, row->recipient_truncated)) {
+	case CRON_TARGET_READY: return "scheduled";
+	case CRON_TARGET_DEFERRED: return "waiting_for_channel";
+	default: return "invalid_destination";
+	}
+}
+
 int cron_create_job(const char *schedule, const char *message,
                     const char *channel, const char *recipient,
                     char *id_out, size_t id_size)
