@@ -1261,7 +1261,7 @@ static int test_api_skill_create_delete(const char *token)
 		"{\"name\":\"test_integration_skill\",\"content\":\"# Test skill for integration\"}",
 		&code, &body);
 	ASSERT(r == 0);
-	ASSERT(code == 200 || code == 201);
+	ASSERT(code == 201);
 	free(body);
 	body = NULL;
 	r = http_get_auth(gw_url("/api/skills/test_integration_skill"), token, &code, &body);

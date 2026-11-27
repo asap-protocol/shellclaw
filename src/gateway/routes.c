@@ -467,8 +467,8 @@ static void handle_skill_create(const config_t *cfg, const char *body, size_t bo
 		json_error(buf, size, status, 500, "Failed to create skill");
 		return;
 	}
-	*status = 201;
 	json_response(buf, size, status, "{\"ok\":true}");
+	*status = 201;
 }
 
 static void handle_skill_update(const config_t *cfg, const char *name, const char *body, size_t body_len,
