@@ -356,6 +356,12 @@
         if (revision !== request) return;
         nextAfter = null;
         showError(error);
+        jobs.textContent = 'Could not load the current jobs. ';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.textContent = 'Retry list';
+        retry.onclick = () => { result.textContent = ''; load(); };
+        jobs.appendChild(retry);
       }
       prev.disabled = cursors.length === 1;
       next.disabled = !nextAfter;
