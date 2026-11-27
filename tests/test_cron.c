@@ -194,6 +194,9 @@ static int test_schedule_rejects_partial_numbers(void)
 	ASSERT(next == 99);
 	ASSERT(cron_parse_next_run("at:tomorrow", now, &next) == -1);
 	ASSERT(cron_parse_next_run("at:", now, &next) == -1);
+	ASSERT(cron_parse_next_run("at:9223372036854775808", now, &next) == -1);
+	ASSERT(cron_parse_next_run("at:-9223372036854775809", now, &next) == -1);
+	ASSERT(cron_parse_next_run("cron:0 9 * * * extra", now, &next) == -1);
 	ASSERT(cron_parse_next_run("interval:60abc", now, &next) == -1);
 	ASSERT(cron_parse_next_run("cron:0 9 * * 1,3,5", now, &next) == -1);
 	ASSERT(cron_parse_next_run("cron:0 9 1,15 * *", now, &next) == -1);

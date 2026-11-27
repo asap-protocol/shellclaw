@@ -89,9 +89,10 @@ static int parse_cron_expr(const char *s, int fields[10])
 	char *ctx = NULL;
 	const char *tokens[5];
 	int n = 0;
-	for (char *p = strtok_r(buf, " \t", &ctx); p && n < 5; p = strtok_r(NULL, " \t", &ctx))
+	char *p = strtok_r(buf, " \t", &ctx);
+	for (; p && n < 5; p = strtok_r(NULL, " \t", &ctx))
 		tokens[n++] = p;
-	if (n != 5) return -1;
+	if (n != 5 || p) return -1;
 	int lo, hi;
 	if (parse_range(tokens[0], &lo, &hi, 0, 59) != 0) return -1;
 	fields[0] = lo; fields[1] = hi;
@@ -162,8 +163,9 @@ int cron_parse_next_run(const char *schedule, long long now, long long *next_out
 		long long ts;
 		/* A partial convert (at:2026-10-08 -> 2026) is already due, so the
 		 * one-shot fires on the next poll and ack deletes the future reminder. */
+		errno = 0;
 		ts = strtoll(num, &end, 10);
-		if (!end || end == num || *end != '\0') return -1;
+		if (end == num || *end != '\0' || errno == ERANGE) return -1;
 		*next_out = ts;
 		return 0;
 	}
