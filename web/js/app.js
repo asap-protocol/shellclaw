@@ -447,14 +447,15 @@
       .catch(() => null);
     const logP = api('GET', '/api/asap/log').catch(() => null);
     Promise.all([manifestP, logP]).then(function (results) {
-      const manifest = results[0];
+      const signedManifest = results[0];
+      const manifest = signedManifest && (signedManifest.manifest || signedManifest);
       const logData = results[1];
       let html = '';
       /* Dashboard cards */
       html += '<div class="dashboard-cards">';
       if (manifest) {
-        html += '<div class="card"><div class="card-label">Agent URN</div><div class="card-value">' + escapeHtml(manifest.urn || manifest.agent_urn || '-') + '</div></div>';
-        html += '<div class="card"><div class="card-label">ASAP Version</div><div class="card-value status-ok">' + escapeHtml(manifest.asap_version || '-') + '</div></div>';
+        html += '<div class="card"><div class="card-label">Agent URN</div><div class="card-value">' + escapeHtml(manifest.id || manifest.urn || manifest.agent_urn || '-') + '</div></div>';
+        html += '<div class="card"><div class="card-label">ASAP Version</div><div class="card-value status-ok">' + escapeHtml((manifest.capabilities && manifest.capabilities.asap_version) || manifest.asap_version || '-') + '</div></div>';
         html += '<div class="card"><div class="card-label">Agent Name</div><div class="card-value">' + escapeHtml(manifest.name || '-') + '</div></div>';
       } else {
         html += '<div class="card"><div class="card-label">Manifest</div><div class="card-value status-err">unavailable</div></div>';
@@ -462,7 +463,7 @@
       html += '</div>';
       /* Manifest detail */
       if (manifest) {
-        html += '<h2>Manifest</h2><pre class="pre-wrap">' + escapeHtml(JSON.stringify(manifest, null, 2)) + '</pre>';
+        html += '<h2>Manifest</h2><pre class="pre-wrap">' + escapeHtml(JSON.stringify(signedManifest, null, 2)) + '</pre>';
       }
       /* Envelope log table */
       html += '<h2>Envelope Log</h2>';

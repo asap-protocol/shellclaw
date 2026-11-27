@@ -49,6 +49,26 @@ async function testDashboardResponseAfterNavigation() {
 }
 testDashboardResponseAfterNavigation().catch(error => { console.error(error); process.exitCode = 1; });
 
+async function testSignedManifestCards() {
+  const location = { hash: '#/asap' };
+  const elements = { app: {}, 'asap-content': {} };
+  const signed = { manifest: { id: 'urn:asap:agent:test', name: 'Gateway',
+    capabilities: { asap_version: '2.1.0' } }, signature: { algorithm: 'ed25519' } };
+  const script = fs.readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
+  vm.runInNewContext(script, {
+    location, window: { location, addEventListener() {} }, ShellClawDashboard: dash,
+    document: { getElementById: id => elements[id], querySelectorAll: () => [] },
+    localStorage: { getItem: () => 'paired-device' },
+    fetch: async url => ({ ok: true, json: async () => url.includes('manifest') ? signed : { entries: [] } }),
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const content = elements['asap-content'].innerHTML;
+  for (const value of ['urn:asap:agent:test', 'Gateway', '2.1.0'])
+    assert(content.includes('>' + value + '</div>'), 'missing manifest card ' + value);
+  assert(content.includes('ed25519'), 'missing original signature');
+}
+testSignedManifestCards().catch(error => { console.error(error); process.exitCode = 1; });
+
 function testPairedChatDisplaysRepliesAsText() {
   let connection;
   const location = { protocol: 'https:', host: 'localhost', hash: '#/chat' };
