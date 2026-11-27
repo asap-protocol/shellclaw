@@ -9,10 +9,20 @@ export HOME="${sandbox}/home"
 export XDG_CONFIG_HOME="${HOME}/.config"
 mkdir -p "${HOME}"
 
+# Use a source fixture so these tests control whether a build is available.
+repo="${ROOT}"
+ROOT="${sandbox}/source"
+mkdir -p "${ROOT}/scripts" "${ROOT}/build"
+cp "${repo}/scripts/install.sh" "${ROOT}/scripts/"
+cp "${repo}/config.example.toml" "${repo}/.env.example" "${ROOT}/"
+cp -R "${repo}/systemd" "${ROOT}/"
+
 fake_bin="${sandbox}/bin"
 mkdir -p "${fake_bin}"
 fake_shellclaw="${fake_bin}/shellclaw"
-etc_dir="${sandbox}/etc/shellclaw"
+etc_dir="${sandbox}/etc /shellclaw%h"
+state_dir="${sandbox}/claw & state"
+unset SHELLCLAW_INSTALL_BIN SHELLCLAW_HOME SHELLCLAW_ETC_DIR
 unit_dir="${XDG_CONFIG_HOME}/systemd/user"
 jetson_marker="Phi-3-mini-4k-instruct-Q4_K_M.gguf"
 rpi_marker="tinyllama-1.1b-chat-Q4_K_M.gguf"
@@ -21,6 +31,9 @@ write_fake_shellclaw() {
 	local board="$1"
 	cat >"${fake_shellclaw}" <<EOF
 #!/usr/bin/env bash
+if [[ "\${1:-}" == "--headless" && "\${2:-}" == "--help" ]]; then
+	exit 0
+fi
 if [[ "\${1:-}" == "--detect-board" ]]; then
 	printf '%s\n' "${board}"
 	exit 0
@@ -36,7 +49,7 @@ run_install_for_board() {
 	write_fake_shellclaw "${board}"
 	rm -rf "${etc_dir}"
 	mkdir -p "${etc_dir}"
-	SHELLCLAW_INSTALL_BIN="${fake_shellclaw}" \
+	SHELLCLAW_INSTALL_BIN="${fake_shellclaw}" SHELLCLAW_HOME="${state_dir}" \
 		SHELLCLAW_ETC_DIR="${etc_dir}" \
 		SHELLCLAW_INSTALL_NONINTERACTIVE=1 \
 		bash "${ROOT}/scripts/install.sh"
@@ -58,6 +71,10 @@ assert_llama_env_marker() {
 assert_units_installed() {
 	test -f "${unit_dir}/shellclaw.service"
 	test -f "${unit_dir}/llama-server.service"
+	grep -Fx "EnvironmentFile=${etc_dir//%/%%}/llama-server.env" "${unit_dir}/llama-server.service"
+	grep -F "ExecStart=:/usr/bin/env -- \"${fake_shellclaw}\" --config \"${state_dir}/config.toml\"" "${unit_dir}/shellclaw.service"
+	grep -Fx "EnvironmentFile=-${state_dir}/.env" "${unit_dir}/shellclaw.service"
+	grep -Fx "db_path = \"${state_dir}/memory.db\"" "${state_dir}/config.toml"
 }
 
 run_install_for_board "jetson_orin_nano"
@@ -71,5 +88,81 @@ assert_llama_env_marker "${rpi_marker}"
 run_install_for_board "stub"
 assert_units_installed
 assert_llama_env_marker "${jetson_marker}"
+
+chmod u-w "${fake_bin}"
+rc=0
+SHELLCLAW_INSTALL_BIN="${fake_shellclaw}" SHELLCLAW_INSTALL_NONINTERACTIVE=1 \
+	bash "${ROOT}/scripts/install.sh" || rc=$?
+chmod u+w "${fake_bin}"
+test "${rc}" = 0
+
+default_bin="${HOME}/.local/bin/shellclaw"
+mkdir -p "$(dirname "${default_bin}")"
+cp "${fake_shellclaw}" "${default_bin}"
+SHELLCLAW_INSTALL_NONINTERACTIVE=1 bash "${ROOT}/scripts/install.sh"
+grep -Fx "EnvironmentFile=${HOME}/.shellclaw/llama-server.env" "${unit_dir}/llama-server.service"
+test -f "${HOME}/.shellclaw/llama-server.env"
+test -f "${HOME}/.shellclaw/config.toml"
+test -f "${HOME}/.shellclaw/.env"
+
+for file in config.toml .env llama-server.env; do
+	printf '# local file\n' >"${HOME}/.shellclaw/${file}"
+done
+SHELLCLAW_INSTALL_NONINTERACTIVE=1 bash "${ROOT}/scripts/install.sh"
+for file in config.toml .env llama-server.env; do
+	grep -Fx '# local file' "${HOME}/.shellclaw/${file}"
+done
+
+# A custom path with an older executable must keep its binary and units.
+cp -R "${unit_dir}" "${sandbox}/previous-units"
+compatible_bin="${sandbox}/compatible-shellclaw"
+cp "${fake_shellclaw}" "${compatible_bin}"
+cat >"${fake_shellclaw}" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+	--help) echo "Usage: shellclaw [--help] [--detect-board]" ;;
+	--detect-board) echo stub ;;
+	*) exit 1 ;;
+esac
+EOF
+cp "${fake_shellclaw}" "${sandbox}/previous-binary"
+
+for build in absent present; do
+	if [[ "${build}" == present ]]; then
+		cp "${compatible_bin}" "${ROOT}/build/shellclaw"
+	fi
+	if SHELLCLAW_INSTALL_BIN="${fake_shellclaw}" SHELLCLAW_INSTALL_NONINTERACTIVE=1 \
+			bash "${ROOT}/scripts/install.sh" >"${sandbox}/rejected.log" 2>&1; then
+		printf 'test_install_script: incompatible custom binary accepted with build %s\n' "${build}" >&2
+		exit 1
+	fi
+	grep -F -- '--headless' "${sandbox}/rejected.log"
+	cmp "${fake_shellclaw}" "${sandbox}/previous-binary"
+	diff -r "${unit_dir}" "${sandbox}/previous-units"
+done
+
+cp "${compatible_bin}" "${fake_shellclaw}"
+SHELLCLAW_INSTALL_BIN="${fake_shellclaw}" SHELLCLAW_INSTALL_NONINTERACTIVE=1 \
+	bash "${ROOT}/scripts/install.sh"
+grep -Fx "ExecStart=:/usr/bin/env -- \"${fake_shellclaw}\" --config \"${HOME}/.shellclaw/config.toml\" --headless" \
+	"${unit_dir}/shellclaw.service"
+cmp "${fake_shellclaw}" "${compatible_bin}"
+
+invalid_xdg="${sandbox}/invalid-xdg"
+touch "${sandbox}/not-a-directory"
+if XDG_CONFIG_HOME="${invalid_xdg}" SHELLCLAW_ETC_DIR="${sandbox}/not-a-directory" \
+		SHELLCLAW_INSTALL_NONINTERACTIVE=1 bash "${ROOT}/scripts/install.sh"; then
+	echo "test_install_script: invalid destination accepted" >&2
+	exit 1
+fi
+test ! -e "${invalid_xdg}/systemd/user/shellclaw.service"
+test ! -e "${invalid_xdg}/systemd/user/llama-server.service"
+
+if SHELLCLAW_HOME="${sandbox}/state*" SHELLCLAW_INSTALL_NONINTERACTIVE=1 \
+		bash "${ROOT}/scripts/install.sh"; then
+	echo "test_install_script: wildcard in environment file path accepted" >&2
+	exit 1
+fi
+test ! -e "${sandbox}/state*"
 
 echo "test_install_script: OK"

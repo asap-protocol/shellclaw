@@ -7,6 +7,7 @@
 #include "core/config.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -62,6 +63,42 @@ static void test_cli_one_shot_consumed_after_poll(void)
 	ch->cleanup();
 }
 
+static void test_cli_piped_input_keeps_the_last_line(void)
+{
+	const channel_t *ch = channel_cli_get();
+	channel_incoming_msg_t msg = {0};
+	const char input[] = "first\nlast";
+	int input_pipe[2];
+	int saved_stdin = dup(STDIN_FILENO);
+
+	MU_ASSERT(pipe(input_pipe) == 0, "open input pipe");
+	MU_ASSERT(write(input_pipe[1], input, sizeof(input) - 1) == sizeof(input) - 1, "write both lines");
+	close(input_pipe[1]);
+	MU_ASSERT(dup2(input_pipe[0], STDIN_FILENO) == STDIN_FILENO, "replace stdin");
+	if (input_pipe[0] != STDIN_FILENO)
+		close(input_pipe[0]);
+
+	ch->init(NULL);
+	int first_result = ch->poll(&msg, 0);
+	int first_matches = msg.text && strcmp(msg.text, "first") == 0;
+	channel_incoming_msg_clear(&msg);
+	int last_result = ch->poll(&msg, 0);
+	int last_matches = msg.text && strcmp(msg.text, "last") == 0;
+	channel_incoming_msg_clear(&msg);
+	int closed = ch->poll(&msg, 0);
+	ch->cleanup();
+
+	if (saved_stdin >= 0) {
+		dup2(saved_stdin, STDIN_FILENO);
+		close(saved_stdin);
+	} else {
+		close(STDIN_FILENO);
+	}
+	MU_ASSERT(first_result == 1 && first_matches, "read the first piped line");
+	MU_ASSERT(last_result == 1 && last_matches, "read the final line without a newline");
+	MU_ASSERT(closed == CHANNEL_POLL_CLOSED, "report closed input");
+}
+
 static void test_cli_send_succeeds(void)
 {
 	const channel_t *ch = channel_cli_get();
@@ -77,6 +114,7 @@ int main(void)
 	MU_RUN(test_cli_one_shot_returns_message);
 	MU_RUN(test_cli_one_shot_consumed_after_poll);
 	MU_RUN(test_cli_send_succeeds);
+	MU_RUN(test_cli_piped_input_keeps_the_last_line);
 	printf("%d tests run, %d failed\n", tests_run, tests_failed);
 	return tests_failed ? 1 : 0;
 }

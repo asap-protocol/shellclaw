@@ -119,6 +119,7 @@ int http_start(const config_t *cfg, struct auth_ctx *auth_ctx, const char *confi
 		return -1;
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) return -1;
+	atomic_init(&ctx->running, 0);
 	ctx->cfg = cfg;
 	ctx->auth = auth_ctx;
 	ctx->config_path = config_path ? strdup(config_path) : NULL;
@@ -158,8 +159,10 @@ void http_stop(void)
 {
 	provider_router_set_status_changed_callback(NULL);
 	if (!g_ctx) return;
-	g_ctx->running = 0;
+	atomic_store(&g_ctx->running, 0);
 	ws_shutdown_signal();
+	/* Wake lws_service when the gateway has no network activity. */
+	lws_cancel_service(g_ctx->lws_ctx);
 	if (g_ctx->thread) {
 		pthread_join(g_ctx->thread, NULL);
 		g_ctx->thread = 0;

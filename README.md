@@ -48,7 +48,50 @@ ShellClaw is **not another OpenClaw clone** in a different language. It is a **h
 
 **Build:** `make shellclaw` → binary at `build/shellclaw`. `make test` → builds and runs all tests in `build/`.
 
-**Run:** `./build/shellclaw`
+### First run
+
+On Linux, run the installer as your user.
+
+```bash
+make shellclaw
+./scripts/install.sh
+```
+
+The installer places the binary in `~/.local/bin` and creates the configuration in `~/.shellclaw`.
+If you install without the Linux script, create the configuration files yourself.
+```bash
+install -d -m 0700 "$HOME/.shellclaw"
+install -m 0600 config.example.toml "$HOME/.shellclaw/config.toml"
+install -m 0600 .env.example "$HOME/.shellclaw/.env"
+```
+
+Edit `~/.shellclaw/config.toml` to select your model. For the default Anthropic model, set `ANTHROPIC_API_KEY` in `~/.shellclaw/.env`.
+Use plain variable assignments so that Bash and systemd can both read the file.
+
+The terminal reads variables from the process environment. Source only the private file that you created and trust.
+
+```bash
+(
+    set -a
+    . "$HOME/.shellclaw/.env"
+    set +a
+    "$HOME/.local/bin/shellclaw" -m "Reply with hello."
+)
+```
+
+If you used the manual steps, use `./build/shellclaw` in the last command.
+
+### Linux user service
+
+After you configure a provider, start the service. systemd reads the same `~/.shellclaw/.env` file.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now shellclaw.service
+```
+
+To change the install paths, set `SHELLCLAW_INSTALL_BIN` or `SHELLCLAW_HOME` before you run the installer.
+Use the paths printed by the installer when you run it from the terminal. For a custom configuration directory, pass `--config` with the full `config.toml` path.
 
 **Quality checks:**
 - `make static` — cppcheck on `src/` (requires cppcheck)
@@ -59,7 +102,9 @@ ShellClaw is **not another OpenClaw clone** in a different language. It is a **h
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for PR workflow, coding standards, and the pre-tag `gpio-mockup` release ritual.
 
-**Configuration:** copy [`config.example.toml`](config.example.toml) to `~/.shellclaw/config.toml` and [`.env.example`](.env.example) to `.env`. Phase 3+ keys (ASAP, sandbox, gateway) and the Jetson `[hardware]` block are documented there. Install **libwebsockets** (`pkg-config` must find it) to build the gateway and run `GATEWAY=1 make test_gateway_http`.
+[`config.example.toml`](config.example.toml) documents the configuration keys.
+Install libwebsockets to build the gateway and run `GATEWAY=1 make test_gateway_http`.
+Make sure that `pkg-config` can find libwebsockets.
 
 **Jetson install (v1.0):** `./scripts/install.sh`, `./scripts/build_llama_jetson.sh`, `./scripts/download_model.sh phi3` — details in [`docs/HARDWARE_JETSON.md`](docs/HARDWARE_JETSON.md) and [`docs/LOCAL_INFERENCE.md`](docs/LOCAL_INFERENCE.md).
 

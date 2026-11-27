@@ -14,7 +14,7 @@ extern "C" {
 
 /**
  * Handle an incoming channel message (/reset, /status, or agent run).
- * @return Result of channel send(), or -1 on internal error.
+ * @return 0 on success, or a nonzero turn, delivery, or cron acknowledgment error.
  */
 int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg);
 

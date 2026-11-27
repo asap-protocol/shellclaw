@@ -5,14 +5,13 @@
 [Unit]
 Description=ShellClaw autonomous agent
 After=network-online.target llama-server.service
-Wants=network-online.target llama-server.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 Environment=SHELLCLAW_HOME=%h/.shellclaw
-Environment=SHELLCLAW_INSTALL_BIN=%h/.local/bin/shellclaw
 EnvironmentFile=-%h/.shellclaw/.env
-ExecStart=%h/.local/bin/shellclaw --config %h/.shellclaw/config.toml
+ExecStart=%h/.local/bin/shellclaw --config %h/.shellclaw/config.toml --headless
 Restart=on-failure
 RestartSec=5
 

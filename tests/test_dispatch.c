@@ -257,7 +257,7 @@ static int test_status_returns_version(void)
 	ASSERT(handle_message(&mock_channel, &msg) == 0);
 	ASSERT(g_send_calls == 1);
 	ASSERT(strstr(g_last_text, "ShellClaw " SHELLCLAW_RELEASE_VERSION) != NULL);
-	ASSERT(strstr(g_last_text, "agent ready") != NULL);
+	ASSERT(strstr(g_last_text, "No provider is selected.") != NULL);
 	return 0;
 }
 
@@ -281,7 +281,7 @@ static int test_agent_failure_fallback_message(void)
 
 	msg.session_id = "cli:fail";
 	msg.text = "hello";
-	ASSERT(handle_message(&mock_channel, &msg) == 0);
+	ASSERT(handle_message(&mock_channel, &msg) == -1);
 	ASSERT(g_send_calls == 1);
 	ASSERT(strstr(g_last_text, "Error: agent failed (code -1)") != NULL);
 
@@ -443,7 +443,8 @@ static int test_cron_agent_failure_does_not_ack(void)
 	msg.session_id = "cli:default";
 	msg.user_id = "cron_fail";
 	msg.text = "hello";
-	ASSERT(handle_message(&cron_mock_channel, &msg) == 0);
+	ASSERT(handle_message(&cron_mock_channel, &msg) == -1);
+	ASSERT(g_send_calls == 1);
 	memset(&row, 0, sizeof(row));
 	ASSERT(cron_job_get_by_id("cron_fail", &row) == 1);
 	ASSERT(row.next_run == due_at);
@@ -518,7 +519,7 @@ static int test_cron_blank_reply_acks_without_sending(void)
 		g_spy_openai_body = bodies[i];
 		msg.user_id = id;
 		msg.session_id = (char *)routes[i];
-		ASSERT(handle_message(cron, &msg) == (i == 0 ? -1 : 0));
+		ASSERT(handle_message(cron, &msg) == (i < 3 ? -1 : 0));
 		ASSERT(g_send_calls == (i == 1 || i == 2 ? 1 : 0));
 		ASSERT(cron_job_get_by_id(id, &row) == (i < 3 ? 1 : 0));
 		if (i < 3)

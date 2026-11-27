@@ -473,6 +473,7 @@ static int test_fallback_chain_all_backends_fail_records_last_error(void)
 	msg.content = "hi";
 	memset(&resp, 0, sizeof(resp));
 	ASSERT(router->chat(&msg, 1, NULL, 0, &resp) != 0);
+	ASSERT(resp.content != NULL && strstr(resp.content, "Connection refused") != NULL);
 	provider_router_last_error_snapshot(snap_err, sizeof(snap_err));
 	ASSERT(strstr(snap_err, "Connection refused") != NULL);
 	json = provider_router_api_status_json();

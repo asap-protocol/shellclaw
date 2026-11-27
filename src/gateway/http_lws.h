@@ -13,6 +13,7 @@
 #include "gateway/ws.h"
 #include <libwebsockets.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <time.h>
 
 #ifdef __cplusplus
@@ -40,7 +41,7 @@ typedef struct http_server_ctx {
 	time_t start_time;
 	struct lws_context *lws_ctx;
 	pthread_t thread;
-	volatile int running;
+	atomic_int running;
 } http_server_ctx_t;
 
 /** Global server context (set by http_start, cleared by http_stop). */
