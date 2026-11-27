@@ -185,7 +185,8 @@ Never commit credentials; use `.env.example` as reference.
 
 Send an authenticated `GET /api/cron/page` request for the first 16 jobs, in ID order.
 Each entry includes a schedule preview and a message preview. ShellClaw keeps the full text for delivery.
-If `next_after` contains an ID, URL-encode it and send `GET /api/cron/page?after=ID`.
+If `next_after` contains a cursor, send it in `GET /api/cron/page?after=CURSOR`.
+Use the job `key` in `POST /api/cron/job/KEY/toggle` and `DELETE /api/cron/job/KEY`.
 A null cursor means that the list is complete.
 
 `GET /api/cron` returns the original array with full messages when it fits in one response.

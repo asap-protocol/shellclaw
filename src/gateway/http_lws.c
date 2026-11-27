@@ -77,6 +77,8 @@ static int http_body_content_length(struct lws *wsi, long *cl_out)
 	return 0;
 }
 
+enum { HTTP_REQUEST_URI_SIZE = 512 };
+
 static int http_copy_request_uri(struct lws *wsi, char *uri, int uri_size)
 {
 	int n;
@@ -94,7 +96,7 @@ static int http_copy_request_uri(struct lws *wsi, char *uri, int uri_size)
 
 static void http_dispatch_body(http_server_ctx_t *ctx, struct lws *wsi, http_conn_t *conn)
 {
-	char uri[256];
+	char uri[HTTP_REQUEST_URI_SIZE];
 	int uri_len;
 	int method;
 	if (!conn || !conn->has_body || conn->body_dispatched)
@@ -189,7 +191,7 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 	if (!ctx) return 0;
 	switch (reason) {
 	case LWS_CALLBACK_HTTP: {
-		char uri[256];
+		char uri[HTTP_REQUEST_URI_SIZE];
 		int uri_len = http_copy_request_uri(wsi, uri, sizeof(uri));
 		if (uri_len <= 0 || uri_len >= (int)sizeof(uri)) {
 			lws_return_http_status(wsi, 400, "Bad request");
@@ -245,7 +247,7 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 			const unsigned char *data = NULL;
 			size_t data_len = 0;
 			const char *ct = NULL;
-			char path_buf[256];
+			char path_buf[sizeof(uri)];
 			if (uri_len >= (int)sizeof(path_buf)) uri_len = (int)sizeof(path_buf) - 1;
 			memcpy(path_buf, uri, (size_t)uri_len);
 			path_buf[uri_len] = '\0';

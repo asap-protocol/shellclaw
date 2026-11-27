@@ -566,10 +566,58 @@ static void handle_session_delete(const char *id, char *buf, size_t size, int *s
 
 enum { CRON_LEGACY_LIMIT = 64, CRON_PAGE_SIZE = 16 };
 
+/* The opaque key also identifies jobs that older gateways stored with an incomplete UTF-8 ID. */
+static void cron_encode_key(const char *id, char out[256])
+{
+	static const char hex[] = "0123456789abcdef";
+	*out++ = '~';
+	for (const unsigned char *p = (const unsigned char *)id; *p; p++) {
+		*out++ = hex[*p >> 4];
+		*out++ = hex[*p & 15];
+	}
+	*out = 0;
+}
+
+static int cron_decode_key(const char *key, char id[128])
+{
+	static const char hex[] = "0123456789abcdef";
+	size_t n = strlen(key);
+	if (key[0] != '~' || n < 3 || n > 255 || n % 2 == 0) return -1;
+	for (size_t i = 1; i < n; i += 2) {
+		const char *hi = strchr(hex, key[i]), *lo = strchr(hex, key[i + 1]);
+		if (!hi || !lo) return -1;
+		*id = (char)((hi - hex) * 16 + (lo - hex));
+		if (!*id++) return -1;
+	}
+	*id = 0;
+	return 0;
+}
+
+static int cron_id_is_utf8(const char *id)
+{
+	const unsigned char *p = (const unsigned char *)id;
+	while (*p) {
+		unsigned char lead = *p++;
+		if (lead < 0x80) continue;
+		if (lead < 0xc2 || lead > 0xf4) return 0;
+		unsigned count = lead < 0xe0 ? 1 : (lead < 0xf0 ? 2 : 3);
+		if ((lead == 0xe0 && *p < 0xa0) || (lead == 0xed && *p >= 0xa0) ||
+		    (lead == 0xf0 && *p < 0x90) || (lead == 0xf4 && *p >= 0x90)) return 0;
+		while (count--) {
+			if ((*p & 0xc0) != 0x80) return 0;
+			p++;
+		}
+	}
+	return 1;
+}
+
 static cJSON *cron_list_item(const cron_job_row_t *row, const char *delivery_state)
 {
 	cJSON *obj = cJSON_CreateObject();
-	if (obj && cJSON_AddStringToObject(obj, "id", row->id) &&
+	char key[256];
+	cron_encode_key(row->id, key);
+	if (obj && cJSON_AddStringToObject(obj, "id", cron_id_is_utf8(row->id) ? row->id : key) &&
+	    (!delivery_state || cJSON_AddStringToObject(obj, "key", key)) &&
 	    cJSON_AddStringToObject(obj, delivery_state ? "schedule_preview" : "schedule", row->schedule) &&
 	    cJSON_AddStringToObject(obj, delivery_state ? "message_preview" : "message", row->message) &&
 	    cJSON_AddStringToObject(obj, "channel", row->channel) &&
@@ -600,9 +648,11 @@ static void handle_cron_list(const char *after, char *buf, size_t size, int *sta
 	if (n < 0) goto fail;
 	if (!after && n > limit) goto too_large;
 	if (after) {
+		char next[256];
+		if (n > limit) cron_encode_key(rows[limit - 1].id, next);
 		root = cJSON_CreateObject();
 		jobs = root ? cJSON_AddArrayToObject(root, "jobs") : NULL;
-		if (!jobs || !(n > limit ? cJSON_AddStringToObject(root, "next_after", rows[limit - 1].id)
+		if (!jobs || !(n > limit ? cJSON_AddStringToObject(root, "next_after", next)
 					 : cJSON_AddNullToObject(root, "next_after"))) goto fail;
 	} else {
 		root = jobs = cJSON_CreateArray();
@@ -659,9 +709,14 @@ static void handle_cron_create(const char *body, size_t body_len, char *buf, siz
 	cJSON *channel = cJSON_GetObjectItem(root, "channel");
 	cJSON *recipient = cJSON_GetObjectItem(root, "recipient");
 	char id[128];
-	if (cJSON_IsString(id_node) && id_node->valuestring[0])
-		snprintf(id, sizeof(id), "%.127s", id_node->valuestring);
-	else
+	if (cJSON_IsString(id_node) && id_node->valuestring[0]) {
+		if (strlen(id_node->valuestring) >= sizeof(id) || !cron_id_is_utf8(id_node->valuestring)) {
+			cJSON_Delete(root);
+			json_error(buf, size, status, 400, "Job IDs must use UTF-8 and fit in 127 bytes.");
+			return;
+		}
+		memcpy(id, id_node->valuestring, strlen(id_node->valuestring) + 1);
+	} else
 		id[0] = '\0';
 	const char *ch = (channel && cJSON_IsString(channel)) ? channel->valuestring : NULL;
 	const char *rec = (recipient && cJSON_IsString(recipient)) ? recipient->valuestring : NULL;
@@ -1102,10 +1157,28 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 			return 0;
 		}
 		if (wsi) n = lws_get_urlarg_by_name_safe(wsi, "after=", after, sizeof(after));
-		if (n >= 128 || (n >= 0 && strlen(after) != (size_t)n))
+		char id[128];
+		int encoded = n > 0 && after[0] == '~';
+		if ((n >= 0 && strlen(after) != (size_t)n) || (encoded ? cron_decode_key(after, id) != 0 : n >= 128))
 			json_error(buf, size, status, 400, "Invalid page cursor.");
 		else
-			handle_cron_list(n < 0 ? "" : after, buf, size, status);
+			handle_cron_list(n < 0 ? "" : (encoded ? id : after), buf, size, status);
+		return 0;
+	}
+	if (uri_has_prefix(uri, uri_len, "/api/cron/job/~")) {
+		char key[256], id[128];
+		const char *prefix = "/api/cron/job/";
+		if (extract_path_param(uri, uri_len, prefix, key, sizeof(key)) != 0 || cron_decode_key(key, id) != 0) {
+			json_error(buf, size, status, 400, "Invalid job key.");
+			return 0;
+		}
+		size_t end = strlen(prefix) + strlen(key);
+		if (method == HTTP_DELETE && end == (size_t)uri_len)
+			handle_cron_delete(id, buf, size, status);
+		else if (method == HTTP_POST && (size_t)uri_len == end + 7 && memcmp(uri + end, "/toggle", 7) == 0)
+			handle_cron_toggle(id, buf, size, status);
+		else
+			json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
 	if (uri_has_prefix(uri, uri_len, "/api/cron/")) {

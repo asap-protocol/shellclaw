@@ -1364,7 +1364,7 @@ static int test_api_cron_list(const char *token)
 
 static int test_api_cron_pages(const char *token)
 {
-	char message[6001], json[6500], path[256], cursor[128] = "";
+	char message[6001], json[6500], path[512], cursor[256] = "";
 	char *body = NULL;
 	long status;
 	int seen = 0;
@@ -1411,6 +1411,34 @@ static int test_api_cron_pages(const char *token)
 		ASSERT(http_delete_auth(gw_url(path), token, &status, &body) == 0 && status == 200);
 		free(body);
 	}
+	return 0;
+}
+
+static int test_cron_job_id_bytes(const char *token)
+{
+	char id[132], json[320], path[320], *body = NULL;
+	long status;
+	memset(id, 'x', 125);
+	memcpy(id + 125, "é", sizeof("é"));
+	id[0] = '/';
+	snprintf(json, sizeof(json), "{\"id\":\"%s\",\"schedule\":\"interval:86400\",\"message\":\"note\"}", id);
+	ASSERT(http_post_auth(gw_url("/api/cron"), token, json, &status, &body) == 0 && status == 201);
+	free(body);
+	ASSERT(http_get_auth(gw_url("/api/cron/page"), token, &status, &body) == 0 && status == 200);
+	cJSON *page = cJSON_Parse(body);
+	cJSON *job = cJSON_GetArrayItem(cJSON_GetObjectItem(page, "jobs"), 0);
+	const char *key = cJSON_GetStringValue(cJSON_GetObjectItem(job, "key"));
+	const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(job, "id"));
+	ASSERT(name && !strcmp(name, id) && key && strlen(key) == 255);
+	snprintf(path, sizeof(path), "/api/cron/job/%s", key);
+	cJSON_Delete(page);
+	free(body);
+	ASSERT(http_delete_auth(gw_url(path), token, &status, &body) == 0 && status == 200);
+	free(body);
+	memcpy(id + 125, "xé", sizeof("xé"));
+	snprintf(json, sizeof(json), "{\"id\":\"%s\",\"schedule\":\"interval:86400\",\"message\":\"note\"}", id);
+	ASSERT(http_post_auth(gw_url("/api/cron"), token, json, &status, &body) == 0 && status == 400);
+	free(body);
 	return 0;
 }
 
@@ -1979,6 +2007,7 @@ int main(int argc, char **argv)
 		}
 		if (test_api_memory(token) != 0) { fprintf(stderr, "test_api_memory failed\n"); failed++; }
 		if (test_api_cron_list(token) != 0) { fprintf(stderr, "test_api_cron_list failed\n"); failed++; }
+		if (test_cron_job_id_bytes(token) != 0) failed++;
 		if (test_cron_preview_and_delivery(token) != 0) failed++;
 		if (test_api_cron_pages(token) != 0) failed++;
 		if (test_api_cron_create_delete(token) != 0) { fprintf(stderr, "test_api_cron_create_delete failed\n"); failed++; }
