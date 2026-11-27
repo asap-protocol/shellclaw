@@ -214,7 +214,7 @@ async function testDashboardResponseAfterNavigation() {
   const script = fs.readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
   vm.runInNewContext(script, {
     location, ShellClawDashboard: dash,
-    window: { location, addEventListener: (_, cb) => { navigate = cb; },
+    window: { location, addEventListener: (name, cb) => { if (name === 'hashchange') navigate = cb; },
       setInterval: () => ++timers, clearInterval() {} },
     localStorage: { getItem: () => 'paired-device' },
     document: { getElementById: id => elements[id], querySelectorAll: () => [] },
