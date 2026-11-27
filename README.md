@@ -63,6 +63,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR workflow, coding standards, and th
 
 **Jetson install (v1.0):** `./scripts/install.sh`, `./scripts/build_llama_jetson.sh`, `./scripts/download_model.sh phi3` — details in [`docs/HARDWARE_JETSON.md`](docs/HARDWARE_JETSON.md) and [`docs/LOCAL_INFERENCE.md`](docs/LOCAL_INFERENCE.md).
 
+**Pair another device.** On the gateway host, confirm that the new device needs access.
+Send `SIGUSR1` to the running gateway with `kill -USR1 <pid>`.
+For the systemd user service, run `systemctl --user kill --kill-whom=main --signal=SIGUSR1 shellclaw.service`.
+Read the new code in the gateway console or service journal.
+Enter the code on the Pair page within five minutes. The code expires after one use or a gateway restart.
+The gateway keeps existing devices paired and accepts up to 16 devices.
+
 **WebSocket authentication.** Pair with the gateway before opening `/ws`. For a browser client, offer both `ws` and `bearer.<pairing-token>` as subprotocols. The gateway selects `ws` and reads the token from the other entry. For a native client, offer `ws` and send the token in `Authorization: Bearer <pairing-token>`.
 
 **Debug (macOS):** Symbols in `tests-dSYM/`. Use `lldb build/test_agent` then `settings set target.debug-file-search-path tests-dSYM`. Old `.dSYM` in repo root? Run `make clean-root-dsym`.

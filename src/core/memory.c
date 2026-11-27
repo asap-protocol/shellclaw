@@ -82,6 +82,19 @@ static const char *SCHEMA_SESSIONS =
 	"  updated_at TEXT"
 	");";
 
+static const char *SCHEMA_WEBCHAT =
+	"CREATE TABLE IF NOT EXISTS webchat_turns ("
+	"  seq INTEGER PRIMARY KEY,"
+	"  session TEXT NOT NULL,"
+	"  request TEXT NOT NULL,"
+	"  text TEXT NOT NULL,"
+	"  reply TEXT,"
+	"  state INTEGER NOT NULL DEFAULT 0,"
+	"  UNIQUE(session, request)"
+	");"
+	"CREATE INDEX IF NOT EXISTS webchat_session_seq ON webchat_turns (session, seq);"
+	"CREATE INDEX IF NOT EXISTS webchat_pending ON webchat_turns (state, seq) WHERE state < 2;";
+
 static const char *SCHEMA_CRON_JOBS =
 	"CREATE TABLE IF NOT EXISTS cron_jobs ("
 	"  id TEXT PRIMARY KEY,"
@@ -110,6 +123,7 @@ static int run_schema(void)
 	if (sqlite3_exec(g_db, TRIGGER_MEMORIES_AD, NULL, NULL, &err) != SQLITE_OK) goto fail;
 	if (sqlite3_exec(g_db, TRIGGER_MEMORIES_AU, NULL, NULL, &err) != SQLITE_OK) goto fail;
 	if (sqlite3_exec(g_db, SCHEMA_SESSIONS, NULL, NULL, &err) != SQLITE_OK) goto fail;
+	if (sqlite3_exec(g_db, SCHEMA_WEBCHAT, NULL, NULL, &err) != SQLITE_OK) goto fail;
 	if (sqlite3_exec(g_db, SCHEMA_CRON_JOBS, NULL, NULL, &err) != SQLITE_OK) goto fail;
 	if (sqlite3_exec(g_db, SCHEMA_CONFIG_KV, NULL, NULL, &err) != SQLITE_OK) goto fail;
 	return 0;
@@ -141,7 +155,7 @@ int memory_init(const char *path)
 	if (!path || g_db) return -1;
 	int file_existed = path_exists(path);
 	int recreated = 0;
-	if (sqlite3_open(path, &g_db) != SQLITE_OK) {
+	if (sqlite3_open_v2(path, &g_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
 		/* Never delete an existing DB on open failure (permissions, transient I/O). */
 		if (file_existed) {
 			fprintf(stderr, "Error: cannot open existing memory DB at %s: %s\n",
@@ -151,7 +165,7 @@ int memory_init(const char *path)
 		}
 		if (g_db) { sqlite3_close(g_db); g_db = NULL; }
 		remove(path);
-		if (sqlite3_open(path, &g_db) != SQLITE_OK) {
+		if (sqlite3_open_v2(path, &g_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
 			if (g_db) sqlite3_close(g_db);
 			g_db = NULL;
 			return -1;
@@ -170,7 +184,7 @@ int memory_init(const char *path)
 		sqlite3_close(g_db);
 		g_db = NULL;
 		remove(path);
-		if (sqlite3_open(path, &g_db) != SQLITE_OK) {
+		if (sqlite3_open_v2(path, &g_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
 			if (g_db) sqlite3_close(g_db);
 			g_db = NULL;
 			return -1;
@@ -324,6 +338,194 @@ int session_list(char **session_ids_out, int max_count)
 	}
 	sqlite3_finalize(stmt);
 	return count;
+}
+
+/* WebChat uses single statements on the serialized connection. A provider call
+ * can hold agent_lock while the gateway accepts requests and reads receipts. */
+int webchat_store_accept(const char *session, const char *request, const char *text)
+{
+	const char *sql = "INSERT INTO webchat_turns(session, request, text) SELECT ?1, ?2, ?3 "
+		"WHERE EXISTS(SELECT 1 FROM webchat_turns WHERE session=?1 AND request=?2) "
+		"OR (SELECT count(*) FROM (SELECT 1 FROM webchat_turns WHERE state<2 LIMIT ?4)) < ?4 "
+		"ON CONFLICT(session, request) DO UPDATE SET request=excluded.request "
+		"RETURNING state<>3 AND text=?3";
+	sqlite3_stmt *stmt = NULL;
+	if (!g_db) return -1;
+	sqlite3_mutex *mutex = sqlite3_db_mutex(g_db);
+	sqlite3_mutex_enter(mutex);
+	int rc = -1;
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+	    sqlite3_bind_text(stmt, 1, session, -1, SQLITE_STATIC) == SQLITE_OK &&
+	    sqlite3_bind_text(stmt, 2, request, -1, SQLITE_STATIC) == SQLITE_OK &&
+	    sqlite3_bind_text(stmt, 3, text, -1, SQLITE_STATIC) == SQLITE_OK &&
+	    sqlite3_bind_int(stmt, 4, WEBCHAT_PENDING_LIMIT) == SQLITE_OK) {
+		int step = sqlite3_step(stmt);
+		if (step == SQLITE_ROW) {
+			int accepted = sqlite3_column_int(stmt, 0);
+			if (sqlite3_step(stmt) == SQLITE_DONE)
+				rc = accepted ? 0 : WEBCHAT_ACCEPT_CONFLICT;
+		} else if (step == SQLITE_DONE) {
+			rc = WEBCHAT_ACCEPT_FULL;
+		}
+	}
+	if (sqlite3_finalize(stmt) != SQLITE_OK) rc = -1;
+	sqlite3_mutex_leave(mutex);
+	return rc;
+}
+
+int webchat_store_claim(int64_t *seq, char *session, size_t session_size, char *text, size_t text_size)
+{
+	const char *sql = "UPDATE webchat_turns SET state=1 WHERE seq=("
+		"SELECT seq FROM webchat_turns WHERE state=0 ORDER BY seq LIMIT 1"
+		") AND length(CAST(session AS BLOB)) < ?1 AND length(CAST(text AS BLOB)) < ?2 "
+		"RETURNING seq, session, text";
+	sqlite3_stmt *stmt = NULL;
+	if (!g_db || !seq || !session || !text) return -1;
+	sqlite3_mutex *mutex = sqlite3_db_mutex(g_db);
+	sqlite3_mutex_enter(mutex);
+	int rc = -1;
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+	    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)session_size) == SQLITE_OK &&
+	    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)text_size) == SQLITE_OK) {
+		int step = sqlite3_step(stmt);
+		if (step == SQLITE_ROW) {
+			int64_t claimed = sqlite3_column_int64(stmt, 0);
+			const char *saved_session = (const char *)sqlite3_column_text(stmt, 1);
+			const char *saved_text = (const char *)sqlite3_column_text(stmt, 2);
+			if (saved_session && saved_text) {
+				memcpy(session, saved_session, strlen(saved_session) + 1);
+				memcpy(text, saved_text, strlen(saved_text) + 1);
+				if (sqlite3_step(stmt) == SQLITE_DONE) {
+					*seq = claimed;
+					rc = 1;
+				}
+			}
+		} else if (step == SQLITE_DONE) {
+			rc = 0;
+		}
+	}
+	if (sqlite3_finalize(stmt) != SQLITE_OK) rc = -1;
+	sqlite3_mutex_leave(mutex);
+	return rc;
+}
+
+int webchat_store_finish(int64_t seq, const char *reply)
+{
+	const char *sql = "UPDATE webchat_turns SET state=2, reply=?1 WHERE seq=?2 AND state=1";
+	sqlite3_stmt *stmt = NULL;
+	if (!g_db || seq <= 0 || !reply) return -1;
+	sqlite3_mutex *mutex = sqlite3_db_mutex(g_db);
+	sqlite3_mutex_enter(mutex);
+	int rc = -1;
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+	    sqlite3_bind_text(stmt, 1, reply, -1, SQLITE_STATIC) == SQLITE_OK &&
+	    sqlite3_bind_int64(stmt, 2, seq) == SQLITE_OK &&
+	    sqlite3_step(stmt) == SQLITE_DONE)
+		rc = sqlite3_changes(g_db) == 1 ? 0 : WEBCHAT_FINISH_NOT_RUNNING;
+	if (sqlite3_finalize(stmt) != SQLITE_OK) rc = -1;
+	sqlite3_mutex_leave(mutex);
+	return rc;
+}
+
+int webchat_store_recover(void)
+{
+	/* Do not replay a turn that could already have run a tool. */
+	const char *sql = "UPDATE webchat_turns SET state=2, "
+		"reply='Gateway restarted before it recorded a reply.' WHERE state=1";
+	return g_db && sqlite3_exec(g_db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
+}
+
+static int webchat_store_exists(const char *sql, const char *session)
+{
+	sqlite3_stmt *stmt = NULL;
+	if (!g_db || sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
+		return -1;
+	int rc = -1;
+	if (sqlite3_bind_text(stmt, 1, session, -1, SQLITE_STATIC) == SQLITE_OK) {
+		int step = sqlite3_step(stmt);
+		if (step == SQLITE_ROW) rc = 1;
+		if (step == SQLITE_DONE) rc = 0;
+	}
+	return sqlite3_finalize(stmt) == SQLITE_OK ? rc : -1;
+}
+
+int webchat_store_has_history(const char *session)
+{
+	return webchat_store_exists(
+		"SELECT 1 FROM webchat_turns WHERE session=?1 AND state<>3 LIMIT 1", session);
+}
+
+int webchat_store_delete(const char *session)
+{
+	if (!g_db || !session) return -1;
+	/* Keep only the receipt and its sequence so an old retry cannot run again. */
+	char *sql = sqlite3_mprintf("DELETE FROM sessions WHERE id=%Q;"
+		"UPDATE webchat_turns SET text='', reply=NULL, state=3 WHERE session=%Q AND state=2;",
+		session, session);
+	if (!sql) return -1;
+
+	/* Keep other WebChat requests out of the transaction on this connection. */
+	sqlite3_mutex *mutex = sqlite3_db_mutex(g_db);
+	sqlite3_mutex_enter(mutex);
+	int rc = -1;
+	if (sqlite3_exec(g_db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK) {
+		int busy = webchat_store_exists(
+			"SELECT 1 FROM webchat_turns WHERE session=?1 AND state<2 LIMIT 1", session);
+		if (busy == 1) {
+			rc = WEBCHAT_DELETE_BUSY;
+		} else if (busy == 0) {
+			sqlite3_int64 before = sqlite3_total_changes64(g_db);
+			if (sqlite3_exec(g_db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+			    sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK)
+				rc = sqlite3_total_changes64(g_db) == before ? WEBCHAT_DELETE_NOT_FOUND : 0;
+		}
+		if (!sqlite3_get_autocommit(g_db))
+			sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
+	}
+	sqlite3_mutex_leave(mutex);
+	sqlite3_free(sql);
+	return rc;
+}
+
+int webchat_store_history(const char *session, int64_t after, char *out, size_t size)
+{
+	const char *sql = "WITH cleared AS (SELECT MAX(seq) AS seq FROM webchat_turns "
+		"WHERE session=?1 AND state=3) "
+		"SELECT json_object('clearedThrough',seq), 3, 0 FROM cleared WHERE seq IS NOT NULL "
+		"UNION ALL SELECT * FROM ("
+		"SELECT json_object('seq',seq,'id',request,'text',text,'reply',reply), state, seq "
+		"FROM webchat_turns WHERE session=?1 AND state<>3 "
+		"AND seq>MAX(?2, COALESCE((SELECT seq FROM cleared),0)) ORDER BY seq LIMIT 32"
+		") ORDER BY 3";
+	sqlite3_stmt *stmt = NULL;
+	if (!g_db || size < 3 || sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
+		return -1;
+	if (sqlite3_bind_text(stmt, 1, session, -1, SQLITE_STATIC) != SQLITE_OK ||
+	    sqlite3_bind_int64(stmt, 2, after) != SQLITE_OK) {
+		sqlite3_finalize(stmt);
+		return -1;
+	}
+	size_t used = 1;
+	out[0] = '[';
+	int step;
+	int rc = 0;
+	while ((step = sqlite3_step(stmt)) == SQLITE_ROW) {
+		const char *row = (const char *)sqlite3_column_text(stmt, 0);
+		size_t len = (size_t)sqlite3_column_bytes(stmt, 0);
+		if (!row || len + 3 > size - used) {
+			if (used == 1 || !row) rc = -1;
+			break;
+		}
+		if (used > 1) out[used++] = ',';
+		memcpy(out + used, row, len);
+		used += len;
+		/* The reader must revisit an unfinished turn before advancing. */
+		if (sqlite3_column_int(stmt, 1) < 2) break;
+	}
+	out[used++] = ']';
+	out[used] = '\0';
+	if (step != SQLITE_DONE && step != SQLITE_ROW) rc = -1;
+	return sqlite3_finalize(stmt) == SQLITE_OK ? rc : -1;
 }
 
 int config_kv_get(const char *key, char *value_out, size_t max_len)

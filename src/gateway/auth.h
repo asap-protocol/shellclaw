@@ -41,6 +41,23 @@ void auth_cleanup(auth_ctx_t *ctx);
  */
 char *auth_get_or_create_pairing_code(auth_ctx_t *ctx);
 
+/** Buffer size for a pairing code and its terminator. */
+#define PAIR_CODE_SIZE 7
+
+/** Lifetime of a code for an additional device, in seconds. */
+#define PAIR_DEVICE_CODE_SECS 300
+
+/**
+ * Issue a temporary code after a local operator authorizes a device.
+ * Call on the gateway thread. Replace any pending code.
+ *
+ * @param ctx Auth context.
+ * @param now Monotonic clock time in seconds.
+ * @param code Buffer for the new code.
+ * @return 0 on success, -1 if the code cannot be issued.
+ */
+int auth_issue_device_code(auth_ctx_t *ctx, time_t now, char code[PAIR_CODE_SIZE]);
+
 /**
  * Pair with code: validate 6-digit code, add token to file, copy to token_out.
  *

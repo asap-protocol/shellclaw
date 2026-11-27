@@ -7,6 +7,7 @@
 #define SHELLCLAW_MEMORY_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -109,6 +110,42 @@ void memory_sqlite_entry_set_hook_for_test(void (*hook)(void));
  * @return Number of sessions returned, or -1 on error.
  */
 int session_list(char **session_ids_out, int max_count);
+
+#define WEBCHAT_PENDING_LIMIT 64
+
+enum { WEBCHAT_ACCEPT_CONFLICT = 1, WEBCHAT_ACCEPT_FULL = 2 };
+
+/** Accept a WebChat turn. Return 0, WEBCHAT_ACCEPT_CONFLICT, WEBCHAT_ACCEPT_FULL, or -1. */
+int webchat_store_accept(const char *session, const char *request, const char *text);
+
+/** Claim the next WebChat turn. Return 1 when claimed, 0 when empty, or -1 on error. */
+int webchat_store_claim(int64_t *seq, char *session, size_t session_size, char *text, size_t text_size);
+
+enum { WEBCHAT_FINISH_NOT_RUNNING = 1 };
+
+/** Save the reply for @p seq. Return 0, WEBCHAT_FINISH_NOT_RUNNING, or -1 on error. */
+int webchat_store_finish(int64_t seq, const char *reply);
+
+/** Finish interrupted turns. Call once after the gateway binds its listen socket. */
+int webchat_store_recover(void);
+
+/** Return 1 if the WebChat transcript contains a turn, 0 if empty, or -1 on error. */
+int webchat_store_has_history(const char *session);
+
+enum { WEBCHAT_DELETE_NOT_FOUND = 1, WEBCHAT_DELETE_BUSY = 2 };
+
+/**
+ * Delete the model context and transcript in one transaction.
+ * Return 0 on success, WEBCHAT_DELETE_NOT_FOUND, WEBCHAT_DELETE_BUSY, or -1 on error.
+ * Hold the agent lock when you call this function.
+ */
+int webchat_store_delete(const char *session);
+
+/**
+ * Read one page of WebChat history as JSON. @p after is the last completed turn's sequence.
+ * Return 0 on success or -1 if the page cannot be read.
+ */
+int webchat_store_history(const char *session, int64_t after, char *out, size_t size);
 
 /**
  * Get a value from config_kv by key.

@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "channels/heartbeat.h"
+#include "channels/webchat.h"
 #include "core/dispatch.h"
 #include "core/agent.h"
 #include "core/bootstrap.h"
@@ -54,13 +55,13 @@ static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_
 {
 	const char *cron_job_id;
 	int send_err;
-	if (!ch || !ch->send || !msg)
+	if (!ch || (!ch->reply && !ch->send) || !msg)
 		return -1;
 	cron_job_id = ch->name && strcmp(ch->name, "cron") == 0 ? msg->user_id : NULL;
 	/* Keep a silent job due until its destination is available. */
 	if (cron_job_id && agent_err == 0 && provider_text_is_blank(text))
 		return maybe_ack_cron(cron_job_id, msg);
-	send_err = ch->send(msg->session_id, text, NULL, 0);
+	send_err = ch->reply ? ch->reply(msg, text) : ch->send(msg->session_id, text, NULL, 0);
 	if (send_err != 0)
 		return send_err;
 	return agent_err == 0 ? maybe_ack_cron(cron_job_id, NULL) : 0;
@@ -88,7 +89,10 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 		agent_lock();
 		session_delete(msg->session_id);
 		agent_unlock();
-		return send_then_maybe_ack_cron(ch, msg, "Session cleared.", 0);
+		const char *reply = "Session cleared.";
+		if (msg->session_id && strncmp(msg->session_id, WEBCHAT_DEVICE_PREFIX, sizeof(WEBCHAT_DEVICE_PREFIX) - 1) == 0)
+			reply = "Model context cleared. The transcript stays visible.";
+		return send_then_maybe_ack_cron(ch, msg, reply, 0);
 	}
 	if (strcmp(text, "/status") == 0) {
 		char buf[128];

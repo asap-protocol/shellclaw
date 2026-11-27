@@ -11,6 +11,7 @@
 #include "core/config.h"
 #include "core/version.h"
 #include "cJSON.h"
+#include "sqlite3.h"
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1439,6 +1440,98 @@ static int test_api_cron_toggle_post(const char *token)
 	return 0;
 }
 
+static int test_webchat_accepts_escaped_text(const char *token)
+{
+	char text[32 * 1024 + 1];
+	memset(text, 1, sizeof(text) - 1);
+	text[sizeof(text) - 1] = '\0';
+	cJSON *request = cJSON_CreateObject();
+	ASSERT(request != NULL);
+	ASSERT(cJSON_AddStringToObject(request, "id", "00000000000000000000000000000001"));
+	ASSERT(cJSON_AddStringToObject(request, "text", text));
+	char *json = cJSON_PrintUnformatted(request);
+	cJSON_Delete(request);
+	ASSERT(json && strlen(json) > 65536);
+	long status;
+	char *body = NULL;
+	int posted = http_post_auth(gw_url("/api/chat"), token, json, &status, &body);
+	cJSON_free(json);
+	free(body);
+	ASSERT(posted == 0 && status == 200);
+
+	ASSERT(http_get_auth(gw_url("/api/chat"), token, &status, &body) == 0);
+	ASSERT(status == 200 && body);
+	cJSON *history = cJSON_Parse(body);
+	free(body);
+	const cJSON *turn = cJSON_GetArrayItem(history, 0);
+	const char *saved = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(turn, "text"));
+	int same = saved && strcmp(saved, text) == 0;
+	cJSON_Delete(history);
+	ASSERT(same);
+	return 0;
+}
+
+static int webchat_post_status(const char *token, unsigned int id, const char *message)
+{
+	char json[128];
+	char *body = NULL;
+	long status;
+	snprintf(json, sizeof(json), "{\"id\":\"%032x\",\"text\":\"%s\"}", id, message);
+	int rc = http_post_auth(gw_url("/api/chat"), token, json, &status, &body);
+	free(body);
+	return rc == 0 ? (int)status : -1;
+}
+
+static int test_webchat_backlog(const char *token, const char *db_path)
+{
+	sqlite3 *db = NULL;
+	ASSERT(sqlite3_open(db_path, &db) == SQLITE_OK);
+	ASSERT(sqlite3_busy_timeout(db, 3000) == SQLITE_OK);
+	const char *prepare =
+		"CREATE TRIGGER defer_chat_claim BEFORE UPDATE ON webchat_turns "
+		"WHEN old.state=0 AND new.state=1 BEGIN SELECT RAISE(ABORT, 'Pause queue'); END;"
+		"CREATE TABLE chat_test_observations(pending INTEGER);"
+		"CREATE TRIGGER start_cron_after_chat AFTER UPDATE ON webchat_turns "
+		"WHEN new.session='chat-test-fixture' AND new.request='1' AND new.state=2 "
+		"BEGIN INSERT INTO cron_jobs(id,schedule,message,channel,recipient,next_run) "
+		"VALUES('webchat-fair-cron','at:1','/status','cli','default',1); END;"
+		"CREATE TRIGGER observe_cron AFTER DELETE ON cron_jobs WHEN old.id='webchat-fair-cron' "
+		"BEGIN INSERT INTO chat_test_observations SELECT COUNT(*) FROM webchat_turns "
+		"WHERE session='chat-test-fixture' AND state=0; END;"
+		"WITH RECURSIVE turns(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM turns WHERE n<64) "
+		"INSERT INTO webchat_turns(session,request,text) "
+		"SELECT 'chat-test-fixture',CAST(n AS TEXT),'/status' FROM turns;";
+	ASSERT(webchat_post_status(token, 2, "/status") == 200);
+	ASSERT(sqlite3_exec(db, prepare, NULL, NULL, NULL) == SQLITE_OK);
+	int receipt = webchat_post_status(token, 2, "/status");
+	int conflict = webchat_post_status(token, 2, "/reset");
+	int capacity = webchat_post_status(token, 3, "/status");
+
+	ASSERT(sqlite3_exec(db, "DROP TRIGGER defer_chat_claim", NULL, NULL, NULL) == SQLITE_OK);
+	int pending = -1;
+	for (int attempt = 0; attempt < 60 && pending < 0; attempt++) {
+		sqlite3_stmt *check = NULL;
+		ASSERT(sqlite3_prepare_v2(db, "SELECT pending FROM chat_test_observations", -1, &check, NULL) == SQLITE_OK);
+		if (sqlite3_step(check) == SQLITE_ROW)
+			pending = sqlite3_column_int(check, 0);
+		ASSERT(sqlite3_finalize(check) == SQLITE_OK);
+		if (pending < 0)
+			nanosleep(&(const struct timespec){.tv_nsec = 50000000L}, NULL);
+	}
+
+	const char *cleanup =
+		"DELETE FROM webchat_turns WHERE session='chat-test-fixture';"
+		"DROP TRIGGER start_cron_after_chat; DROP TRIGGER observe_cron; DROP TABLE chat_test_observations;";
+	ASSERT(sqlite3_exec(db, cleanup, NULL, NULL, NULL) == SQLITE_OK);
+	ASSERT(sqlite3_close(db) == SQLITE_OK);
+	int retry = webchat_post_status(token, 3, "/status");
+	if (capacity != 503 || pending != 63)
+		fprintf(stderr, "WebChat capacity status = %d, queued when cron ran = %d\n", capacity, pending);
+	ASSERT(receipt == 200 && conflict == 409 && capacity == 503 && retry == 200);
+	ASSERT(pending == 63);
+	return 0;
+}
+
 static int test_api_sessions(const char *token)
 {
 	long code;
@@ -1892,6 +1985,14 @@ int main(int argc, char **argv)
 		if (test_api_cron_create_delete(token) != 0) { fprintf(stderr, "test_api_cron_create_delete failed\n"); failed++; }
 		if (test_api_cron_toggle_post(token) != 0) { fprintf(stderr, "test_api_cron_toggle_post failed\n"); failed++; }
 		if (test_api_sessions(token) != 0) { fprintf(stderr, "test_api_sessions failed\n"); failed++; }
+		if (test_webchat_accepts_escaped_text(token) != 0) {
+			fprintf(stderr, "test_webchat_accepts_escaped_text failed\n");
+			failed++;
+		}
+		if (test_webchat_backlog(token, db_path) != 0) {
+			fprintf(stderr, "test_webchat_backlog failed\n");
+			failed++;
+		}
 		if (test_api_asap_log(token) != 0) { fprintf(stderr, "test_api_asap_log failed\n"); failed++; }
 		if (test_api_hardware_board_get(token) != 0) {
 			fprintf(stderr, "test_api_hardware_board_get failed\n");

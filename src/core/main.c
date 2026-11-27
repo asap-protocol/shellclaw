@@ -26,6 +26,9 @@
 #include "core/version.h"
 #include "channels/channel.h"
 #include "hardware/board_detect.h"
+#ifdef SHELLCLAW_GATEWAY
+#include "gateway/http.h"
+#endif
 #include "providers/provider.h"
 #include <curl/curl.h>
 #include <signal.h>
@@ -48,6 +51,16 @@ static void on_signal(int sig)
 	g_shutdown = 1;
 }
 
+#ifdef SHELLCLAW_GATEWAY
+static volatile sig_atomic_t g_pair_requested;
+
+static void on_pair_request(int sig)
+{
+	(void)sig;
+	g_pair_requested = 1;
+}
+#endif
+
 static void setup_signals(void)
 {
 	struct sigaction sa;
@@ -58,6 +71,11 @@ static void setup_signals(void)
 		fprintf(stderr, "warning: sigaction(SIGINT) failed\n");
 	if (sigaction(SIGTERM, &sa, NULL) != 0)
 		fprintf(stderr, "warning: sigaction(SIGTERM) failed\n");
+#ifdef SHELLCLAW_GATEWAY
+	sa.sa_handler = on_pair_request;
+	if (sigaction(SIGUSR1, &sa, NULL) != 0)
+		fprintf(stderr, "Cannot register SIGUSR1 for device pairing.\n");
+#endif
 	sa.sa_handler = on_hup;
 	if (sigaction(SIGHUP, &sa, NULL) != 0)
 		fprintf(stderr, "warning: sigaction(SIGHUP) failed\n");
@@ -77,13 +95,22 @@ static void main_loop(int one_shot, config_t **pcfg)
 		memset(&msg, 0, sizeof(msg));
 		int got = 0;
 		const channel_t *which = NULL;
+		static int next_channel;
 		int nch = bootstrap_channel_count();
-		for (int i = 0; i < nch && !got; i++) {
+		for (int visited = 0; visited < nch && !got; visited++) {
+			int i = (next_channel + visited) % nch;
+#ifdef SHELLCLAW_GATEWAY
+			if (g_pair_requested) {
+				g_pair_requested = 0;
+				http_request_pairing_code();
+			}
+#endif
 			const channel_t *ch = bootstrap_channel_at(i);
 			if (!ch)
 				continue;
 			int r = ch->poll(&msg, POLL_TIMEOUT_MS);
 			if (r == 1) {
+				next_channel = (i + 1) % nch;
 				got = 1;
 				which = ch;
 				break;

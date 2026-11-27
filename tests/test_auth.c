@@ -27,7 +27,7 @@
 
 static void format_dummy_token(char *out, size_t out_size, int index)
 {
-	/* Deterministic 32-char hex so eviction of index 0 is observable. */
+	/* Use deterministic tokens to verify that all devices remain paired. */
 	snprintf(out, out_size, "%032d", index);
 }
 
@@ -273,17 +273,31 @@ static int test_auth_multi_token(void)
 	ASSERT(auth_validate_token(ctx1, token1) == 1);
 	free(code1);
 	auth_cleanup(ctx1);
-	/* Second pairing — need to delete tokens file to trigger new pairing code. */
-	/* But we want to test that tokens accumulate, so we re-init and manually write
-	   a state that allows a new pairing (empty tokens file but keep existing tokens
-	   by writing them back after getting the code). Instead, test via validate: */
-	/* Verify first token still works after file exists. */
+	/* An existing token does not open pairing automatically after restart. */
 	auth_ctx_t *ctx2 = auth_init(path);
 	ASSERT(ctx2 != NULL);
 	ASSERT(auth_validate_token(ctx2, token1) == 1);
-	/* No new pairing available since file is non-empty (expected behavior). */
-	char *code2 = auth_get_or_create_pairing_code(ctx2);
-	ASSERT(code2 == NULL);
+	ASSERT(auth_get_or_create_pairing_code(ctx2) == NULL);
+
+	char expired[7];
+	struct timespec now;
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+	ASSERT(auth_issue_device_code(ctx2, now.tv_sec - PAIR_DEVICE_CODE_SECS, expired) == 0);
+	char token2[64] = {0};
+	ASSERT(auth_pair(ctx2, expired, token2, sizeof(token2)) != 0);
+	ASSERT(auth_validate_token(ctx2, token1) == 1);
+
+	char code2[7];
+	char code3[7];
+	ASSERT(auth_issue_device_code(ctx2, now.tv_sec, code2) == 0);
+	ASSERT(auth_issue_device_code(ctx2, now.tv_sec, code3) == 0);
+	ASSERT(strcmp(code2, code3) != 0);
+	ASSERT(auth_pair(ctx2, code2, token2, sizeof(token2)) != 0);
+	ASSERT(auth_pair(ctx2, code3, token2, sizeof(token2)) == 0);
+	ASSERT(strcmp(token1, token2) != 0);
+	ASSERT(auth_pair(ctx2, code3, token2, sizeof(token2)) != 0);
+	ASSERT(auth_validate_token(ctx2, token1) == 1);
+	ASSERT(auth_validate_token(ctx2, token2) == 1);
 	auth_cleanup(ctx2);
 	unlink(path);
 	return 0;
@@ -439,7 +453,7 @@ static int test_auth_pair_rejects_malformed_code(void)
 	return 0;
 }
 
-static int test_auth_pair_evicts_oldest_at_cap(void)
+static int test_auth_pair_preserves_tokens_at_cap(void)
 {
 	const char *path = "/tmp/shellclaw_test_tokens_cap.json";
 	auth_ctx_t *ctx;
@@ -459,17 +473,20 @@ static int test_auth_pair_evicts_oldest_at_cap(void)
 	 * seed 16 tokens on disk before auth_pair appends (multi-device cap).
 	 */
 	ASSERT(write_token_array(path, TEST_AUTH_TOKEN_CAP) == 0);
+	struct timespec now;
+	char extra[PAIR_CODE_SIZE];
+	ASSERT(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+	ASSERT(auth_issue_device_code(ctx, now.tv_sec, extra) != 0);
 	format_dummy_token(oldest, sizeof(oldest), 0);
 	format_dummy_token(newest_seed, sizeof(newest_seed), TEST_AUTH_TOKEN_CAP - 1);
 	ASSERT(auth_validate_token(ctx, oldest) == 1);
 	ASSERT(auth_validate_token(ctx, newest_seed) == 1);
 
 	memset(token, 0, sizeof(token));
-	ASSERT(auth_pair(ctx, code, token, sizeof(token)) == 0);
-	ASSERT(strlen(token) == TEST_TOKEN_HEX_LEN);
-	ASSERT(auth_validate_token(ctx, token) == 1);
+	ASSERT(auth_pair(ctx, code, token, sizeof(token)) != 0);
+	ASSERT(token[0] == '\0');
 	ASSERT(read_token_array_size(path) == TEST_AUTH_TOKEN_CAP);
-	ASSERT(auth_validate_token(ctx, oldest) == 0);
+	ASSERT(auth_validate_token(ctx, oldest) == 1);
 	ASSERT(auth_validate_token(ctx, newest_seed) == 1);
 
 	free(code);
@@ -581,7 +598,7 @@ int main(void)
 	if (test_pair_lockout_null_ip() != 0) { fprintf(stderr, "test_pair_lockout_null_ip failed\n"); failed++; }
 	if (test_auth_pair_fails_closed_on_urandom_failure() != 0) { fprintf(stderr, "test_auth_pair_fails_closed_on_urandom_failure failed\n"); failed++; }
 	if (test_auth_pair_rejects_malformed_code() != 0) { fprintf(stderr, "test_auth_pair_rejects_malformed_code failed\n"); failed++; }
-	if (test_auth_pair_evicts_oldest_at_cap() != 0) { fprintf(stderr, "test_auth_pair_evicts_oldest_at_cap failed\n"); failed++; }
+	if (test_auth_pair_preserves_tokens_at_cap() != 0) { fprintf(stderr, "test_auth_pair_preserves_tokens_at_cap failed\n"); failed++; }
 	if (test_auth_validate_token_rejects_length_mismatch() != 0) { fprintf(stderr, "test_auth_validate_token_rejects_length_mismatch failed\n"); failed++; }
 	if (test_pair_lockout_table_full_evicts_slot_zero() != 0) { fprintf(stderr, "test_pair_lockout_table_full_evicts_slot_zero failed\n"); failed++; }
 	if (failed == 0)

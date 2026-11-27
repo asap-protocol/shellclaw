@@ -7,6 +7,7 @@
 #define SHELLCLAW_CHANNEL_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,7 @@ typedef struct channel_incoming_msg {
 	char *text;                 /**< Message text (may be empty for photo-only) */
 	channel_attachment_t *attachments;
 	size_t attachments_count;
+	int64_t turn_seq;           /**< Persistent turn sequence, or 0 if absent. */
 } channel_incoming_msg_t;
 
 /** Clear and free incoming message fields. Safe to call repeatedly or on zeroed. */
@@ -122,6 +124,8 @@ typedef struct channel {
 	            const channel_attachment_t *attachments, size_t att_count);
 	/** Release channel resources. */
 	void (*cleanup)(void);
+	/** Optional. Reply to a specific incoming message. Return 0 on success. */
+	int (*reply)(const channel_incoming_msg_t *msg, const char *text);
 } channel_t;
 
 #define MAX_REGISTERED_CHANNELS 8

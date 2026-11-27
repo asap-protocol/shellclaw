@@ -44,10 +44,10 @@ int asap_http_body_parse_content_length(const char *cl_buf, long *cl_out);
 int asap_http_body_exceeds_static_cap(const asap_http_body_t *body, long content_length);
 
 /**
- * For POST /asap: validate Content-Length and allocate dynamic buffer.
- * @return 0 ok, -1 body too large, -2 allocation failure; non-/asap returns 0.
+ * Allocate a dynamic buffer for a route with a larger request limit.
+ * Return 0 on success, -1 for an invalid length, or -2 on allocation failure.
  */
-int asap_http_body_init_from_request(struct lws *wsi, asap_http_body_t *body);
+int asap_http_body_init_from_request(struct lws *wsi, asap_http_body_t *body, size_t limit);
 
 void asap_http_body_append(asap_http_body_t *body, const void *in, size_t len);
 void asap_http_body_free(asap_http_body_t *body);

@@ -1,6 +1,6 @@
 /**
  * @file webchat.h
- * @brief WebChat channel: WebSocket-based channel for agent loop.
+ * @brief WebChat channel for paired devices and native WebSocket clients.
  */
 
 #ifndef SHELLCLAW_CHANNEL_WEBCHAT_H
@@ -12,7 +12,9 @@
 extern "C" {
 #endif
 
-/** WebChat channel: poll returns from WS queue, send pushes to WS. */
+#define WEBCHAT_DEVICE_PREFIX "webchat:device:"
+
+/** Return the channel for paired devices and native WebSocket clients. */
 const channel_t *channel_webchat_get(void);
 
 #ifdef __cplusplus

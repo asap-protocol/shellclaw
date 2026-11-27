@@ -109,6 +109,7 @@ void channel_incoming_msg_clear(channel_incoming_msg_t *msg)
 	msg->user_id = NULL;
 	free(msg->text);
 	msg->text = NULL;
+	msg->turn_seq = 0;
 	if (msg->attachments) {
 		for (size_t i = 0; i < msg->attachments_count; i++)
 			free(msg->attachments[i].path_or_base64);

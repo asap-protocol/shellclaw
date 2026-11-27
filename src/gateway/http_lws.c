@@ -7,6 +7,7 @@
 #include "gateway/http_lws.h"
 #include "gateway/asap_http_body.h"
 #include "gateway/routes.h"
+#include "gateway/routes_webchat.h"
 #include "gateway/auth.h"
 #include "gateway/uri_match.h"
 #include "gateway/static.h"
@@ -212,7 +213,9 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 			http_lws_tx_completed(wsi);
 			return 0;
 		}
-		conn->response = malloc(RESP_BUF_SIZE);
+		int chat = uri_exact_eq(uri, uri_len, WEBCHAT_ROUTE);
+		size_t response_size = chat && method == HTTP_GET ? WEBCHAT_RESPONSE_SIZE : RESP_BUF_SIZE;
+		conn->response = malloc(response_size);
 		if (!conn->response) {
 			free(conn);
 			lws_return_http_status(wsi, 500, "Internal error");
@@ -222,10 +225,10 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 		conn->response[0] = '\0';
 		conn->status = 200;
 		conn->has_body = (method == HTTP_POST || method == HTTP_PUT);
-		/* For /asap POST: enforce 1 MB body cap via Content-Length and allocate
-		 * a dynamic buffer so large envelopes are not silently truncated. */
-		if (conn->has_body && uri_exact_eq(uri, uri_len, "/asap")) {
-			int body_rc = asap_http_body_init_from_request(wsi, &conn->body);
+		/* WebChat text can exceed the static cap after JSON escaping. */
+		if (method == HTTP_POST && (chat || uri_exact_eq(uri, uri_len, "/asap"))) {
+			size_t limit = chat ? WEBCHAT_REQUEST_SIZE : ASAP_BODY_MAX;
+			int body_rc = asap_http_body_init_from_request(wsi, &conn->body, limit);
 			if (body_rc == -1) {
 				free(conn->response);
 				free(conn);
@@ -263,7 +266,7 @@ int http_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 			}
 		}
 		if (!conn->has_body) {
-			dispatch_route(ctx, wsi, method, uri, uri_len, NULL, 0, conn->response, RESP_BUF_SIZE, &conn->status);
+			dispatch_route(ctx, wsi, method, uri, uri_len, NULL, 0, conn->response, response_size, &conn->status);
 			conn->response_len = strlen(conn->response);
 			lws_set_wsi_user(wsi, conn);
 			lws_callback_on_writable(wsi);

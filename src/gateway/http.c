@@ -6,18 +6,22 @@
 
 #include "gateway/http.h"
 #include "gateway/http_lws.h"
+#include "core/memory.h"
 #include "gateway/ws.h"
 #include "gateway/ws_rx.h"
 #include "providers/provider.h"
+#include "gateway/auth.h"
 #include "cJSON.h"
 #include <libwebsockets.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 static http_server_ctx_t *g_ctx;
+static atomic_int g_pair_requested;
 
 http_server_ctx_t *http_ctx_get(void)
 {
@@ -98,11 +102,41 @@ void http_set_live_config(const config_t *cfg)
 	g_ctx->cfg = cfg;
 }
 
+void http_request_pairing_code(void)
+{
+	if (!g_ctx) {
+		fprintf(stderr, "Start the gateway before you authorize device pairing.\n");
+		return;
+	}
+	atomic_store(&g_pair_requested, 1);
+	lws_cancel_service(g_ctx->lws_ctx);
+}
+
+static void issue_device_code(auth_ctx_t *auth)
+{
+	char code[PAIR_CODE_SIZE];
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
+	    auth_issue_device_code(auth, now.tv_sec, code) != 0) {
+		fprintf(stderr, "Cannot issue a pairing code. Check the token store and device limit.\n");
+		return;
+	}
+	printf("ShellClaw pairing code: %s\n", code);
+	fflush(stdout);
+}
+
+static void service_gateway(http_server_ctx_t *ctx)
+{
+	if (atomic_exchange(&g_pair_requested, 0))
+		issue_device_code(ctx->auth);
+	lws_service(ctx->lws_ctx, 50);
+}
+
 static void *http_thread_fn(void *arg)
 {
 	http_server_ctx_t *ctx = arg;
 	while (ctx->running && ctx->lws_ctx)
-		lws_service(ctx->lws_ctx, 50);
+		service_gateway(ctx);
 	return NULL;
 }
 
@@ -134,7 +168,8 @@ int http_start(const config_t *cfg, struct auth_ctx *auth_ctx, const char *confi
 #endif
 	info.mounts = &mount_ws;
 	ctx->lws_ctx = lws_create_context(&info);
-	if (!ctx->lws_ctx) {
+	if (!ctx->lws_ctx || webchat_store_recover() != 0) {
+		if (ctx->lws_ctx) lws_context_destroy(ctx->lws_ctx);
 		free(ctx->config_path);
 		free(ctx);
 		return -1;
