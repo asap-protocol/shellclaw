@@ -190,8 +190,12 @@
     const token = getToken();
     if (!token) { window.location.hash = '#/pair'; return; }
     const page = pageVersion;
+    const list = ++listVersion;
+    const current = () => page === pageVersion && list === listVersion;
+    const refresh = () => { if (page === pageVersion) renderSkills(); };
+    const reportError = err => { if (page === pageVersion) alert('Error: ' + err); };
     api('GET', '/api/skills').then(arr => {
-      if (page !== pageVersion) return;
+      if (!current()) return;
       let html = '<h1>Skills</h1><ul class="skill-list" id="skill-list"></ul>' +
         '<h2>Create skill</h2><form id="skill-create"><input name="name" placeholder="Name"><textarea name="content" placeholder="Content" rows="4"></textarea><button type="submit">Create</button></form>';
       render(app, html);
@@ -201,16 +205,16 @@
         li.innerHTML = '<span>' + escapeHtml(n) + '</span><span><a href="#/skills/' + encodeURIComponent(n) + '">View</a> <button class="danger" data-delete>Delete</button></span>';
         li.querySelector('[data-delete]').onclick = () => {
           if (!confirm('Delete ' + n + '?')) return;
-          api('DELETE', '/api/skills/' + encodeURIComponent(n)).then(() => { if (page === pageVersion) renderSkills(); }).catch(err => { if (page === pageVersion) alert('Error: ' + err); });
+          api('DELETE', '/api/skills/' + encodeURIComponent(n)).then(refresh).catch(reportError);
         };
         ul.appendChild(li);
       });
       document.getElementById('skill-create').onsubmit = function (e) {
         e.preventDefault();
         const f = e.target;
-        api('POST', '/api/skills', { name: f.name.value, content: f.content.value }).then(() => { if (page === pageVersion) renderSkills(); }).catch(err => { if (page === pageVersion) alert('Error: ' + err); });
+        api('POST', '/api/skills', { name: f.name.value, content: f.content.value }).then(refresh).catch(reportError);
       };
-    }).catch(e => { if (page === pageVersion) render(app, '<h1>Skills</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
+    }).catch(e => { if (current()) render(app, '<h1>Skills</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
   }
 
   function renderSkillView(name) {
@@ -244,8 +248,12 @@
     const token = getToken();
     if (!token) { window.location.hash = '#/pair'; return; }
     const page = pageVersion;
+    const list = ++listVersion;
+    const current = () => page === pageVersion && list === listVersion;
+    const refresh = () => { if (page === pageVersion) renderSessions(); };
+    const reportError = err => { if (page === pageVersion) alert('Error: ' + err); };
     api('GET', '/api/sessions').then(arr => {
-      if (page !== pageVersion) return;
+      if (!current()) return;
       let html = '<h1>Sessions</h1><ul class="session-list" id="session-list"></ul>';
       render(app, html);
       const ul = document.getElementById('session-list');
@@ -254,11 +262,11 @@
         li.innerHTML = '<span>' + escapeHtml(id) + '</span><button class="danger" data-delete>Delete</button>';
         li.querySelector('[data-delete]').onclick = () => {
           if (!confirm('Delete session ' + id + '?')) return;
-          api('DELETE', '/api/sessions/' + encodeURIComponent(id)).then(() => { if (page === pageVersion) renderSessions(); }).catch(err => { if (page === pageVersion) alert('Error: ' + err); });
+          api('DELETE', '/api/sessions/' + encodeURIComponent(id)).then(refresh).catch(reportError);
         };
         ul.appendChild(li);
       });
-    }).catch(e => { if (page === pageVersion) render(app, '<h1>Sessions</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
+    }).catch(e => { if (current()) render(app, '<h1>Sessions</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
   }
 
   function renderCron() {
@@ -498,6 +506,7 @@
 
   const app = document.getElementById('app');
   let pageVersion = 0;
+  let listVersion = 0;
   function navigate() {
     pageVersion++;
     stopDashboardLive();
