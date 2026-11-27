@@ -152,6 +152,7 @@
     const draft = readChatDraft(token);
     const turns = new Map();
     let cursor = 0;
+    let clearedThrough = 0;
     let timer;
     let refreshing = false;
     let sendError = '';
@@ -197,6 +198,19 @@
 
     function showHistory(rows) {
       for (const row of rows) {
+        if (row.clearedThrough !== undefined) {
+          if (row.clearedThrough > clearedThrough) {
+            clearedThrough = row.clearedThrough;
+            cursor = Math.max(cursor, clearedThrough);
+            turns.forEach((turn, seq) => {
+              if (seq <= clearedThrough) {
+                turn.remove();
+                turns.delete(seq);
+              }
+            });
+          }
+          continue;
+        }
         let turn = turns.get(row.seq);
         if (!turn) {
           turn = document.createElement('div');
@@ -221,7 +235,8 @@
         const rows = await response.json();
         if (signal.aborted || getToken() !== token) return;
         showHistory(rows);
-        if (rows.length) wait = rows.some(row => row.reply === null) ? 400 : 0;
+        if (rows.some(row => row.seq !== undefined))
+          wait = rows.some(row => row.reply === null) ? 400 : 0;
         if (draft.pending) {
           const result = await request('POST', '/api/chat', { id: draft.pending.id, text: draft.pending.text });
           if (result.ok && (await result.json()).accepted === true) {

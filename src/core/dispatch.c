@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "channels/heartbeat.h"
+#include "channels/webchat.h"
 #include "core/dispatch.h"
 #include "core/agent.h"
 #include "core/bootstrap.h"
@@ -88,7 +89,10 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 		agent_lock();
 		session_delete(msg->session_id);
 		agent_unlock();
-		return send_then_maybe_ack_cron(ch, msg, "Session cleared.", 0);
+		const char *reply = "Session cleared.";
+		if (msg->session_id && strncmp(msg->session_id, WEBCHAT_DEVICE_PREFIX, sizeof(WEBCHAT_DEVICE_PREFIX) - 1) == 0)
+			reply = "Model context cleared. The transcript stays visible.";
+		return send_then_maybe_ack_cron(ch, msg, reply, 0);
 	}
 	if (strcmp(text, "/status") == 0) {
 		char buf[128];

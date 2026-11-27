@@ -532,10 +532,14 @@ static void handle_memory_get(const char *query, int limit, char *buf, size_t si
 	}
 }
 
+static int is_device_session(const char *id)
+{
+	return strncmp(id, WEBCHAT_DEVICE_PREFIX, sizeof(WEBCHAT_DEVICE_PREFIX) - 1) == 0;
+}
+
 static int can_access_session(const char *id, const char *device_session)
 {
-	return strncmp(id, WEBCHAT_DEVICE_PREFIX, sizeof(WEBCHAT_DEVICE_PREFIX) - 1) != 0 ||
-		strcmp(id, device_session) == 0;
+	return !is_device_session(id) || strcmp(id, device_session) == 0;
 }
 
 static void handle_sessions_list(const char *device_session, char *buf, size_t size, int *status)
@@ -547,11 +551,16 @@ static void handle_sessions_list(const char *device_session, char *buf, size_t s
 	agent_unlock();
 	cJSON *arr = cJSON_CreateArray();
 	if (!arr) { json_error(buf, size, status, 500, "Internal error"); return; }
+	int listed_device = 0;
 	for (int i = 0; i < n; i++) {
 		if (can_access_session(ids[i], device_session))
 			cJSON_AddItemToArray(arr, cJSON_CreateString(ids[i]));
+		if (strcmp(ids[i], device_session) == 0)
+			listed_device = 1;
 		free(ids[i]);
 	}
+	if (!listed_device && device_session[0] && webchat_store_has_history(device_session) == 1)
+		cJSON_AddItemToArray(arr, cJSON_CreateString(device_session));
 	char *s = cJSON_PrintUnformatted(arr);
 	cJSON_Delete(arr);
 	if (s) {
@@ -564,7 +573,20 @@ static void handle_sessions_list(const char *device_session, char *buf, size_t s
 
 static void handle_session_delete(const char *id, char *buf, size_t size, int *status)
 {
-	if (dispatch_delete_session(id) != 0) {
+	if (is_device_session(id)) {
+		agent_lock();
+		int rc = webchat_store_delete(id);
+		agent_unlock();
+		if (rc == WEBCHAT_DELETE_BUSY) {
+			json_error(buf, size, status, 409, "Wait for the current message before you delete this conversation");
+			return;
+		}
+		if (rc != 0) {
+			int code = rc == WEBCHAT_DELETE_NOT_FOUND ? 404 : 500;
+			json_error(buf, size, status, code, code == 404 ? "Session not found" : "Cannot delete the conversation");
+			return;
+		}
+	} else if (dispatch_delete_session(id) != 0) {
 		json_error(buf, size, status, 404, "Session not found");
 		return;
 	}

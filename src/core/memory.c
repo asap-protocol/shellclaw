@@ -346,7 +346,7 @@ int webchat_store_accept(const char *session, const char *request, const char *t
 {
 	const char *sql = "INSERT INTO webchat_turns(session, request, text) VALUES(?1, ?2, ?3) "
 		"ON CONFLICT(session, request) DO UPDATE SET request=excluded.request "
-		"WHERE webchat_turns.text=excluded.text RETURNING seq";
+		"WHERE webchat_turns.state<>3 AND webchat_turns.text=excluded.text RETURNING seq";
 	sqlite3_stmt *stmt = NULL;
 	if (!g_db || sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
 		return -1;
@@ -413,10 +413,68 @@ int webchat_store_recover(void)
 	return g_db && sqlite3_exec(g_db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
 }
 
+static int webchat_store_exists(const char *sql, const char *session)
+{
+	sqlite3_stmt *stmt = NULL;
+	if (!g_db || sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
+		return -1;
+	int rc = -1;
+	if (sqlite3_bind_text(stmt, 1, session, -1, SQLITE_STATIC) == SQLITE_OK) {
+		int step = sqlite3_step(stmt);
+		if (step == SQLITE_ROW) rc = 1;
+		if (step == SQLITE_DONE) rc = 0;
+	}
+	return sqlite3_finalize(stmt) == SQLITE_OK ? rc : -1;
+}
+
+int webchat_store_has_history(const char *session)
+{
+	return webchat_store_exists(
+		"SELECT 1 FROM webchat_turns WHERE session=?1 AND state<>3 LIMIT 1", session);
+}
+
+int webchat_store_delete(const char *session)
+{
+	if (!g_db || !session) return -1;
+	/* Keep only the receipt and its sequence so an old retry cannot run again. */
+	char *sql = sqlite3_mprintf("DELETE FROM sessions WHERE id=%Q;"
+		"UPDATE webchat_turns SET text='', reply=NULL, state=3 WHERE session=%Q AND state=2;",
+		session, session);
+	if (!sql) return -1;
+
+	/* Keep other WebChat requests out of the transaction on this connection. */
+	sqlite3_mutex *mutex = sqlite3_db_mutex(g_db);
+	sqlite3_mutex_enter(mutex);
+	int rc = -1;
+	if (sqlite3_exec(g_db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK) {
+		int busy = webchat_store_exists(
+			"SELECT 1 FROM webchat_turns WHERE session=?1 AND state<2 LIMIT 1", session);
+		if (busy == 1) {
+			rc = WEBCHAT_DELETE_BUSY;
+		} else if (busy == 0) {
+			sqlite3_int64 before = sqlite3_total_changes64(g_db);
+			if (sqlite3_exec(g_db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+			    sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK)
+				rc = sqlite3_total_changes64(g_db) == before ? WEBCHAT_DELETE_NOT_FOUND : 0;
+		}
+		if (!sqlite3_get_autocommit(g_db))
+			sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
+	}
+	sqlite3_mutex_leave(mutex);
+	sqlite3_free(sql);
+	return rc;
+}
+
 int webchat_store_history(const char *session, int64_t after, char *out, size_t size)
 {
-	const char *sql = "SELECT json_object('seq',seq,'id',request,'text',text,'reply',reply), state "
-		"FROM webchat_turns WHERE session=?1 AND seq>?2 ORDER BY seq LIMIT 32";
+	const char *sql = "WITH cleared AS (SELECT MAX(seq) AS seq FROM webchat_turns "
+		"WHERE session=?1 AND state=3) "
+		"SELECT json_object('clearedThrough',seq), 3, 0 FROM cleared WHERE seq IS NOT NULL "
+		"UNION ALL SELECT * FROM ("
+		"SELECT json_object('seq',seq,'id',request,'text',text,'reply',reply), state, seq "
+		"FROM webchat_turns WHERE session=?1 AND state<>3 "
+		"AND seq>MAX(?2, COALESCE((SELECT seq FROM cleared),0)) ORDER BY seq LIMIT 32"
+		") ORDER BY 3";
 	sqlite3_stmt *stmt = NULL;
 	if (!g_db || size < 3 || sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
 		return -1;

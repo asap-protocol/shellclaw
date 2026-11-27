@@ -123,6 +123,18 @@ int webchat_store_finish(const char *session, const char *reply);
 /** Finish interrupted turns. Call once after the gateway binds its listen socket. */
 int webchat_store_recover(void);
 
+/** Return 1 if the WebChat transcript contains a turn, 0 if empty, or -1 on error. */
+int webchat_store_has_history(const char *session);
+
+enum { WEBCHAT_DELETE_NOT_FOUND = 1, WEBCHAT_DELETE_BUSY = 2 };
+
+/**
+ * Delete the model context and transcript in one transaction.
+ * Return 0 on success, WEBCHAT_DELETE_NOT_FOUND, WEBCHAT_DELETE_BUSY, or -1 on error.
+ * Hold the agent lock when you call this function.
+ */
+int webchat_store_delete(const char *session);
+
 /**
  * Read one page of WebChat history as JSON. @p after is the last completed turn's sequence.
  * Return 0 on success or -1 if the page cannot be read.
