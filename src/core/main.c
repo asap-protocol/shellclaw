@@ -63,7 +63,7 @@ static void setup_signals(void)
 		fprintf(stderr, "warning: sigaction(SIGHUP) failed\n");
 }
 
-static void main_loop(int one_shot, config_t **pcfg)
+static int main_loop(int one_shot, config_t **pcfg)
 {
 	while (!g_shutdown) {
 		if (g_reload_requested) {
@@ -92,12 +92,13 @@ static void main_loop(int one_shot, config_t **pcfg)
 				channel_incoming_msg_clear(&msg);
 		}
 		if (got && which) {
-			handle_message(which, &msg);
+			int result = handle_message(which, &msg);
 			channel_incoming_msg_clear(&msg);
 			if (one_shot)
-				g_shutdown = 1;
+				return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 		}
 	}
+	return one_shot ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 static void print_usage(const char *prog)
@@ -199,7 +200,7 @@ int main(int argc, char **argv)
 		config_free(cfg);
 		return 1;
 	}
-	main_loop(g_cli_one_shot != NULL, &cfg);
+	int result = main_loop(g_cli_one_shot != NULL, &cfg);
 	{
 		config_t *live = bootstrap_get_cfg();
 		cleanup_subsystems();
@@ -208,5 +209,5 @@ int main(int argc, char **argv)
 		stale_free_all();
 		config_free(live);
 	}
-	return 0;
+	return result;
 }

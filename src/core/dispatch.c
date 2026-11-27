@@ -63,7 +63,7 @@ static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_
 	send_err = ch->send(msg->session_id, text, NULL, 0);
 	if (send_err != 0)
 		return send_err;
-	return agent_err == 0 ? maybe_ack_cron(cron_job_id, NULL) : 0;
+	return agent_err == 0 ? maybe_ack_cron(cron_job_id, NULL) : agent_err;
 }
 
 int dispatch_delete_session(const char *session_id)
@@ -91,9 +91,22 @@ int handle_message(const channel_t *ch, const channel_incoming_msg_t *msg)
 		return send_then_maybe_ack_cron(ch, msg, "Session cleared.", 0);
 	}
 	if (strcmp(text, "/status") == 0) {
-		char buf[128];
-		snprintf(buf, sizeof(buf), "ShellClaw %s — agent ready.",
-		         SHELLCLAW_RELEASE_VERSION);
+		char backend[96];
+		char last_error[768];
+		char buf[1024];
+		agent_lock();
+		provider_router_active_backend_snapshot(backend, sizeof(backend));
+		provider_router_last_error_snapshot(last_error, sizeof(last_error));
+		agent_unlock();
+		if (!backend[0])
+			snprintf(buf, sizeof(buf), "ShellClaw %s. No provider is selected.",
+			         SHELLCLAW_RELEASE_VERSION);
+		else if (last_error[0])
+			snprintf(buf, sizeof(buf), "ShellClaw %s. Selected provider is %s. Last provider error: %s",
+			         SHELLCLAW_RELEASE_VERSION, backend, last_error);
+		else
+			snprintf(buf, sizeof(buf), "ShellClaw %s. Selected provider is %s. No provider error recorded.",
+			         SHELLCLAW_RELEASE_VERSION, backend);
 		return send_then_maybe_ack_cron(ch, msg, buf, 0);
 	}
 	char resp_buf[RESPONSE_BUF_SIZE];

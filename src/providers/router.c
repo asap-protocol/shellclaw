@@ -316,7 +316,8 @@ static int fallback_composite_init(const config_t *cfg)
 		return -1;
 	}
 	router_snap_set_active(g_backends[0]->name ? g_backends[0]->name : "", 0U);
-	snapshot_set_last_err("");
+	if (g_backends[0] == provider_local_get() && provider_local_is_unavailable())
+		snapshot_set_last_err("Local inference server unreachable");
 	g_recovery_last_wall = time(NULL);
 	return 0;
 }
@@ -358,7 +359,8 @@ static int fallback_composite_chat(const provider_message_t *messages, size_t me
 			return 0;
 		}
 		snapshot_set_last_err(response && response->content ? response->content : "");
-		if (!provider_error_allows_fallback_retry(response && response->content ? response->content : NULL))
+		if (ix + 1U == g_backend_count ||
+		    !provider_error_allows_fallback_retry(response ? response->content : NULL))
 			return ret;
 		provider_response_clear(response);
 	}

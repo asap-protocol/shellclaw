@@ -45,6 +45,7 @@ static int test_cli_starts_without_keys_dir(void)
 		ASSERT(f);
 		fprintf(f,
 			"[agent]\nmodel = \"bootstrap-keys-test\"\nmax_tool_iterations = 3\n\n"
+			"[providers]\nfallback_chain = [\"stub\"]\n\n"
 			"[memory]\ndb_path = \"%s\"\n",
 			db_path);
 		fclose(f);

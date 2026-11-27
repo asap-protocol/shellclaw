@@ -158,11 +158,13 @@ const provider_t *provider_local_get(void);
 void provider_local_set_live_config(const config_t *cfg);
 /** Lightweight GET probe via `/v1/models` or `/health`; used by init, chat retry, and router recovery. */
 int provider_local_endpoint_reachable(const char *endpoint);
+
+/** Return 1 if the last probe found the local server unavailable. */
+int provider_local_is_unavailable(void);
 /** After a successful recovery GET probe on local; clears init-time unreachable flag. */
 void provider_local_recovery_probe_succeeded(void);
 
 #ifdef SHELLCLAW_TEST
-int local_provider_is_unavailable_for_test(void);
 void local_provider_test_reset(void);
 void local_provider_test_set_http_response(const char *json_body);
 void local_provider_test_set_skip_probe(int skip);

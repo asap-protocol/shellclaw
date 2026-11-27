@@ -221,12 +221,12 @@ static void local_cleanup(void)
 	s_local_reprobe_last_wall = (time_t)0;
 }
 
-#ifdef SHELLCLAW_TEST
-int local_provider_is_unavailable_for_test(void)
+int provider_local_is_unavailable(void)
 {
 	return s_local_unavailable;
 }
 
+#ifdef SHELLCLAW_TEST
 void local_provider_test_reset(void)
 {
 	s_local_test_http_body = NULL;

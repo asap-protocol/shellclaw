@@ -60,7 +60,7 @@ static int test_init_unreachable_sets_unavailable_then_chat_errors(void)
 	const provider_t *p = provider_local_get();
 	ASSERT(p->init(cfg) == 0);
 #ifdef SHELLCLAW_TEST
-	ASSERT(local_provider_is_unavailable_for_test() != 0);
+	ASSERT(provider_local_is_unavailable() != 0);
 #endif
 	provider_message_t msg = { .role = "user", .content = "hello", .tool_calls = NULL, .tool_calls_count = 0, .tool_use_id = NULL };
 	provider_response_t response = {0};
@@ -101,7 +101,7 @@ static int test_chat_reprobes_when_server_comes_up(void)
 	p = provider_local_get();
 	ASSERT(p->init(cfg) == 0);
 #ifdef SHELLCLAW_TEST
-	ASSERT(local_provider_is_unavailable_for_test() != 0);
+	ASSERT(provider_local_is_unavailable() != 0);
 #endif
 	local_provider_test_set_skip_probe(1);
 	local_provider_test_set_http_response(
@@ -111,7 +111,7 @@ static int test_chat_reprobes_when_server_comes_up(void)
 	ASSERT(response.content != NULL);
 	ASSERT(strstr(response.content, "back online") != NULL);
 #ifdef SHELLCLAW_TEST
-	ASSERT(local_provider_is_unavailable_for_test() == 0);
+	ASSERT(provider_local_is_unavailable() == 0);
 #endif
 	p->cleanup();
 	provider_response_clear(&response);
@@ -150,7 +150,7 @@ static int test_chat_reprobe_throttled_within_min_interval(void)
 	p = provider_local_get();
 	ASSERT(p->init(cfg) == 0);
 #ifdef SHELLCLAW_TEST
-	ASSERT(local_provider_is_unavailable_for_test() != 0);
+	ASSERT(provider_local_is_unavailable() != 0);
 #endif
 	/* First chat after the startup miss: the probe runs against port 1
 	 * and fails, arming the throttle window. */
@@ -172,7 +172,7 @@ static int test_chat_reprobe_throttled_within_min_interval(void)
 	local_provider_test_reset();
 	ASSERT(p->init(cfg) == 0);
 #ifdef SHELLCLAW_TEST
-	ASSERT(local_provider_is_unavailable_for_test() != 0);
+	ASSERT(provider_local_is_unavailable() != 0);
 #endif
 	local_provider_test_set_skip_probe(1);
 	local_provider_test_set_http_response(
