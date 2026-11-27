@@ -36,6 +36,19 @@ if [[ "${stub_out}" != "stub" ]]; then
 	exit 1
 fi
 
+# systemd sets INVOCATION_ID and uses /dev/null for the old unit's stdin.
+service_id=7d2d19cbe1f748b7be0651d680b95b51
+SHELLCLAW_INSTALL_BIN="${BIN}" INVOCATION_ID="${service_id}" \
+	"${BIN}" --config "${CFG}" </dev/null &
+service_pid=$!
+sleep 1
+if ! kill -0 "${service_pid}" 2>/dev/null; then
+	echo "test_daemon_smoke: ShellClaw exited after EOF in the old systemd unit" >&2
+	exit 1
+fi
+kill "${service_pid}"
+wait "${service_pid}"
+
 "${BIN}" --daemon --config "${CFG}"
 
 sleep 1

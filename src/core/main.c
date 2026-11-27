@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define DEFAULT_CONFIG_PATH "~/.shellclaw/config.toml"
 #define POLL_TIMEOUT_MS 1000
@@ -78,7 +79,10 @@ static int has_background_channels(void)
 static int main_loop(int one_shot, config_t **pcfg)
 {
 	int cli_closed = g_headless || g_want_daemon;
-	int keep_running = cli_closed || has_background_channels();
+	const char *invocation_id = getenv("INVOCATION_ID");
+	/* Units installed before --headless rely on systemd to supervise the process. */
+	int systemd_service = invocation_id && invocation_id[0] && !isatty(STDIN_FILENO);
+	int keep_running = cli_closed || has_background_channels() || (!one_shot && systemd_service);
 	while (!g_shutdown) {
 		if (g_reload_requested) {
 			g_reload_requested = 0;
