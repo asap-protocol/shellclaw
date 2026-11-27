@@ -31,6 +31,26 @@ static int test_schema_and_fts5(void)
 	return 0;
 }
 
+static int test_cron_destination_preview_keeps_complete_characters(void)
+{
+	char channel[72], recipient[72];
+	cron_job_row_t row;
+
+	memset(channel, 'c', 61);
+	strcpy(channel + 61, "\xf0\xa0\x80\x80");
+	memset(recipient, 'r', 62);
+	strcpy(recipient + 62, "é");
+	ASSERT(memory_init(":memory:") == 0);
+	ASSERT(cron_job_create("old", "interval:60", "Report", channel, recipient, 1, 1) == 0);
+	ASSERT(cron_job_list_previews("", &row, 1) == 1);
+	ASSERT(row.channel_truncated && row.recipient_truncated);
+	ASSERT(strlen(row.channel) == 61 && memcmp(row.channel, channel, 61) == 0);
+	ASSERT(strlen(row.recipient) == 62 && memcmp(row.recipient, recipient, 62) == 0);
+	cron_job_row_free(&row);
+	memory_cleanup();
+	return 0;
+}
+
 static int test_save_overwrite(void)
 {
 	const char *path = "/tmp/shellclaw_test_memory2.db";
@@ -215,6 +235,7 @@ static int test_existing_db_preserved_on_open_failure(void)
 int main(void)
 {
 	RUN(test_schema_and_fts5());
+	RUN(test_cron_destination_preview_keeps_complete_characters());
 	RUN(test_save_overwrite());
 	RUN(test_corrupted_db_recreated());
 	RUN(test_existing_db_preserved_on_open_failure());

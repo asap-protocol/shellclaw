@@ -383,6 +383,22 @@ static char *dup_sqlite_text(sqlite3_stmt *stmt, int col)
 	return strdup(p ? (const char *)p : "");
 }
 
+/* Copy complete UTF-8 characters. Keep the flag so the scheduler can reject a shortened address. */
+static int copy_cron_destination(sqlite3_stmt *stmt, int column, char *dst, size_t capacity)
+{
+	const unsigned char *text = sqlite3_column_text(stmt, column);
+	size_t length = (size_t)sqlite3_column_bytes(stmt, column);
+	size_t end = length;
+	if (length >= capacity) {
+		end = capacity - 1;
+		while (end > 0 && (text[end] & 0xc0) == 0x80)
+			end--;
+	}
+	if (text && end) memcpy(dst, text, end);
+	dst[end] = '\0';
+	return length >= capacity;
+}
+
 void cron_job_row_free(cron_job_row_t *row)
 {
 	if (!row) return;
@@ -398,10 +414,8 @@ static int fill_cron_job_row(sqlite3_stmt *stmt, cron_job_row_t *out)
 	copy_str_bounded(out->id, sizeof(out->id), (const char *)sqlite3_column_text(stmt, 0));
 	out->schedule = dup_sqlite_text(stmt, 1);
 	out->message = dup_sqlite_text(stmt, 2);
-	out->channel_truncated = (size_t)sqlite3_column_bytes(stmt, 3) >= sizeof(out->channel);
-	out->recipient_truncated = (size_t)sqlite3_column_bytes(stmt, 4) >= sizeof(out->recipient);
-	copy_str_bounded(out->channel, sizeof(out->channel), (const char *)sqlite3_column_text(stmt, 3));
-	copy_str_bounded(out->recipient, sizeof(out->recipient), (const char *)sqlite3_column_text(stmt, 4));
+	out->channel_truncated = copy_cron_destination(stmt, 3, out->channel, sizeof(out->channel));
+	out->recipient_truncated = copy_cron_destination(stmt, 4, out->recipient, sizeof(out->recipient));
 	out->next_run = sqlite3_column_int64(stmt, 5);
 	out->enabled = sqlite3_column_int(stmt, 6);
 	if (!out->schedule || !out->message) {
@@ -547,14 +561,10 @@ int cron_job_list_due(long long now, const cron_due_key_t *after,
 		copy_str_bounded(out[count].id, sizeof(out[count].id),
 				 (const char *)sqlite3_column_text(stmt, 0));
 		out[count].next_run = sqlite3_column_int64(stmt, 1);
-		out[count].channel_truncated =
-			(size_t)sqlite3_column_bytes(stmt, 2) >= sizeof(out[count].channel);
-		out[count].recipient_truncated =
-			(size_t)sqlite3_column_bytes(stmt, 3) >= sizeof(out[count].recipient);
-		copy_str_bounded(out[count].channel, sizeof(out[count].channel),
-				 (const char *)sqlite3_column_text(stmt, 2));
-		copy_str_bounded(out[count].recipient, sizeof(out[count].recipient),
-				 (const char *)sqlite3_column_text(stmt, 3));
+		out[count].channel_truncated = copy_cron_destination(stmt, 2, out[count].channel,
+								    sizeof(out[count].channel));
+		out[count].recipient_truncated = copy_cron_destination(stmt, 3, out[count].recipient,
+								      sizeof(out[count].recipient));
 		count++;
 	}
 	sqlite3_finalize(stmt);
