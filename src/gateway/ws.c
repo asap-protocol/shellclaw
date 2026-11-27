@@ -79,7 +79,7 @@ static int g_outgoing_count;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cond = PTHREAD_COND_INITIALIZER;
 static atomic_int g_next_conn_id;
-static volatile int g_ws_shutdown;
+static int g_ws_shutdown;
 static struct lws_context *g_lws_ctx;
 
 void ws_set_context(void *ctx)
@@ -436,8 +436,10 @@ ws_enqueue_outgoing_locked(m);
 
 void ws_shutdown_signal(void)
 {
+	pthread_mutex_lock(&g_mutex);
 	g_ws_shutdown = 1;
 	pthread_cond_broadcast(&g_cond);
+	pthread_mutex_unlock(&g_mutex);
 }
 
 void ws_cleanup(void)

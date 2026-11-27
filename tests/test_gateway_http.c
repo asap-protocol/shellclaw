@@ -1699,6 +1699,49 @@ static int test_api_hardware_camera_deferred(const char *token)
 	return 0;
 }
 
+static pid_t start_gateway(const char *config_path)
+{
+	pid_t pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "test_gateway_http: fork failed\n");
+		return -1;
+	}
+	if (pid == 0) {
+		int devnull = open("/dev/null", O_WRONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDOUT_FILENO);
+			dup2(devnull, STDERR_FILENO);
+			close(devnull);
+		}
+		execl("./build/shellclaw", "shellclaw", "--config", config_path, (char *)NULL);
+		_exit(1);
+	}
+	return pid;
+}
+
+static int test_idle_shutdown(pid_t pid)
+{
+	const struct timespec delay = { .tv_sec = 0, .tv_nsec = 50000000L };
+	int status;
+
+	if (wait_for_health(40) == 0 && kill(pid, SIGTERM) == 0) {
+		for (int i = 0; i < 80; i++) {
+			pid_t result = waitpid(pid, &status, WNOHANG);
+			if (result == pid) {
+				ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+				return 0;
+			}
+			if (result < 0 && errno != EINTR)
+				break;
+			(void)nanosleep(&delay, NULL);
+		}
+	}
+	fprintf(stderr, "FAIL: idle gateway did not exit after SIGTERM\n");
+	kill(pid, SIGKILL);
+	waitpid(pid, NULL, 0);
+	return 1;
+}
+
 int main(int argc, char **argv)
 {
 	(void)argc;
@@ -1754,21 +1797,14 @@ int main(int argc, char **argv)
 	fclose(f);
 	setenv("HOME", g_test_home, 1);
 	setenv("SHELLCLAW_TEST_MODE", "1", 1);
-	pid_t pid = fork();
-	if (pid < 0) {
-		fprintf(stderr, "test_gateway_http: fork failed\n");
+	pid_t pid = start_gateway(config_path);
+	if (pid < 0)
 		return 1;
-	}
-	if (pid == 0) {
-		int devnull = open("/dev/null", O_WRONLY);
-		if (devnull >= 0) {
-			dup2(devnull, STDOUT_FILENO);
-			dup2(devnull, STDERR_FILENO);
-			close(devnull);
-		}
-		execl("./build/shellclaw", "shellclaw", "--config", config_path, (char *)NULL);
-		_exit(1);
-	}
+	if (test_idle_shutdown(pid) != 0)
+		return 1;
+	pid = start_gateway(config_path);
+	if (pid < 0)
+		return 1;
 	char pairing_code[16] = {0};
 	if (wait_for_health(40) != 0) {
 		fprintf(stderr, "test_gateway_http: /health poll timeout on %s\n", g_base_url);
