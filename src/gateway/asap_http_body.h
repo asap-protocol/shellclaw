@@ -49,6 +49,15 @@ int asap_http_body_exceeds_static_cap(const asap_http_body_t *body, long content
  */
 int asap_http_body_init_from_request(struct lws *wsi, asap_http_body_t *body);
 
+/**
+ * Decode the Content-Encoding of a POST /asap request.
+ * @param decoded Receives an owned buffer, or NULL for an identity body.
+ * @param decoded_len Receives the length of the decoded bytes on success.
+ * @return 0 on success, or HTTP 400, 413, 415, or 500 on failure.
+ */
+int asap_http_body_decode(struct lws *wsi, const char *body, size_t len,
+	char **decoded, size_t *decoded_len);
+
 void asap_http_body_append(asap_http_body_t *body, const void *in, size_t len);
 void asap_http_body_free(asap_http_body_t *body);
 

@@ -1,17 +1,23 @@
-# Minimal config for CI asap-compliance check.
-# Used by the asap-compliance harness step in .github/workflows/ci.yml.
+# run_asap_ci.py supplies the loopback port for each run.
 
 [agent]
-model = "claude-3-5-sonnet-20241022"
-max_tokens = 512
-max_tool_iterations = 5
+model = "asap-test"
+
+[providers]
+fallback_chain = ["stub"]
 
 [gateway]
 enabled = true
 host = "127.0.0.1"
-port = 19999
+port = {port}
+require_pairing = true
 
 [asap]
 enabled = true
-agent_urn = "urn:asap:agent:shellclaw-ci"
+agent_urn = "urn:asap:agent:under-test"
 agent_name = "ShellClaw-CI"
+public_base_url = "http://127.0.0.1:{port}"
+trusted_senders = ["urn:asap:agent:compliance-harness"]
+
+[hardware]
+enabled = false

@@ -19,7 +19,7 @@ extern "C" {
  * asap_envelope_clear to release.
  */
 typedef struct asap_envelope {
-	cJSON *jsonrpc_request_id; /**< Top-level JSON-RPC "id" (any JSON type); for responses/errors. */
+	cJSON *jsonrpc_request_id; /**< Top-level JSON-RPC request ID for responses and errors. */
 	char *id;             /**< Envelope or task id (ULID or string). */
 	char *asap_version;  /**< Protocol version, e.g. "2.1". */
 	char *sender;        /**< Sender URN. */
@@ -29,6 +29,7 @@ typedef struct asap_envelope {
 	char *correlation_id; /**< Correlation for tracing. */
 	char *trace_id;      /**< Distributed trace id. */
 	char *timestamp;     /**< ISO 8601 timestamp string. */
+	int sdk_wire;        /**< Use the SDK envelope wrapper for a task. */
 } asap_envelope_t;
 
 /**
@@ -49,11 +50,11 @@ void asap_envelope_clear(asap_envelope_t *env);
 
 /**
  * Parse a JSON-RPC 2.0 request body. Top-level @c jsonrpc must be @c "2.0",
- * @c method a non-empty string, @c params an object with required ASAP
- * fields: @c id, @c asap_version, @c sender, @c recipient, @c payload_type,
+ * @c method a non-empty string, and @c params an object. Legacy parameters
+ * contain these fields: @c id, @c asap_version, @c sender, @c recipient, @c payload_type,
  * and @c payload. Optional: @c correlation_id, @c trace_id, @c timestamp
- * (strings). On success, @p out is filled; call asap_envelope_clear when
- * done. On failure, out may be cleared and, if @p err_out is non-NULL,
+ * (strings). SDK tasks use @c asap.send with fields in @c params.envelope.
+ * Their envelope ID defaults to a generated ULID. Clear @p out after use. On failure, out may be cleared and, if @p err_out is non-NULL,
  * *err_out is a full JSON-RPC error (code -32602 Invalid params) with
  * the request @c id echoed; caller must cJSON_Delete.
  *
@@ -63,6 +64,31 @@ void asap_envelope_clear(asap_envelope_t *env);
  * @return         0 on success, -1 on validation or parse error
  */
 int asap_envelope_parse(const char *json, asap_envelope_t *out, cJSON **err_out);
+
+typedef struct asap_json_span {
+	const char *start;
+	size_t len;
+} asap_json_span_t;
+
+typedef struct asap_request_wire {
+	asap_json_span_t id;
+	asap_json_span_t echo_input;
+	int sdk_wire;
+} asap_request_wire_t;
+
+/**
+ * Parse an HTTP request and record the original ID and Echo input.
+ * The spans borrow bytes from @p json. Keep the body until the response is printed.
+ */
+int asap_envelope_parse_request(const char *json, asap_envelope_t *out,
+	cJSON **err_out, asap_request_wire_t *wire);
+
+/**
+ * Insert the request's exact ID and Echo input before printing a response.
+ * This changes @p response. The caller owns the returned string.
+ */
+char *asap_jsonrpc_print_response(cJSON *response, const asap_request_wire_t *wire);
+
 
 /**
  * Load envelope fields from a plain JSON object (same key layout as
@@ -86,7 +112,8 @@ int asap_envelope_from_object(const cJSON *obj, cJSON *rpc_id, asap_envelope_t *
 
 /**
  * Build a JSON-RPC 2.0 success response: @c { "jsonrpc": "2.0", "result": { ...envelope... }, "id": ... }.
- * The @a result object mirrors the request @c params shape. If @a jsonrpc_id
+ * The @a result object mirrors the request @c params shape. SDK replies
+ * contain @c result.envelope. If @a jsonrpc_id
  * is NULL, uses @c env->jsonrpc_request_id. Caller cJSON_Deletes the return
  * or uses #asap_envelope_to_jsonrpc_string.
  *

@@ -6,13 +6,15 @@ DSYMDIR ?= tests-dSYM
 INC    := -I. -I tests -I src -I vendor/tomlc99 -I vendor/sqlite3 -I vendor/cJSON -Isrc/vendor/tweetnacl
 LDLIBS := -lcurl -lm
 # Gateway (Phase 2): libwebsockets for HTTP+WebSocket on same port
-# Install: brew install libwebsockets
+# Install: brew install libwebsockets brotli zlib
 # Set GATEWAY=0 to build without gateway when libwebsockets not installed
 GATEWAY ?= $(shell pkg-config --exists libwebsockets 2>/dev/null && echo 1 || echo 0)
 GATEWAY_CFLAGS := $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --cflags libwebsockets 2>/dev/null),)
 GATEWAY_CFLAGS += $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --cflags openssl 2>/dev/null),)
+GATEWAY_CFLAGS += $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --cflags libbrotlidec zlib),)
 GATEWAY_LDLIBS := $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --libs libwebsockets 2>/dev/null),)
 GATEWAY_LDLIBS += $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --libs openssl 2>/dev/null),)
+GATEWAY_LDLIBS += $(if $(filter 1,$(GATEWAY)),$(shell pkg-config --libs libbrotlidec zlib),)
 # Hardware GPIO (Phase 5): libgpiod v2 API for Jetson / RPi (JetPack 6 / Bookworm)
 # Set LIBGPIOD=0 when libgpiod-dev is not installed (stub backend only).
 # pkg-config may find libgpiod 1.x on older distros; we require >= 2.0.
@@ -330,7 +332,7 @@ src/gateway/static.o: src/gateway/static.c src/gateway/static.h src/gateway/ui_a
 $(JCS_O): src/crypto/jcs.c src/crypto/jcs.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/crypto/jcs.c
 
-$(MANIFEST_O): src/asap/manifest.c src/asap/manifest.h
+$(MANIFEST_O): src/asap/manifest.c src/asap/manifest.h src/asap/manifest_build.h src/core/config.h src/core/version.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/asap/manifest.c
 
 $(MANIFEST_PROFILES_O): src/asap/manifest_profiles.c src/asap/manifest_profiles.h src/core/config.h src/hardware/board_detect.h
@@ -348,7 +350,9 @@ $(MANIFEST_KEYS_O): src/asap/manifest_keys.c src/asap/manifest_keys.h src/core/c
 $(ASAP_HTTP_BODY_O): src/gateway/asap_http_body.c src/gateway/asap_http_body.h src/gateway/http_lws.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -c -o $@ src/gateway/asap_http_body.c
 
-$(ENVELOPE_O): src/asap/envelope.c src/asap/envelope.h src/asap/asap_version.h vendor/cJSON/cJSON.h
+$(ROUTES_O): src/gateway/asap_http_body.h
+
+$(ENVELOPE_O): src/asap/envelope.c src/asap/envelope.h src/asap/asap_version.h src/asap/ulid.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/asap/envelope.c
 
 $(ULID_O): src/asap/ulid.c src/asap/ulid.h src/crypto/crypto.h
@@ -360,7 +364,7 @@ $(CLIENT_O): src/asap/client.c src/asap/client.h src/asap/envelope.h src/asap/ul
 $(ASAP_REGISTRY_O): src/asap/registry.c src/asap/registry.h src/asap/client.h src/providers/provider.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/asap/registry.c
 
-$(SERVER_O): src/asap/server.c src/asap/server.h src/asap/envelope.h src/asap/asap_version.h src/asap/ulid.h src/core/agent.h src/core/config.h src/core/memory.h src/providers/provider.h vendor/cJSON/cJSON.h
+$(SERVER_O): src/asap/server.c src/asap/server.h src/asap/envelope.h src/asap/manifest_build.h src/asap/asap_version.h src/asap/ulid.h src/core/agent.h src/core/config.h src/core/memory.h src/providers/provider.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -pthread -c -o $@ src/asap/server.c
 
 $(ASAP_LOG_O): src/asap/log.c src/asap/log.h
@@ -713,9 +717,9 @@ test_manifest: test_manifest_build test_manifest_keys test_jcs
 	$(BINDIR)/test_manifest_keys
 	$(BINDIR)/test_jcs
 
-test_asap_envelope: tests/test_asap_envelope.c $(ENVELOPE_O) $(CJSON_O)
+test_asap_envelope: tests/test_asap_envelope.c $(ENVELOPE_O) $(ULID_O) $(CRYPTO_LINK) $(CJSON_O)
 	@mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_asap_envelope.c $(ENVELOPE_O) $(CJSON_O) $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_asap_envelope.c $(ENVELOPE_O) $(ULID_O) $(CRYPTO_LINK) $(CJSON_O) $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
 
 test_asap_ulid: tests/test_asap_ulid.c $(ULID_O) $(CRYPTO_LINK)

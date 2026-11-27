@@ -222,6 +222,96 @@ static void teardown_env(asap_envelope_t *e)
 	asap_envelope_init(e);
 }
 
+static int test_sdk_unknown_skill(void)
+{
+	const char *request =
+		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":1,\"params\":{\"envelope\":{"
+		"\"id\":\"this-request\",\"correlation_id\":\"earlier-request\",\"asap_version\":\"0.1\","
+		"\"sender\":\"urn:asap:agent:peer\",\"recipient\":\"urn:asap:agent:shellclaw\","
+		"\"payload_type\":\"TaskRequest\",\"payload\":{\"conversation_id\":\"c\",\"skill_id\":\"chat\",\"input\":{}}}}}";
+	asap_envelope_t in;
+	asap_envelope_t out = {0};
+	asap_server_ctx_t ctx = {.task_request_hook = test_hook_task};
+	char err[128];
+
+	ASSERT(asap_envelope_parse(request, &in, NULL) == 0);
+	ASSERT(asap_server_handle(&in, &out, &ctx, err, sizeof err) == -32602);
+	ASSERT(out.payload == NULL);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
+/* cJSON checks the types and structure. Check full number tokens for precision. */
+static int has_json_number_token(const char *json, const char *number)
+{
+	size_t len = strlen(number);
+	for (const char *at = strstr(json, number); at; at = strstr(at + len, number)) {
+		const char *start = at;
+		while (start > json && strchr(" \t\r\n", start[-1]))
+			start--;
+		const char *end = at + len;
+		end += strspn(end, " \t\r\n");
+		if (start > json && strchr("[:,", start[-1]) && *end && strchr(",]}", *end))
+			return 1;
+	}
+	return 0;
+}
+
+static int test_sdk_echo_preserves_wire_values(void)
+{
+	const char input[] =
+		"{\"samples\": [5000000000000001, -9007199254740993, "
+		"{\"mean\":1.234567890123456789e-12,\"label\":\"test \\\"A\\\"\","
+		"\"ready\":true,\"retry\":false,\"note\":null}]}";
+	char request[512];
+	int len = snprintf(request, sizeof request,
+		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":9007199254740993,"
+		"\"params\":{\"envelope\":{\"id\":\"sdk-echo\",\"asap_version\":\"0.1\","
+		"\"sender\":\"urn:asap:agent:peer\",\"recipient\":\"urn:asap:agent:shellclaw\","
+		"\"payload_type\":\"TaskRequest\",\"payload\":{\"conversation_id\":\"c\","
+		"\"skill_id\":\"echo\",\"input\": %s}}}}\n", input);
+	ASSERT(len > 0 && (size_t)len < sizeof request);
+
+	asap_envelope_t in;
+	asap_envelope_t out = {0};
+	asap_request_wire_t wire;
+	asap_server_ctx_t ctx = {0};
+	char error[128];
+
+	ASSERT(asap_envelope_parse_request(request, &in, NULL, &wire) == 0);
+	ASSERT(asap_server_handle(&in, &out, &ctx, error, sizeof error) == 0);
+	cJSON *response = asap_envelope_to_jsonrpc(&out, in.jsonrpc_request_id);
+	char *json = asap_jsonrpc_print_response(response, &wire);
+	ASSERT(json != NULL);
+
+	cJSON *body = cJSON_Parse(json);
+	ASSERT(cJSON_IsObject(body));
+	ASSERT(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(body, "id")));
+	const cJSON *result = cJSON_GetObjectItemCaseSensitive(body, "result");
+	const cJSON *envelope = cJSON_GetObjectItemCaseSensitive(result, "envelope");
+	const cJSON *payload = cJSON_GetObjectItemCaseSensitive(envelope, "payload");
+	const char *status = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "status"));
+	const char *task_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "task_id"));
+	ASSERT(status && strcmp(status, "completed") == 0);
+	ASSERT(task_id && strcmp(task_id, "sdk-echo") == 0);
+	const cJSON *echo = cJSON_GetObjectItemCaseSensitive(payload, "result");
+	cJSON *expected = cJSON_Parse(input);
+	ASSERT(cJSON_IsObject(echo) && cJSON_Compare(echo, expected, 1));
+	ASSERT(has_json_number_token(json, "9007199254740993"));
+	ASSERT(has_json_number_token(json, "5000000000000001"));
+	ASSERT(has_json_number_token(json, "-9007199254740993"));
+	ASSERT(has_json_number_token(json, "1.234567890123456789e-12"));
+
+	cJSON_Delete(expected);
+	cJSON_Delete(body);
+	free(json);
+	cJSON_Delete(response);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
 static int test_task_request_hook(void)
 {
 	asap_envelope_t in;
@@ -1064,6 +1154,8 @@ static int test_state_query_hook_holds_agent_mutex(void)
 int main(void)
 {
 	int r = 0;
+	r |= test_sdk_unknown_skill();
+	r |= test_sdk_echo_preserves_wire_values();
 	r |= test_task_request_hook();
 	r |= test_task_cancel_stub();
 	r |= test_state_query_hook();

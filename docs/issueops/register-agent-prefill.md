@@ -19,7 +19,7 @@ Manifest URL: https://asap-protocol.github.io/shellclaw/manifest.json
 
 HTTP endpoint: https://shellclaw.example.com/asap
 
-Skills (CSV): assistant,edge_briefing,server_admin,gpio_control
+Skills (CSV): <copy capabilities.skills[].id from the published signed manifest>
 
 Category: Infrastructure
 
@@ -58,7 +58,7 @@ Complete **before** opening the issue (ideally after GitHub Pages publish from a
 
    Note: `validate_manifest.sh` validates the inner `Manifest` shape when given bare manifest JSON; for the published **SignedManifest**, use `verify_manifest` as the gate.
 
-4. **Skills policy** — CSV must be exactly four IDs: `assistant`, `edge_briefing`, `server_admin`, `gpio_control` (no Phase 7 skills).
+4. Match the Skills CSV to `capabilities.skills[].id` in the published signed manifest. Include `echo` if the manifest lists it.
 
 5. **Tags** — do **not** include `self-signed` in your CSV.
 

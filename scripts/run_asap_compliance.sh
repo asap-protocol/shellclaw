@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the upstream asap-compliance pytest harness against a live ShellClaw gateway.
 #
-# Deviations, v1.0 stance, and env reference: docs/ASAP.md § "ASAP compliance harness".
+# See docs/ASAP.md § "ASAP compliance harness".
 #
 # Usage:
 #   ./scripts/run_asap_compliance.sh
@@ -12,22 +12,22 @@
 #   ASAP_AGENT_URL              agent base URL (default: http://127.0.0.1:18789)
 #   ASAP_COMPLIANCE_SKIP_PIP=1  skip pip install when asap-compliance is already installed
 #   ASAP_COMPLIANCE_PIP_USER=1  use "pip install --user" (prints a note when set)
-#   ASAP_COMPLIANCE_VERSION     pip spec (default: asap-compliance>=1.0.0)
+#   ASAP_COMPLIANCE_VERSION     pip spec (default: asap-compliance==1.4.0)
+#   ASAP_COMPLIANCE_TIMEOUT     HTTP timeout in seconds (default: 30)
 #   ASAP_COMPLIANCE_SKIP_HEALTH=1  skip /health probe before pytest
 #   ASAP_COMPLIANCE_LIVE_TEST_DIR   directory for generated live pytest (default: temp)
 #
 # Prerequisites: python3 + pip (3.13+); gateway listening at ASAP_AGENT_URL (start shellclaw
 # with [gateway] enabled — see config.example.toml port 18789). This script does not
-# boot the agent; use scripts/dump_manifest.sh if you need an ephemeral local gateway.
+# start the agent. For an isolated gateway, use scripts/run_asap_ci.py.
 #
 # Exit codes: 0 pytest green, 1 usage/deps, 2 pip install failed, 3 agent unreachable,
 #             4 pytest failed.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_URL="http://127.0.0.1:18789"
 AGENT_URL="${ASAP_AGENT_URL:-${DEFAULT_URL}}"
-PIP_SPEC="${ASAP_COMPLIANCE_VERSION:-asap-compliance>=1.0.0}"
+PIP_SPEC="${ASAP_COMPLIANCE_VERSION:-asap-compliance==1.4.0}"
 
 usage() {
 	sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
@@ -117,6 +117,7 @@ cat >"${LIVE_TEST_DIR}/test_shellclaw_live.py" <<'PY'
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from asap_compliance.validators.handshake import validate_handshake
@@ -124,34 +125,59 @@ from asap_compliance.validators.sla import validate_sla
 from asap_compliance.validators.state import validate_state_machine
 
 
+def check_result(result, required_check):
+    for check in result.checks:
+        print(f"{check.name}: {check.message}")
+    failed = [c for c in result.checks if not c.passed]
+    assert result.passed, ", ".join(f"{c.name}: {c.message}" for c in failed)
+    assert not failed
+    assert required_check in {c.name for c in result.checks}
+
+
 @pytest.mark.asap_compliance
 def test_live_handshake(compliance_harness) -> None:
-    result = validate_handshake(compliance_harness)
-    failed = [c for c in result.checks if not c.passed]
-    assert result.passed, "; ".join(f"{c.name}: {c.message}" for c in failed)
+    manifest_url = f"{compliance_harness.agent_url.rstrip('/')}/.well-known/asap/manifest.json"
+    response = httpx.get(manifest_url, timeout=compliance_harness.timeout_seconds)
+    response.raise_for_status()
+    signed = response.json()
+    assert signed.get("signature") and signed.get("public_key")
+    skills = signed["manifest"]["capabilities"]["skills"]
+    assert sum(skill["id"] == "echo" for skill in skills) == 1
+    check_result(validate_handshake(compliance_harness), "manifest_signature")
 
 
 @pytest.mark.asap_compliance
 def test_live_state_machine(compliance_harness) -> None:
-    result = validate_state_machine(compliance_harness)
-    failed = [c for c in result.checks if not c.passed]
-    assert result.passed, "; ".join(f"{c.name}: {c.message}" for c in failed)
+    check_result(validate_state_machine(compliance_harness), "state_terminal_status")
 
 
 @pytest.mark.asap_compliance
 def test_live_sla(compliance_harness) -> None:
-    result = validate_sla(compliance_harness)
-    failed = [c for c in result.checks if not c.passed]
-    assert result.passed, "; ".join(f"{c.name}: {c.message}" for c in failed)
+    assert not compliance_harness.skip_checks
+    check_result(validate_sla(compliance_harness), "sla_task_timeout")
 PY
 
 echo "==> pytest asap-compliance (-m asap_compliance) against ${AGENT_URL}"
 # Upstream CLI: pytest --asap-agent-url=<url> -m asap_compliance (PyPI wheel ships library only).
 python3 -m pytest \
 	--asap-agent-url="${AGENT_URL}" \
-	-m asap_compliance \
-	-v \
-	"${LIVE_TEST_DIR}" \
+	--asap-timeout="${ASAP_COMPLIANCE_TIMEOUT:-30}" \
+	-m asap_compliance -v -rP \
+	--junitxml="${LIVE_TEST_DIR}/shellclaw-compliance.xml" \
+	"${LIVE_TEST_DIR}/test_shellclaw_live.py" \
 	|| exit 4
+
+python3 - "${LIVE_TEST_DIR}/shellclaw-compliance.xml" <<'PY' || exit 4
+import sys
+from xml.etree import ElementTree
+
+cases = ElementTree.parse(sys.argv[1]).findall(".//testcase")
+expected = {"test_live_handshake", "test_live_state_machine", "test_live_sla"}
+if len(cases) != len(expected) or {case.get("name") for case in cases} != expected:
+    sys.exit("The three compliance tests must all run")
+outcomes = {child.tag for case in cases for child in case}
+if outcomes & {"failure", "error", "skipped"}:
+    sys.exit("The three compliance tests must all pass")
+PY
 
 echo "==> run_asap_compliance: all checks passed"

@@ -19,7 +19,6 @@
 #define MAX_SKILL_NAMES 64
 #define MAX_SKILL_DESC 512
 #define MAX_ASAP_ENDPOINT 512
-#define MANIFEST_ASAP_VERSION "2.1.0"
 /* Upstream asap.crypto.models defaults (verified against asap-protocol 2.5.0):
  * the signed inner manifest must carry every field Manifest.model_dump() would
  * populate, since asap.crypto.signing.canonicalize re-derives these defaults. */
@@ -137,7 +136,7 @@ static int count_skills_on_disk(const config_t *cfg)
 static int add_capabilities_skills(cJSON *capabilities, const config_t *cfg)
 {
 	cJSON *skills;
-	char *names[MAX_SKILL_NAMES];
+	char *names[MAX_SKILL_NAMES + 1];
 	int n;
 	int total;
 	int i;
@@ -149,16 +148,27 @@ static int add_capabilities_skills(cJSON *capabilities, const config_t *cfg)
 		return -1;	/* skills orphan deleted by helper; root cleaned by caller */
 	if (!cfg) return 0;
 	total = count_skills_on_disk(cfg);
-	n = skill_list_names(cfg, names, MAX_SKILL_NAMES);
+	n = skill_list_names(cfg, names + 1, MAX_SKILL_NAMES);
 	if (n < 0) return -1;
+	n++;
+	names[0] = strdup(ASAP_SDK_ECHO_SKILL);
+	if (!names[0]) {
+		for (i = 1; i < n; i++)
+			free(names[i]);
+		return -1;
+	}
 	if (total > MAX_SKILL_NAMES)
 		fprintf(stderr, "manifest: skills truncated (%d > %d)\n", total,
 			MAX_SKILL_NAMES);
-	for (i = 0; i < n && i < MAX_SKILL_NAMES; i++) {
+	for (i = 0; i < n; i++) {
 		cJSON *item;
 		cJSON *id_str;
 		cJSON *desc_str;
 		const char *desc;
+		if (i > 0 && strcmp(names[i], ASAP_SDK_ECHO_SKILL) == 0) {
+			free(names[i]);
+			continue;
+		}
 		item = cJSON_CreateObject();
 		if (!item) {
 			for (int j = i; j < n; j++)
@@ -185,7 +195,7 @@ static int add_capabilities_skills(cJSON *capabilities, const config_t *cfg)
 				free(names[j]);
 			return -1;
 		}
-		desc = skill_description_for(cfg, names[i]);
+		desc = i == 0 ? "Return the task input." : skill_description_for(cfg, names[i]);
 		desc_str = cJSON_CreateString(desc ? desc : names[i]);
 		if (!desc_str) {
 			cJSON_DeleteItemFromArray(skills, cJSON_GetArraySize(skills) - 1);
@@ -453,7 +463,7 @@ cJSON *manifest_build_tree(const config_t *cfg)
 		cJSON_Delete(root);
 		return NULL;
 	}
-	item = cJSON_CreateString(MANIFEST_ASAP_VERSION);
+	item = cJSON_CreateString(ASAP_DISCOVERY_VERSION);
 	if (!item) {
 		cJSON_Delete(root);
 		return NULL;

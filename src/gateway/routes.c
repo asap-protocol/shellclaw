@@ -8,6 +8,7 @@
 #include "gateway/routes_hardware.h"
 #include "gateway/http.h"
 #include "gateway/auth.h"
+#include "gateway/asap_http_body.h"
 #include "gateway/rate_limit.h"
 #include "channels/channel.h"
 #include "asap/manifest.h"
@@ -100,10 +101,18 @@ void json_error(char *buf, size_t size, int *status, int code, const char *msg)
 	}
 }
 
+static double gateway_uptime_seconds(const http_server_ctx_t *ctx)
+{
+	struct timespec now;
+	if (!ctx || clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return 0.0;
+	return (double)(now.tv_sec - ctx->started_at.tv_sec) +
+	       (double)(now.tv_nsec - ctx->started_at.tv_nsec) / 1e9;
+}
+
 static void handle_health(http_server_ctx_t *ctx, char *buf, size_t size, int *status)
 {
-	time_t now = time(NULL);
-	long uptime = (long)(now - ctx->start_time);
+	long uptime = (long)gateway_uptime_seconds(ctx);
 	cJSON *obj = cJSON_CreateObject();
 	if (!obj) { json_error(buf, size, status, 500, "Internal error"); return; }
 	cJSON_AddItemToObject(obj, "status", cJSON_CreateString("ok"));
@@ -688,34 +697,24 @@ static void handle_cron_toggle(const char *id, char *buf, size_t size, int *stat
 	json_response(buf, size, status, "{\"ok\":true}");
 }
 
-/** Build a minimal JSON-RPC 2.0 error response into @p buf. */
-static void jsonrpc_error(char *buf, size_t size, int *status,
-	int http_code, int rpc_code, const char *msg)
+static void write_asap_error(char *buf, size_t size, int *status, int http_code,
+	cJSON *error, const asap_request_wire_t *wire)
 {
-	cJSON *obj;
-	cJSON *err;
-	char *s;
-	if (!buf || size == 0 || !status) return;
+	char *json = asap_jsonrpc_print_response(error, wire);
+	cJSON_Delete(error);
 	*status = http_code;
-	obj = cJSON_CreateObject();
-	if (!obj) { snprintf(buf, size, "{\"error\":{\"code\":%d}}", rpc_code); return; }
-	cJSON_AddStringToObject(obj, "jsonrpc", "2.0");
-	cJSON_AddNullToObject(obj, "id");
-	err = cJSON_CreateObject();
-	if (err) {
-		cJSON_AddNumberToObject(err, "code", (double)rpc_code);
-		cJSON_AddStringToObject(err, "message", msg ? msg : "error");
-		cJSON_AddItemToObject(obj, "error", err);
-	}
-	s = cJSON_PrintUnformatted(obj);
-	cJSON_Delete(obj);
-	if (s) {
-		size_t len = strlen(s);
-		if (len >= size) len = size - 1;
-		memcpy(buf, s, len);
-		buf[len] = '\0';
-		free(s);
-	}
+	if (json && strlen(json) < size)
+		memcpy(buf, json, strlen(json) + 1);
+	else
+		snprintf(buf, size, "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,"
+			"\"message\":\"Cannot serialize response\"},\"id\":null}");
+	free(json);
+}
+
+static void jsonrpc_error(char *buf, size_t size, int *status,
+	int http_code, int rpc_code, const char *msg, const asap_request_wire_t *wire)
+{
+	write_asap_error(buf, size, status, http_code, asap_jsonrpc_error(rpc_code, msg, NULL), wire);
 }
 
 static void handle_asap_log_get(char *buf, size_t size, int *status)
@@ -787,7 +786,8 @@ static void asap_ctx_bind_bootstrap(asap_server_ctx_t *asap_ctx, const config_t 
  * Takes ownership of @p resp_json.
  * @return 0 if copied, -1 if rejected as too large.
  */
-static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_json)
+static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_json,
+	const asap_request_wire_t *wire)
 {
 	size_t rlen;
 	rlen = strlen(resp_json);
@@ -797,7 +797,7 @@ static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_js
 			"ASAP response length %zu exceeds gateway buffer %zu",
 			rlen, size);
 		free(resp_json);
-		jsonrpc_error(buf, size, status, 500, -32603, too_big);
+		jsonrpc_error(buf, size, status, wire->sdk_wire ? 200 : 500, -32603, too_big, wire);
 		return -1;
 	}
 	*status = 200;
@@ -807,30 +807,46 @@ static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_js
 	return 0;
 }
 
-static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
+static void handle_asap(http_server_ctx_t *ctx, struct lws *wsi, const char *client_ip,
 	const char *body, size_t body_len, char *buf, size_t size, int *status)
 {
 	asap_envelope_t in;
 	asap_envelope_t out;
 	asap_server_ctx_t asap_ctx;
+	asap_request_wire_t wire;
 	cJSON *parse_err = NULL;
 	char err_msg[256];
-	char *resp_json;
 	char *snippet;
 	int rc;
-	(void)body_len;
 	if (rate_limit_asap(client_ip, time(NULL))) {
-		jsonrpc_error(buf, size, status, 429, -32000, "rate limit exceeded");
+		jsonrpc_error(buf, size, status, 429, -32000, "rate limit exceeded", NULL);
 		return;
 	}
+	char *decoded = NULL;
+	size_t decoded_len;
+	int decode_status = asap_http_body_decode(wsi, body, body_len, &decoded, &decoded_len);
+	if (decode_status != 0) {
+		const char *message = "Cannot decode request body";
+		if (decode_status == 413)
+			message = "Decoded request body too large";
+		else if (decode_status == 415)
+			message = "Unsupported Content-Encoding";
+		jsonrpc_error(buf, size, status, decode_status,
+			decode_status == 500 ? -32603 : -32700, message, NULL);
+		return;
+	}
+	body = decoded ? decoded : body;
 	asap_envelope_init(&in);
-	rc = asap_envelope_parse(body, &in, &parse_err);
+	if (!body || memchr(body, '\0', decoded_len)) {
+		jsonrpc_error(buf, size, status, 400, -32700, "Parse error", NULL);
+		free(decoded);
+		return;
+	}
+	rc = asap_envelope_parse_request(body, &in, &parse_err, &wire);
 	if (rc != 0) {
-		char *err_str = parse_err ? cJSON_PrintUnformatted(parse_err) : NULL;
-		cJSON_Delete(parse_err);
+		write_asap_error(buf, size, status, wire.sdk_wire ? 200 : 400, parse_err, &wire);
 		asap_envelope_clear(&in);
-		jsonrpc_error(buf, size, status, 400, -32700, err_str ? err_str : "parse error");
-		free(err_str);
+		free(decoded);
 		return;
 	}
 	snippet = in.payload ? cJSON_PrintUnformatted(in.payload) : NULL;
@@ -844,26 +860,26 @@ static void handle_asap(http_server_ctx_t *ctx, const char *client_ip,
 		asap_envelope_init(&out);
 		rc = asap_server_handle(&in, &out, &asap_ctx, err_msg, sizeof err_msg);
 	}
-	asap_envelope_clear(&in);
 	if (rc != 0) {
-		asap_envelope_clear(&out);
-		jsonrpc_error(buf, size, status, 400, rc, err_msg[0] ? err_msg : "handler error");
-		return;
+		int http_status = wire.sdk_wire && rc != ASAP_SERVER_RPC_SENDER_UNTRUSTED ? 200 : 400;
+		jsonrpc_error(buf, size, status, http_status, rc,
+			err_msg[0] ? err_msg : "Handler error", &wire);
+	} else {
+		cJSON *response = asap_envelope_to_jsonrpc(&out, NULL);
+		char *resp_json = asap_jsonrpc_print_response(response, &wire);
+		cJSON_Delete(response);
+		if (!resp_json) {
+			jsonrpc_error(buf, size, status, wire.sdk_wire ? 200 : 500, -32603,
+				"Cannot serialize response", &wire);
+		} else if (write_asap_jsonrpc(buf, size, status, resp_json, &wire) == 0) {
+			snippet = cJSON_PrintUnformatted(out.payload);
+			asap_log_append_out(out.payload_type, out.id, snippet);
+			free(snippet);
+		}
 	}
-	resp_json = asap_envelope_to_jsonrpc_string(&out, NULL);
-	if (!resp_json) {
-		asap_envelope_clear(&out);
-		jsonrpc_error(buf, size, status, 500, -32603, "failed to serialize response");
-		return;
-	}
-	if (write_asap_jsonrpc(buf, size, status, resp_json) != 0) {
-		asap_envelope_clear(&out);
-		return;
-	}
-	snippet = out.payload ? cJSON_PrintUnformatted(out.payload) : NULL;
-	asap_log_append_out(out.payload_type, out.id, snippet);
-	free(snippet);
+	asap_envelope_clear(&in);
 	asap_envelope_clear(&out);
+	free(decoded);
 }
 
 static void handle_well_known(http_server_ctx_t *ctx, const char *uri, int uri_len,
@@ -896,8 +912,12 @@ static void handle_well_known(http_server_ctx_t *ctx, const char *uri, int uri_l
 		return;
 	}
 	if (uri_exact_eq(uri, uri_len, "/.well-known/asap/health")) {
-		*status = 200;
-		json_response(buf, size, status, manifest_health_json());
+		char *json = manifest_health_json(ctx ? ctx->cfg : NULL, gateway_uptime_seconds(ctx));
+		if (!json || strlen(json) >= size)
+			json_error(buf, size, status, 500, "Internal error");
+		else
+			json_response(buf, size, status, json);
+		free(json);
 		return;
 	}
 	json_error(buf, size, status, 404, "Not found");
@@ -1095,7 +1115,7 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 	if (uri_exact_eq(uri, uri_len, "/asap") && method == HTTP_POST) {
 		char client_ip[64] = {0};
 		lws_get_peer_simple(wsi, client_ip, sizeof client_ip);
-		handle_asap(ctx, client_ip, body, body_len, buf, size, status);
+		handle_asap(ctx, wsi, client_ip, body, body_len, buf, size, status);
 		return 0;
 	}
 	json_error(buf, size, status, 404, "Not found");

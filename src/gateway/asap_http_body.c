@@ -10,6 +10,9 @@
 #include <libwebsockets.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <brotli/decode.h>
+#include <zlib.h>
 
 static int asap_is_asap_post(struct lws *wsi)
 {
@@ -78,6 +81,81 @@ int asap_http_body_init_from_request(struct lws *wsi, asap_http_body_t *body)
 		body->body_too_large = 0;
 	}
 	return 0;
+}
+
+static int decode_gzip(const char *body, size_t len, char *decoded, size_t *decoded_len)
+{
+	z_stream stream = {0};
+	int rc = inflateInit2(&stream, MAX_WBITS + 16); /* Require a gzip header. */
+	if (rc != Z_OK)
+		return 500;
+	stream.next_in = (z_const Bytef *)body;
+	stream.avail_in = (uInt)len;
+	stream.next_out = (Bytef *)decoded;
+	stream.avail_out = ASAP_BODY_MAX + 1;
+	rc = inflate(&stream, Z_FINISH);
+	*decoded_len = stream.total_out;
+	int status = 400;
+	if (stream.total_out > ASAP_BODY_MAX)
+		status = 413;
+	else if (rc == Z_STREAM_END && stream.avail_in == 0)
+		status = 0;
+	else if (rc == Z_MEM_ERROR)
+		status = 500;
+	inflateEnd(&stream);
+	return status;
+}
+
+static int decode_brotli(const char *body, size_t len, char *decoded, size_t *decoded_len)
+{
+	BrotliDecoderState *state = BrotliDecoderCreateInstance(NULL, NULL, NULL);
+	if (!state)
+		return 500;
+	const uint8_t *input = (const uint8_t *)body;
+	uint8_t *output = (uint8_t *)decoded;
+	size_t space = ASAP_BODY_MAX + 1;
+	BrotliDecoderResult result = BrotliDecoderDecompressStream(state,
+		&len, &input, &space, &output, decoded_len);
+	BrotliDecoderDestroyInstance(state);
+	if (*decoded_len > ASAP_BODY_MAX || result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT)
+		return 413;
+	return result == BROTLI_DECODER_RESULT_SUCCESS && len == 0 ? 0 : 400;
+}
+
+int asap_http_body_decode(struct lws *wsi, const char *body, size_t len,
+	char **decoded, size_t *decoded_len)
+{
+	char encoding[32];
+	*decoded = NULL;
+	*decoded_len = len;
+	if (len > ASAP_BODY_MAX)
+		return 413;
+	if (!wsi || lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_CONTENT_ENCODING) <= 0)
+		return 0;
+	if (lws_hdr_copy(wsi, encoding, sizeof encoding, WSI_TOKEN_HTTP_CONTENT_ENCODING) <= 0)
+		return 415;
+	char *coding = encoding + strspn(encoding, " \t");
+	size_t coding_len = strlen(coding);
+	while (coding_len > 0 && (coding[coding_len - 1] == ' ' || coding[coding_len - 1] == '\t'))
+		coding[--coding_len] = '\0';
+	if (strcasecmp(coding, "identity") == 0)
+		return 0;
+	int gzip = strcasecmp(coding, "gzip") == 0;
+	if (!gzip && strcasecmp(coding, "br") != 0)
+		return 415;
+
+	char *output = malloc(ASAP_BODY_MAX + 1);
+	if (!output)
+		return 500;
+	int status = gzip ? decode_gzip(body, len, output, decoded_len)
+	                  : decode_brotli(body, len, output, decoded_len);
+	if (status == 0) {
+		output[*decoded_len] = '\0';
+		*decoded = output;
+	} else {
+		free(output);
+	}
+	return status;
 }
 
 void asap_http_body_append(asap_http_body_t *body, const void *in, size_t len)

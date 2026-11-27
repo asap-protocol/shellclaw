@@ -15,8 +15,8 @@ When the gateway is enabled and signing keys load successfully, ShellClaw serves
 | Route | Auth | Response |
 |-------|------|----------|
 | `GET /.well-known/asap/manifest.json` | Public | **SignedManifest** JSON (inner manifest + Ed25519 signature + public_key) |
-| `GET /.well-known/asap/health` | Public | Minimal health stub (`{"status":"ok"}` in v1.0) |
-| `POST /asap` | Rate-limited | JSON-RPC ASAP ingress: `task.request` / `mcp.tool_call` dispatch with the process provider and tool table. Inbound bodies use a 1 MiB dynamic buffer (`ASAP_BODY_MAX`); do not reintroduce the 64 KiB static `BODY_BUF_SIZE` check used by `PUT /api/config`. Serialized responses larger than the 64 KiB gateway HTTP buffer (`RESP_BUF_SIZE`) are rejected with HTTP 500 / JSON-RPC `-32603` rather than truncated. Compliance harness shape is still partial (see Known gaps). |
+| `GET /.well-known/asap/health` | Public | Agent liveness, manifest identity and version, and gateway uptime |
+| `POST /asap` | Rate-limited | Accepts flat legacy messages and SDK Echo tasks. The gateway limits the received and decoded bodies to 1 MiB each. See [SDK tasks](#sdk-tasks) for response limits. |
 | `GET /api/asap/log` | Bearer | Inbound ASAP message log |
 
 Implementation: `src/asap/manifest.c`, `src/gateway/routes.c`. If keys cannot load, manifest route returns **500** and agent startup fails fast (`init_subsystems()`).
@@ -87,7 +87,7 @@ Schema-only check (CI-safe skip if `asap` package missing):
 ./scripts/validate_manifest.sh /tmp/manifest.json
 ```
 
-**v1.0 note:** upstream `asap-compliance` harness may report `SignatureVerificationError` against the local gateway until JCS/signing is byte-identical with Python reference (planned v1.0.1+). C unit tests round-trip in `tests/test_manifest.c`.
+The live compliance checks verify the gateway's Ed25519 signature with the Python SDK.
 
 ---
 
@@ -135,9 +135,9 @@ Use the table below. These are the **only** fields you enter manually. Do **not*
 - **`hardware_class`**, **`inference_modes`**, **`hardware_io`** — derived from `capabilities.hardware` and `capabilities.inference` in the signed manifest (e.g. Jetson: `edge_accelerator`, `["cloud","local_cuda"]`, `["gpio","i2c"]`).
 - **`self-signed` in tags** — upstream `anti_spam.py` adds the trust tag automatically; including it in your CSV can cause rejection or duplication.
 
-#### Skills: v1.0 allowed vs deferred
+#### Marketplace skills
 
-IssueOps skills CSV must match manifest `capabilities.skills[].id` for v1.0:
+Use `capabilities.skills[].id` from the published signed manifest for the IssueOps skills CSV. The v1.0 fixture lists these installed skills.
 
 | Skill | v1.0 |
 |-------|------|
@@ -150,7 +150,7 @@ IssueOps skills CSV must match manifest `capabilities.skills[].id` for v1.0:
 | `home_monitor` | No — Phase 7 (v1.2) |
 | `visual_monitor` | No — Phase 7 (v1.2) |
 
-Manifest code registers skills from `skills/*.md` on disk; default descriptions in `src/asap/manifest_build.c` align with the four IDs above. **Discovery cap:** at most **64** skills appear in `capabilities.skills` on `/.well-known/asap/manifest.json`; additional on-disk skills remain available via the authenticated `/api/skills` API at runtime.
+ShellClaw reads installed skills from `skills/*.md`. The current gateway manifest lists the built-in `echo` skill and up to 64 installed skills. The authenticated `/api/skills` endpoint lists additional installed skills.
 
 #### `online_check` and Demo badge
 
@@ -185,7 +185,7 @@ Complete **after** Wave 5 signing is live on GitHub Pages (task 6.1) and **befor
 
 - [ ] `curl` manifest URL; `verify_manifest` succeeds
 - [ ] Open [Register Agent](https://github.com/asap-protocol/asap-protocol/issues/new?template=register_agent.yml) and fill fields from the table above (or prefill doc)
-- [ ] Skills CSV is exactly four v1.0 skills (no sensor/camera/monitor skills)
+- [ ] Skills CSV matches the published signed manifest. Include `echo` if the manifest lists it.
 - [ ] Tags CSV does **not** include `self-signed`
 - [ ] Did **not** manually add `hardware_class`, `inference_modes`, or `hardware_io` in the issue body
 - [ ] Wait for bot merge; confirm listing on marketplace Browse UI
@@ -210,105 +210,40 @@ v1.0 does not expose a reachable `endpoints.asap` URL for cross-agent invocation
 
 Security: exposing the agent increases attack surface — complete gateway hardening and audit before production funnel use (see slice risks in planning doc).
 
-### Other v1.0.1+ items
+## SDK tasks
 
-- **ASAP compliance harness** — see [ASAP compliance harness](#asap-compliance-harness) below; target green run in v1.0.1 after live endpoint + schema alignment.
+The Python SDK sends requests to `POST /asap`. Put a `TaskRequest` in `params.envelope`. The recipient must match `[asap].agent_urn`. If you configure `[asap].trusted_senders`, the gateway checks the sender URN against that list.
 
----
+The gateway accepts uncompressed, Brotli (`br`), and `gzip` request bodies. Both the received and decoded bodies must fit within 1 MiB. The gateway returns HTTP 413 if either body exceeds the limit. It returns HTTP 415 for unsupported content codings and HTTP 400 for invalid compressed bodies.
+
+The manifest advertises the built-in `echo` skill once. The skill returns the input object as `TaskResponse.result`. Repeating an echo request produces the same result without using the model, local tools, or conversation history.
+
+The gateway rejects other SDK skill IDs before the model runs. Use the legacy flat request format for tasks that run the agent or call local tools.
+
+SDK replies use `result.envelope`. The reply's `correlation_id` contains the request envelope ID. Both SDK and legacy replies preserve the JSON-RPC request ID. Legacy requests use flat `params` and receive flat `result` envelopes.
+
+The gateway sends SDK protocol errors in HTTP 200 responses so the SDK can report them as `RemoteRPCError`. An invalid recipient or skill returns JSON-RPC code `-32602`. The gateway returns HTTP 400 for an untrusted sender and HTTP 429 when a client reaches the rate limit.
+
+If a success response exceeds the 64 KiB gateway buffer, the gateway returns JSON-RPC code `-32603`. SDK envelopes receive HTTP 200 and flat envelopes receive HTTP 500.
+
+The sender list compares a URN supplied by the client. Control network access to the legacy route because it uses that list for agent and tool requests.
 
 ## ASAP compliance harness
 
-ShellClaw v1.0 ships a **static** signed manifest on GitHub Pages (Q-URL) and a **partial** local gateway (manifest + minimal health + `/asap` stub). The upstream [`asap-compliance`](https://pypi.org/project/asap-compliance/) pytest harness (PRD §4.12) is the reference for a **reachable live agent**. v1.0 accepts documented deviations instead of a green badge.
+CI runs the handshake, task state, and SLA validators from `asap-compliance==1.4.0` with `asap-protocol==2.6.0` on Python 3.14. The validators run against a loopback gateway with a temporary home and a stub provider. The SLA check measures an `echo` task against a five-second timeout.
 
-### Manual procedure (contributors)
+CI also starts a separate gateway for the Python SDK tests. The tests cover both compression formats, numeric precision, request correlation, and HTTP status codes.
 
-Re-run after any change to `src/asap/`, `src/gateway/routes.c`, or manifest signing (`src/crypto/`). **Not** a v1.0 release gate — for pre-release iteration only.
-
-1. **Build** — `make shellclaw`
-2. **Start gateway** — either:
-   - Existing install: `systemctl --user start shellclaw` with `[gateway] enabled`, **or**
-   - Ephemeral: `./scripts/dump_manifest.sh` (boots short-lived gateway on `127.0.0.1:18789`)
-3. **Health** — `curl -sf http://127.0.0.1:18789/health`
-4. **Manifest shape** — `curl -sf http://127.0.0.1:18789/.well-known/asap/manifest.json | head -c 200`
-5. **Run harness**:
+To run the same checks locally, build the gateway and install the pinned packages in a Python 3.14 virtual environment.
 
 ```bash
-python3 -m venv .venv-asap && source .venv-asap/bin/activate
-./scripts/run_asap_compliance.sh
-# or explicit URL:
-./scripts/run_asap_compliance.sh http://127.0.0.1:18789
+make GATEWAY=1 shellclaw
+python3.14 -m venv .venv-asap
+source .venv-asap/bin/activate
+python3 -m pip install 'asap-compliance==1.4.0' 'asap-protocol==2.6.0'
+python3 scripts/run_asap_ci.py build/shellclaw
 ```
 
-6. **Compare failures** to the [documented deviations](#documented-deviations) table below. New failures after a gateway change need a row update or a code fix.
-7. **Optional schema check** — pipe unsigned inner manifest or use `validate_manifest.sh` on `manifest_build_json` output in tests.
+For a running test gateway, use `ASAP_COMPLIANCE_SKIP_PIP=1 ./scripts/run_asap_compliance.sh http://127.0.0.1:18789`. The upstream validator sends from `urn:asap:agent:compliance-harness` to `urn:asap:agent:under-test`. Set those identities in the test gateway configuration.
 
-Requires **Python 3.13+** recommended and network for first `pip install asap-compliance` (unless `ASAP_COMPLIANCE_SKIP_PIP=1`).
-
-### How to run (reference)
-
-From the repository root, with the gateway listening (default `http://127.0.0.1:18789` per `config.example.toml`):
-
-```bash
-make shellclaw
-# Start shellclaw with [gateway] enabled, or use an ephemeral instance:
-#   ./scripts/dump_manifest.sh -o /tmp/manifest.json   # boots gateway, then exits
-
-python3 -m venv .venv-asap && source .venv-asap/bin/activate   # PEP 668 / macOS
-./scripts/run_asap_compliance.sh
-./scripts/run_asap_compliance.sh http://127.0.0.1:18789
-ASAP_AGENT_URL=http://127.0.0.1:18789 ./scripts/run_asap_compliance.sh
-```
-
-| Environment variable | Purpose |
-|---------------------|---------|
-| `ASAP_AGENT_URL` | Agent base URL (default `http://127.0.0.1:18789`) |
-| `ASAP_COMPLIANCE_SKIP_PIP=1` | Skip `pip install` when `asap-compliance` is already installed |
-| `ASAP_COMPLIANCE_PIP_USER=1` | Use `pip install --user` |
-| `ASAP_COMPLIANCE_VERSION` | Pip spec (default `asap-compliance>=1.0.0`) |
-| `ASAP_COMPLIANCE_SKIP_HEALTH=1` | Skip curl probe of `/health` before pytest |
-| `ASAP_COMPLIANCE_LIVE_TEST_DIR` | Directory for generated live pytest (default: temp) |
-
-The script installs `asap-compliance`, probes `GET $ASAP_AGENT_URL/health`, then runs three live tests (`test_live_handshake`, `test_live_state_machine`, `test_live_sla`) generated under a temp dir. It does **not** start the agent; use `scripts/dump_manifest.sh` for a short-lived local gateway during manifest publish.
-
-**Last harness run (2026-05-24):** `asap-compliance` 1.2.0, Python 3.14 venv `.venv-asap`, agent `http://127.0.0.1:18789` — **3 failed**, 0 passed (see deviations table).
-
-### v1.0 stance
-
-| Area | v1.0 | v1.0.1+ |
-|------|------|---------|
-| Marketplace discovery | Static `SignedManifest` on GitHub Pages | Optional live `endpoints.asap` + tunnel |
-| Compliance badge | Deviations documented here (PRD §4.12 OR) | Run harness green against public URL |
-| Gateway ASAP route | Manifest + health stubs; `/asap` parses legacy flat `params` | Align with harness `params.envelope`, task handlers, `HealthStatus` |
-| Manifest trust | Ed25519 + JCS in C; unit tests pass | Byte-identical verification with upstream `asap` Python |
-
-### Documented deviations
-
-Failures observed from `./scripts/run_asap_compliance.sh` against a local gateway with `[gateway] enabled` and a signed manifest served at `/.well-known/asap/manifest.json`.
-
-| Test / check | Observed | Expected (harness / upstream) | Reason | Planned fix |
-|--------------|----------|-------------------------------|--------|-------------|
-| `test_live_handshake` → `health_schema` | `GET /.well-known/asap/health` → `{"status":"ok"}` | `HealthStatus`: `status` (`healthy`/`unhealthy`), `agent_id`, `version`, `uptime_seconds`, optional `asap_version`, `load` | v1.0 minimal stub in `manifest_health_json()`; not wired to agent URN, release semver, or uptime | **v1.0.1+** — emit full `HealthStatus` from config + `board_detect` |
-| `test_live_handshake` → `manifest_signature` | `validate_signed_manifest_response(..., verify_signature=True)` raises `SignatureVerificationError` | Ed25519 over JCS-canonical inner `manifest` verifies with upstream `asap` crypto | C-side RFC 8785 JCS subset (`src/crypto/jcs.c`) + TweetNaCl sign path not yet byte-identical with Python verifier used by harness; C unit tests round-trip locally | **v1.0.1+** — align JCS + signing with upstream reference; keep `tests/test_manifest.c` + `scripts/validate_manifest.sh` |
-| `test_live_handshake` → `version_reported` | Skipped (manifest not trusted) | ASAP protocol version compatibility check after manifest parse | Cascades from `manifest_signature` failure | **v1.0.1+** — after signature fix |
-| `test_live_state_machine` → `state_agent_response` | `POST /asap` → HTTP **400** (`Invalid params: missing or bad type for 'id'`) | HTTP **200** JSON-RPC result with `task.response` envelope | Harness sends `params.envelope` + `idempotency_key` (no top-level envelope `id` in nested object); ShellClaw `asap_envelope_parse` reads **flat** envelope fields directly under `params` (legacy client shape in `asap_envelope_to_jsonrpc_request`) | **v1.0.1+** — accept `params.envelope`, generate/validate envelope `id`, implement compliance `echo` skill (or map harness skill id) |
-| `test_live_sla` → `sla_task_timeout` | `POST /asap` → HTTP **400** (same as state) | HTTP **200** within SLA window for `sla_skill_id` (`echo`) | Same JSON-RPC `params` shape mismatch; SLA cannot reach agent handler | **v1.0.1+** — same as state machine row |
-| `test_live_sla` → `sla_progress_schema` | Passed (static schema check) | Valid `TaskUpdate` progress schema | Does not require live agent success | No change for v1.0 |
-| Gateway `GET /health` (script preflight only) | `{"status":"ok","uptime":…,"version":"…"}` (gateway build label) | Not used by harness (harness uses `/.well-known/asap/health` only) | Separate ShellClaw gateway health route; harmless for harness | Optional alignment in v1.0.1+ if operators want one schema everywhere |
-
-**Note:** `/api/status` and provider health are out of scope for the ASAP harness; only well-known ASAP paths and `POST /asap` are tested.
-
-### Static manifest vs live compliance
-
-IssueOps registration (task 6.3) intentionally uses **static** manifest URL with `online_check: false` so the marketplace does not run Compliance Harness v2 against a live endpoint. Local `./scripts/run_asap_compliance.sh` is for **pre-release iteration** on a dev gateway; a green run is **not** a v1.0 release gate.
-
----
-
-## Related docs
-
-| Doc | Topic |
-|-----|-------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Module map, gateway, thread safety |
-| [SECURITY.md](SECURITY.md) | Key file permissions, gateway auth |
-| [LOCAL_INFERENCE.md](LOCAL_INFERENCE.md) | llama-server (out of ASAP scope) |
-| [issueops/register-agent-prefill.md](issueops/register-agent-prefill.md) | Copy-paste IssueOps values |
-| [MARKETPLACE_STATUS.md](MARKETPLACE_STATUS.md) | Operator checklist tracking |
+The marketplace entry uses a static signed manifest. The CI checks exercise the local gateway.

@@ -117,12 +117,99 @@ static int test_parse_valid(void)
 	return 0;
 }
 
+static int test_parse_sdk_task(void)
+{
+	const char *request =
+		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":\"req-1\",\"params\":{\"envelope\":{"
+		"\"asap_version\":\"0.1\",\"sender\":\"urn:asap:agent:a\",\"recipient\":\"urn:asap:agent:b\","
+		"\"payload_type\":\"TaskRequest\",\"payload\":{\"conversation_id\":\"c\",\"skill_id\":\"echo\",\"input\":{}},"
+		"\"correlation_id\":null,\"trace_id\":null,\"timestamp\":null}}}";
+	asap_envelope_t env;
+	cJSON *error = NULL;
+	int rc = asap_envelope_parse(request, &env, &error);
+	cJSON_Delete(error);
+	ASSERT(rc == 0);
+	ASSERT(env.id && strlen(env.id) == 26);
+	ASSERT(env.trace_id == NULL && env.correlation_id == NULL && env.timestamp == NULL);
+	ASSERT(strcmp(cJSON_GetStringValue(env.jsonrpc_request_id), "req-1") == 0);
+	asap_envelope_clear(&env);
+	return 0;
+}
+
 #define ASSERT_ERR_CODE(err, want) do { \
 	cJSON *_e = cJSON_GetObjectItem((err), "error"); \
 	ASSERT(_e != NULL); \
 	cJSON *_c = cJSON_GetObjectItem(_e, "code"); \
 	ASSERT(_c != NULL && cJSON_IsNumber(_c) && (int)_c->valuedouble == (want)); \
 } while (0)
+
+static int test_http_request_error_ids(void)
+{
+	const struct {
+		const char *request;
+		const char *numeric_id;
+		int error_code;
+		int sdk_wire;
+	} cases[] = {
+		{ "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":5000000000000001,"
+		  "\"params\":{\"envelope\":{}}}",
+		  "5000000000000001", -32602, 1 },
+		{ "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"params\":{}}",
+		  NULL, -32602, 0 },
+		{ "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":[1],\"params\":{}}",
+		  NULL, -32600, 0 },
+		{ "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":1.,\"params\":{}}",
+		  NULL, -32700, 0 },
+	};
+	asap_request_wire_t wire = {0};
+
+	for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+		asap_envelope_t env;
+		cJSON *error = NULL;
+		ASSERT(asap_envelope_parse_request(cases[i].request, &env, &error, &wire) == -1);
+		ASSERT(wire.sdk_wire == cases[i].sdk_wire);
+
+		char *json = asap_jsonrpc_print_response(error, &wire);
+		ASSERT(json != NULL);
+		cJSON *response = cJSON_Parse(json);
+		ASSERT(cJSON_IsObject(response));
+		ASSERT_ERR_CODE(response, cases[i].error_code);
+		const cJSON *id = cJSON_GetObjectItemCaseSensitive(response, "id");
+		if (cases[i].numeric_id) {
+			ASSERT(cJSON_IsNumber(id));
+			ASSERT(cJSON_GetNumberValue(id) == strtod(cases[i].numeric_id, NULL));
+			const char *number = strstr(json, cases[i].numeric_id);
+			ASSERT(number != NULL);
+			const char *start = number;
+			while (start > json && strchr(" \t\r\n", start[-1]))
+				start--;
+			ASSERT(start > json && start[-1] == ':');
+			const char *end = number + strlen(cases[i].numeric_id);
+			end += strspn(end, " \t\r\n");
+			ASSERT(*end == ',' || *end == '}');
+		} else {
+			ASSERT(cJSON_IsNull(id));
+		}
+		cJSON_Delete(response);
+		free(json);
+		cJSON_Delete(error);
+		asap_envelope_clear(&env);
+	}
+	return 0;
+}
+
+static int test_parse_bad_request_id(void)
+{
+	const char *request = "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":[],\"params\":{}}";
+	asap_envelope_t env;
+	cJSON *err = NULL;
+
+	ASSERT(asap_envelope_parse(request, &env, &err) == -1);
+	ASSERT_ERR_CODE(err, -32600);
+	ASSERT(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(err, "id")));
+	cJSON_Delete(err);
+	return 0;
+}
 
 static int test_parse_unquoted_body_fails(void)
 {
@@ -342,7 +429,10 @@ int main(int argc, char **argv)
 	if (test_clear_idempotent() != 0) { fprintf(stderr, "test_clear_idempotent failed\n"); failed++; }
 	if (test_jsonrpc_error_shape() != 0) { fprintf(stderr, "test_jsonrpc_error_shape failed\n"); failed++; }
 	if (test_jsonrpc_error_null_id() != 0) { fprintf(stderr, "test_jsonrpc_error_null_id failed\n"); failed++; }
+	if (test_parse_sdk_task() != 0) { fprintf(stderr, "test_parse_sdk_task failed\n"); failed++; }
 	if (test_parse_valid() != 0) { fprintf(stderr, "test_parse_valid failed\n"); failed++; }
+	if (test_http_request_error_ids() != 0) { fprintf(stderr, "test_http_request_error_ids failed\n"); failed++; }
+	if (test_parse_bad_request_id() != 0) { fprintf(stderr, "test_parse_bad_request_id failed\n"); failed++; }
 	if (test_parse_unquoted_body_fails() != 0) { fprintf(stderr, "test_parse_unquoted_body_fails failed\n"); failed++; }
 	if (test_parse_wrong_jsonrpc() != 0) { fprintf(stderr, "test_parse_wrong_jsonrpc failed\n"); failed++; }
 	if (test_parse_all_missing_in_turn() != 0) { fprintf(stderr, "test_parse_all_missing_in_turn failed\n"); failed++; }

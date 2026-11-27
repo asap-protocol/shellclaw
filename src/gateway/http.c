@@ -122,7 +122,7 @@ int http_start(const config_t *cfg, struct auth_ctx *auth_ctx, const char *confi
 	ctx->cfg = cfg;
 	ctx->auth = auth_ctx;
 	ctx->config_path = config_path ? strdup(config_path) : NULL;
-	ctx->start_time = time(NULL);
+	(void)clock_gettime(CLOCK_MONOTONIC, &ctx->started_at);
 	ctx->running = 1;
 	memset(&info, 0, sizeof(info));
 	info.port = config_gateway_port(cfg);
