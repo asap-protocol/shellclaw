@@ -8,6 +8,7 @@ BUILT_BIN="${ROOT}/build/shellclaw"
 STATE_DIR="${SHELLCLAW_HOME:-${HOME%/}/.shellclaw}"
 LLAMA_ENV_DIR="${SHELLCLAW_ETC_DIR:-${STATE_DIR}}"
 LLAMA_ENV_DEST="${LLAMA_ENV_DIR}/llama-server.env"
+LEGACY_LLAMA_ENV="/etc/shellclaw/llama-server.env"
 JETSON_ENV="${ROOT}/systemd/llama-server.jetson.env"
 RPI_ENV="${ROOT}/systemd/llama-server.rpi.env"
 
@@ -100,6 +101,14 @@ board_llama_env_source() {
 	esac
 }
 
+install_llama_env() (
+	local stage
+	stage="$(mktemp "${LLAMA_ENV_DIR}/.llama-server.env.XXXXXX")"
+	trap 'rm -f -- "${stage}"' EXIT
+	install -m 0600 "$1" "${stage}"
+	mv -n -- "${stage}" "${LLAMA_ENV_DEST}"
+)
+
 board_download_model_key() {
 	local board="$1"
 	case "${board}" in
@@ -134,7 +143,10 @@ validate_path "${INSTALL_BIN}" SHELLCLAW_INSTALL_BIN
 validate_env_dir "${STATE_DIR}" SHELLCLAW_HOME
 validate_env_dir "${LLAMA_ENV_DIR}" SHELLCLAW_ETC_DIR
 
-directories=("${STATE_DIR}" "${LLAMA_ENV_DIR}" "${UNIT_DIR}")
+directories=("${STATE_DIR}" "${UNIT_DIR}")
+if [[ ! -e "${LLAMA_ENV_DEST}" ]]; then
+	directories+=("${LLAMA_ENV_DIR}")
+fi
 selected_bin="${INSTALL_BIN}"
 copy_binary=0
 if [[ ! -x "${INSTALL_BIN}" || ( -z "${SHELLCLAW_INSTALL_BIN:-}" && -x "${BUILT_BIN}" ) ]]; then
@@ -152,6 +164,16 @@ if ! "${selected_bin}" --headless --help >/dev/null 2>&1; then
 	printf 'ShellClaw at %s does not accept --headless.\n' "${selected_bin}" >&2
 	echo 'Run make shellclaw. If you set SHELLCLAW_INSTALL_BIN, use a compatible binary.' >&2
 	exit 1
+fi
+
+llama_env_source=""
+if [[ ! -e "${LLAMA_ENV_DEST}" && -z "${SHELLCLAW_ETC_DIR:-}" &&
+	( -e "${LEGACY_LLAMA_ENV}" || -L "${LEGACY_LLAMA_ENV}" ) ]]; then
+	if [[ ! -f "${LEGACY_LLAMA_ENV}" || ! -r "${LEGACY_LLAMA_ENV}" ]]; then
+		printf 'Cannot read the previous llama-server environment at %s.\n' "${LEGACY_LLAMA_ENV}" >&2
+		exit 1
+	fi
+	llama_env_source="${LEGACY_LLAMA_ENV}"
 fi
 
 umask 077
@@ -181,7 +203,7 @@ if [[ ! -e "${STATE_DIR}/.env" ]]; then
 fi
 board_id="$(detect_board_id)"
 if [[ ! -e "${LLAMA_ENV_DEST}" ]]; then
-	install -m 0600 "$(board_llama_env_source "${board_id}")" "${LLAMA_ENV_DEST}"
+	install_llama_env "${llama_env_source:-$(board_llama_env_source "${board_id}")}"
 fi
 unit_stage="$(mktemp -d)"
 trap 'rm -rf -- "${unit_stage}"' EXIT
