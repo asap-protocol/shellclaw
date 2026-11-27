@@ -255,3 +255,10 @@ button.danger { background: #f85149; border-color: #f85149; }
 }
 .hw-roadmap-link { color: var(--accent); }
 .hw-roadmap-link:hover { text-decoration: underline; }
+
+#cron-create { max-width: 36rem; }
+#cron-create label { display: block; margin-top: 0.6rem; }
+#cron-create input, #cron-create textarea, #cron-create select { display: block; width: 100%; }
+#cron-create button, #cron-jobs button { margin: 0.4rem 0.4rem 0 0; }
+#cron-jobs { overflow-x: auto; }
+#cron-jobs td { overflow-wrap: anywhere; }
