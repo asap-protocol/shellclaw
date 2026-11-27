@@ -6,12 +6,12 @@
 
 #include "gateway/asap_http_body.h"
 #include "gateway/uri_match.h"
-#include <brotli/decode.h>
 #include <errno.h>
 #include <libwebsockets.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <brotli/decode.h>
 #include <zlib.h>
 
 static int asap_is_asap_post(struct lws *wsi)

@@ -350,6 +350,8 @@ $(MANIFEST_KEYS_O): src/asap/manifest_keys.c src/asap/manifest_keys.h src/core/c
 $(ASAP_HTTP_BODY_O): src/gateway/asap_http_body.c src/gateway/asap_http_body.h src/gateway/http_lws.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -c -o $@ src/gateway/asap_http_body.c
 
+$(ROUTES_O): src/gateway/asap_http_body.h
+
 $(ENVELOPE_O): src/asap/envelope.c src/asap/envelope.h src/asap/asap_version.h src/asap/ulid.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/asap/envelope.c
 
@@ -381,7 +383,7 @@ $(HTTP_O): src/gateway/http.c src/gateway/http.h src/gateway/http_lws.h src/gate
 $(HTTP_LWS_O): src/gateway/http_lws.c src/gateway/http_lws.h src/gateway/asap_http_body.h src/gateway/routes.h src/gateway/auth.h src/gateway/static.h src/gateway/ws.h src/gateway/ws_rx.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/http_lws.c
 
-$(ROUTES_O): src/gateway/routes.c src/gateway/routes.h src/gateway/asap_http_body.h src/gateway/routes_hardware.h src/gateway/http.h src/gateway/http_lws.h src/gateway/auth.h src/gateway/rate_limit.h src/tools/context.h src/asap/manifest.h src/asap/envelope.h src/asap/server.h src/asap/log.h src/core/bootstrap.h src/core/agent.h src/core/config.h src/core/config_patch.h src/core/dispatch.h src/core/reload.h src/core/memory.h src/core/skill.h src/providers/provider.h src/channels/channel.h src/tools/cron.h src/tools/tool.h
+$(ROUTES_O): src/gateway/routes.c src/gateway/routes.h src/gateway/routes_hardware.h src/gateway/http.h src/gateway/http_lws.h src/gateway/auth.h src/gateway/rate_limit.h src/tools/context.h src/asap/manifest.h src/asap/envelope.h src/asap/server.h src/asap/log.h src/core/bootstrap.h src/core/agent.h src/core/config.h src/core/config_patch.h src/core/dispatch.h src/core/reload.h src/core/memory.h src/core/skill.h src/providers/provider.h src/channels/channel.h src/tools/cron.h src/tools/tool.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/routes.c
 
 $(ROUTES_HARDWARE_O): src/gateway/routes_hardware.c src/gateway/routes_hardware.h src/gateway/routes.h src/gateway/http_lws.h src/gateway/uri_match.h src/hardware/hardware.h src/hardware/hardware_gpio_snapshot.h src/hardware/hardware_tegrastats.h src/hardware/board_detect.h src/core/config.h

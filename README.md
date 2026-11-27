@@ -54,12 +54,13 @@ ShellClaw is **not another OpenClaw clone** in a different language. It is a **h
 - `make static` — cppcheck on `src/` (requires cppcheck)
 - `make test-sanitize` — AddressSanitizer + UBSan full suite
 - `make coverage` — coverage report; fails if core < 80% (requires lcov)
-- CI enforces release binary < 2 MB; optional `asap-compliance` when the Python package is available
+- The gateway build requires libwebsockets, Brotli, and zlib. Make sure that `pkg-config` finds `libwebsockets`, `libbrotlidec`, and `zlib`.
+- CI enforces a release binary smaller than 2 MB. The ASAP validators and the official SDK tests must pass.
 - **Before opening a PR:** run `CI=true make clean && CI=true make test` (matches Linux CI with `-Werror`), or on a machine with the same apt deps as [.github/workflows/ci.yml](.github/workflows/ci.yml): `chmod +x scripts/ci-local.sh && ./scripts/ci-local.sh`
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for PR workflow, coding standards, and the pre-tag `gpio-mockup` release ritual.
 
-**Configuration:** copy [`config.example.toml`](config.example.toml) to `~/.shellclaw/config.toml` and [`.env.example`](.env.example) to `.env`. Phase 3+ keys (ASAP, sandbox, gateway) and the Jetson `[hardware]` block are documented there. Install libwebsockets, Brotli, and zlib to build the gateway. Make sure that `pkg-config` finds `libwebsockets`, `libbrotlidec`, and `zlib`. Run `GATEWAY=1 make test_gateway_http` to test the gateway.
+**Configuration:** copy [`config.example.toml`](config.example.toml) to `~/.shellclaw/config.toml` and [`.env.example`](.env.example) to `.env`. Phase 3+ keys (ASAP, sandbox, gateway) and the Jetson `[hardware]` block are documented there. Install **libwebsockets** (`pkg-config` must find it) to build the gateway and run `GATEWAY=1 make test_gateway_http`.
 
 **Jetson install (v1.0):** `./scripts/install.sh`, `./scripts/build_llama_jetson.sh`, `./scripts/download_model.sh phi3` — details in [`docs/HARDWARE_JETSON.md`](docs/HARDWARE_JETSON.md) and [`docs/LOCAL_INFERENCE.md`](docs/LOCAL_INFERENCE.md).
 
