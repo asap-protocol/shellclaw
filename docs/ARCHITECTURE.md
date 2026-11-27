@@ -115,7 +115,7 @@ SFIO pins (I2C/UART/SPI) are rejected by GPIO tools with a pinmux error — use 
 
 ShellClaw does **not** embed llama.cpp. A separate **`llama-server`** process serves OpenAI-compatible chat completions; `providers/local.c` probes `GET /health` and `GET /v1/models` at startup.
 
-- **Jetson:** CUDA build via `scripts/build_llama_jetson.sh`; systemd unit `llama-server.service` + `/etc/shellclaw/llama-server.env`.
+- **Jetson:** CUDA build via `scripts/build_llama_jetson.sh`; systemd unit `llama-server.service` + `~/.shellclaw/llama-server.env`.
 - **RPi:** CPU build via `scripts/build_llama_rpi.sh` (validated in Phase 6).
 
 Details: [LOCAL_INFERENCE.md](LOCAL_INFERENCE.md).

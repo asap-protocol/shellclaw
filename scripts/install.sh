@@ -1,29 +1,69 @@
 #!/usr/bin/env bash
-# Install helper: copy systemd user units next to ~/.config/systemd/user and print enable steps.
-#
-# Purpose: `./scripts/install.sh` — aligns with Phase 4 PRD §4.4.30; Phase 5 Task 3.5 adds
-# board-specific llama-server env under /etc/shellclaw (override via SHELLCLAW_ETC_DIR).
+# Install ShellClaw and its systemd user units.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 INSTALL_BIN="${SHELLCLAW_INSTALL_BIN:-${HOME%/}/.local/bin/shellclaw}"
-SHELLCLAW_HOME="${SHELLCLAW_HOME:-${HOME%/}/.shellclaw}"
-LLAMA_ENV_DIR="${SHELLCLAW_ETC_DIR:-/etc/shellclaw}"
+BUILT_BIN="${ROOT}/build/shellclaw"
+STATE_DIR="${SHELLCLAW_HOME:-${HOME%/}/.shellclaw}"
+LLAMA_ENV_DIR="${SHELLCLAW_ETC_DIR:-${STATE_DIR}}"
 LLAMA_ENV_DEST="${LLAMA_ENV_DIR}/llama-server.env"
 JETSON_ENV="${ROOT}/systemd/llama-server.jetson.env"
 RPI_ENV="${ROOT}/systemd/llama-server.rpi.env"
 
-install_llama_env_file() {
-	local src_template="$1"
-	mkdir -p "${LLAMA_ENV_DIR}"
-	if [[ -w "${LLAMA_ENV_DIR}" ]]; then
-		install -m 0644 "${src_template}" "${LLAMA_ENV_DEST}"
-	elif [[ "${LLAMA_ENV_DIR}" == /etc/shellclaw ]] && command -v sudo >/dev/null 2>&1; then
-		sudo install -m 0644 "${src_template}" "${LLAMA_ENV_DEST}"
-	else
-		echo "Cannot write ${LLAMA_ENV_DEST}; set SHELLCLAW_ETC_DIR or run with sufficient permissions." >&2
+validate_path() {
+	if [[ "$1" != /* || "$1" == *[[:cntrl:]]* ]]; then
+		printf 'Use an absolute path without control characters for %s.\n' "$2" >&2
 		exit 1
 	fi
+}
+
+validate_env_dir() {
+	validate_path "$1" "$2"
+	if [[ "$1" == *[\*\?\[\\]* ]]; then
+		printf 'Use a path without wildcard characters for %s.\n' "$2" >&2
+		exit 1
+	fi
+}
+
+quote_unit_value() {
+	local value="${1//%/%%}"
+	value="${value//\\/\\\\}"
+	value="${value//\"/\\\"}"
+	printf '"%s"' "${value}"
+}
+
+render_unit() {
+	local line
+	while IFS= read -r line; do
+		case "${line}" in
+		Environment=SHELLCLAW_HOME=*)
+			printf 'Environment=%s\n' "$(quote_unit_value "SHELLCLAW_HOME=${STATE_DIR}")"
+			;;
+		EnvironmentFile=-%h/.shellclaw/.env)
+			printf 'EnvironmentFile=-%s/.env\n' "${STATE_DIR//%/%%}"
+			;;
+		EnvironmentFile=%h/.shellclaw/llama-server.env)
+			printf 'EnvironmentFile=%s\n' "${LLAMA_ENV_DEST//%/%%}"
+			;;
+		ExecStart=%h/.local/bin/shellclaw*)
+			# systemd limits executable names. env passes the full path as an argument.
+			printf 'ExecStart=:/usr/bin/env -- %s --config %s%s\n' "$(quote_unit_value "${INSTALL_BIN}")" \
+				"$(quote_unit_value "${STATE_DIR}/config.toml")" "${line#*%h/.shellclaw/config.toml}"
+			;;
+		*) printf '%s\n' "${line}" ;;
+		esac
+	done <"$1"
+}
+
+install_config() {
+	local line
+	local default_prefix='~/.shellclaw/'
+	local state_prefix="${STATE_DIR//\\/\\\\}"
+	state_prefix="${state_prefix//\"/\\\"}/"
+	while IFS= read -r line; do
+		printf '%s\n' "${line//"${default_prefix}"/"${state_prefix}"}"
+	done <"${ROOT}/config.example.toml" >"${STATE_DIR}/config.toml"
 }
 
 detect_board_id() {
@@ -83,56 +123,72 @@ maybe_prompt_download_model() {
 		return 0
 	fi
 	local reply=""
-	read -r -p "Download default GGUF now via scripts/download_model.sh (${model_key})? [y/N] " reply
+	read -r -p "Download the default model (${model_key})? [y/N] " reply || return 0
 	if [[ "${reply}" =~ ^[Yy]$ ]]; then
 		bash "${ROOT}/scripts/download_model.sh" "${model_key}"
 	fi
 }
 
-mkdir -p "${UNIT_DIR}"
-install -m 0644 "${ROOT}/systemd/shellclaw.service" "${UNIT_DIR}/shellclaw.service"
-install -m 0644 "${ROOT}/systemd/llama-server.service" "${UNIT_DIR}/llama-server.service"
+validate_path "${UNIT_DIR}" XDG_CONFIG_HOME
+validate_path "${INSTALL_BIN}" SHELLCLAW_INSTALL_BIN
+validate_env_dir "${STATE_DIR}" SHELLCLAW_HOME
+validate_env_dir "${LLAMA_ENV_DIR}" SHELLCLAW_ETC_DIR
 
-board_id="$(detect_board_id)"
-env_src="$(board_llama_env_source "${board_id}")"
-install_llama_env_file "${env_src}"
-
-case "${board_id}" in
-jetson_orin_nano)
-	echo "Installed llama-server env (Jetson) at ${LLAMA_ENV_DEST}"
-	;;
-rpi_zero2w)
-	echo "Installed llama-server env (RPi) at ${LLAMA_ENV_DEST}"
-	;;
-stub)
-	echo "Board stub: installed Jetson llama-server env template at ${LLAMA_ENV_DEST} (dev/CI)"
-	;;
-unknown|*)
-	echo "Board unknown: installed Jetson llama-server env template at ${LLAMA_ENV_DEST}"
-	;;
-esac
-
-maybe_prompt_download_model "${board_id}"
-
-echo "Installed units into ${UNIT_DIR}"
-echo ""
-if [[ ! -x "${INSTALL_BIN}" ]]; then
-	echo "Warning: ShellClaw binary not found or not executable at ${INSTALL_BIN}" >&2
-	echo "Build or copy the binary before starting the service (see README)." >&2
-	echo ""
+directories=("${STATE_DIR}" "${LLAMA_ENV_DIR}" "${UNIT_DIR}")
+copy_binary=0
+if [[ ! -x "${INSTALL_BIN}" || ( -z "${SHELLCLAW_INSTALL_BIN:-}" && -x "${BUILT_BIN}" ) ]]; then
+	if [[ ! -x "${BUILT_BIN}" ]]; then
+		echo "Run make shellclaw before installation." >&2
+		exit 1
+	fi
+	copy_binary=1
+	directories+=("$(dirname "${INSTALL_BIN}")")
 fi
-echo "Environment (override before enable if needed):"
-echo "  SHELLCLAW_INSTALL_BIN=${INSTALL_BIN}"
-echo "  SHELLCLAW_HOME=${SHELLCLAW_HOME}"
-echo "  SHELLCLAW_ETC_DIR=${LLAMA_ENV_DIR} (llama-server.env)"
-echo ""
-echo "Next:"
-echo '  Prefix `systemctl` with `sudo` only if you use system-wide systemd instead of `--user`.'
+
+umask 077
+mkdir -p "${directories[@]}"
+for dir in "${directories[@]}"; do
+	if [[ ! -w "${dir}" || ! -x "${dir}" ]]; then
+		printf 'Cannot write to %s.\n' "${dir}" >&2
+		exit 1
+	fi
+done
+for path in "${INSTALL_BIN}" "${STATE_DIR}/config.toml" "${STATE_DIR}/.env" "${LLAMA_ENV_DEST}" \
+	"${UNIT_DIR}/shellclaw.service" "${UNIT_DIR}/llama-server.service"; do
+	if [[ ( -e "${path}" || -L "${path}" ) && ! -f "${path}" ]]; then
+		printf 'Expected a regular file at %s.\n' "${path}" >&2
+		exit 1
+	fi
+done
+
+if ((copy_binary)); then
+	install -m 0755 "${BUILT_BIN}" "${INSTALL_BIN}"
+fi
+if [[ ! -e "${STATE_DIR}/config.toml" ]]; then
+	install_config
+fi
+if [[ ! -e "${STATE_DIR}/.env" ]]; then
+	install -m 0600 "${ROOT}/.env.example" "${STATE_DIR}/.env"
+fi
+board_id="$(detect_board_id)"
+if [[ ! -e "${LLAMA_ENV_DEST}" ]]; then
+	install -m 0600 "$(board_llama_env_source "${board_id}")" "${LLAMA_ENV_DEST}"
+fi
+unit_stage="$(mktemp -d)"
+trap 'rm -rf -- "${unit_stage}"' EXIT
+for unit in shellclaw.service llama-server.service; do
+	render_unit "${ROOT}/systemd/${unit}" >"${unit_stage}/${unit}"
+	install -m 0644 "${unit_stage}/${unit}" "${UNIT_DIR}/${unit}"
+done
+
+echo "Installed user units in ${UNIT_DIR}."
+echo "ShellClaw binary is at ${INSTALL_BIN}."
+echo "Edit ${STATE_DIR}/config.toml before you start ShellClaw."
+echo "For a cloud provider, set its API key in ${STATE_DIR}/.env."
 echo "  systemctl --user daemon-reload"
 echo "  systemctl --user enable --now shellclaw.service"
-echo "Optional (local inference):"
-echo "  Build llama-server: ./scripts/build_llama_jetson.sh or ./scripts/build_llama_rpi.sh"
-echo "  Download model: ./scripts/download_model.sh phi3   # Jetson default"
-echo "                  ./scripts/download_model.sh tinyllama   # RPi default"
+echo "If you use local inference, build llama-server and download a model."
+echo "Set MODEL in ${LLAMA_ENV_DEST} to the model path."
 echo "  systemctl --user enable --now llama-server.service"
-echo "  (uses ${LLAMA_ENV_DEST}; restart after editing MODEL=)"
+
+maybe_prompt_download_model "${board_id}"

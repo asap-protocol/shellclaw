@@ -1,6 +1,6 @@
 # Local inference (llama.cpp)
 
-ShellClaw uses an external **`llama-server`** process (from [llama.cpp](https://github.com/ggml-org/llama.cpp)) as an OpenAI-compatible chat backend. The agent binary talks HTTP only — it does not link CUDA or GGML. Configuration: `[providers.local]` in `~/.shellclaw/config.toml` and `/etc/shellclaw/llama-server.env` for the systemd unit.
+ShellClaw uses an external **`llama-server`** process (from [llama.cpp](https://github.com/ggml-org/llama.cpp)) as an OpenAI-compatible chat backend. The agent binary talks HTTP only — it does not link CUDA or GGML. Configuration: `[providers.local]` in `~/.shellclaw/config.toml` and `~/.shellclaw/llama-server.env` for the systemd user unit.
 
 For software architecture, see [ARCHITECTURE.md](ARCHITECTURE.md). For Jetson setup order, see [HARDWARE_JETSON.md](HARDWARE_JETSON.md).
 
@@ -66,9 +66,13 @@ Verify: `llama-server --version` must **not** report CUDA/GPU.
 
 ## systemd integration
 
-`./scripts/install.sh` copies board-specific env to `/etc/shellclaw/llama-server.env` and installs user units:
+Run `./scripts/install.sh` to install the user units and `~/.shellclaw/llama-server.env`.
+To use a different directory for `llama-server.env`, set `SHELLCLAW_ETC_DIR` before you run the installer.
+Set `MODEL` in that file to the full path to your downloaded model.
+Start both services after you install the model and `llama-server`.
 
 ```bash
+systemctl --user daemon-reload
 systemctl --user enable --now llama-server.service shellclaw.service
 ```
 

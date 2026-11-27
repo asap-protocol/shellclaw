@@ -1,7 +1,7 @@
 # Optional llama.cpp HTTP server consumed by ShellClaw local provider (PRD §4.4.29)
 #
 # Board-specific defaults: systemd/llama-server.jetson.env or llama-server.rpi.env.
-# Install copies one to /etc/shellclaw/llama-server.env (Task 3.5). Port must match
+# The installer copies one to %h/.shellclaw/llama-server.env. Port must match
 # [providers.local] in config.toml (default http://127.0.0.1:8080).
 [Unit]
 Description=llama.cpp HTTP server for ShellClaw fallback
@@ -9,7 +9,7 @@ After=network.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/shellclaw/llama-server.env
+EnvironmentFile=%h/.shellclaw/llama-server.env
 ExecStart=/usr/local/bin/llama-server --model "${MODEL}" --host 127.0.0.1 --port "${PORT}" -t "${THREADS}" -ngl "${NGL}" -c "${CTX_SIZE}"
 Restart=on-failure
 RestartSec=5
