@@ -513,6 +513,25 @@ static int test_cron_ack_advances_recurring_past_due_minute(void)
 	return 0;
 }
 
+static int test_ack_keeps_a_legacy_five_field_schedule(void)
+{
+	const char *schedule = "cron:* * * * * daily";
+	char id[] = "new-report";
+	long long now = (long long)time(NULL);
+	cron_job_row_t row;
+
+	ASSERT(memory_init(":memory:") == 0);
+	ASSERT(cron_create_job(schedule, "Report", "cli", "default", id, sizeof(id)) == -1);
+	ASSERT(cron_job_create("existing-report", schedule, "Report", "cli", "default", now - 1, 1) == 0);
+	ASSERT(cron_ack_delivery("existing-report") == 0);
+	ASSERT(cron_job_get_by_id("existing-report", &row) == 1);
+	ASSERT(row.enabled && strcmp(row.schedule, schedule) == 0);
+	ASSERT(row.next_run > now && row.next_run <= (long long)time(NULL) + 60);
+	cron_job_row_free(&row);
+	memory_cleanup();
+	return 0;
+}
+
 static int test_cron_ack_fail_closed_on_parse_error(void)
 {
 	const char *path = "/tmp/shellclaw_test_cron_ack_fail_closed.db";
@@ -947,6 +966,7 @@ int main(void)
 	RUN(test_cron_poll_holds_agent_lock());
 	RUN(test_cron_poll_keeps_job_until_ack());
 	RUN(test_cron_ack_advances_recurring_past_due_minute());
+	RUN(test_ack_keeps_a_legacy_five_field_schedule());
 	RUN(test_cron_ack_fail_closed_on_parse_error());
 	RUN(test_cron_poll_waits_before_reoffer());
 	RUN(test_cron_job_rejects_oversized_text());

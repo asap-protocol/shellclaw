@@ -80,7 +80,12 @@ static int cron_expr_matches(const int fields[10], int min, int hour, int mday, 
 	       field_matches(wday, fields[8], fields[9]);
 }
 
-static int parse_cron_expr(const char *s, int fields[10])
+typedef enum {
+	CRON_SCHEDULE_INPUT,
+	CRON_SCHEDULE_STORED
+} cron_schedule_source_t;
+
+static int parse_cron_expr(const char *s, int fields[10], cron_schedule_source_t source)
 {
 	char buf[256];
 	if (!s || strlen(s) >= sizeof(buf)) return -1;
@@ -92,7 +97,8 @@ static int parse_cron_expr(const char *s, int fields[10])
 	char *p = strtok_r(buf, " \t", &ctx);
 	for (; p && n < 5; p = strtok_r(NULL, " \t", &ctx))
 		tokens[n++] = p;
-	if (n != 5 || p) return -1;
+	/* Older versions accepted text after the fifth field of a stored schedule. */
+	if (n != 5 || (p && source == CRON_SCHEDULE_INPUT)) return -1;
 	int lo, hi;
 	if (parse_range(tokens[0], &lo, &hi, 0, 59) != 0) return -1;
 	fields[0] = lo; fields[1] = hi;
@@ -109,10 +115,10 @@ static int parse_cron_expr(const char *s, int fields[10])
 	return 0;
 }
 
-static long long cron_next_from_expr(const char *cron_part, long long now)
+static long long cron_next_from_expr(const char *cron_part, long long now, cron_schedule_source_t source)
 {
 	int fields[10];
-	if (parse_cron_expr(cron_part, fields) != 0) return -1;
+	if (parse_cron_expr(cron_part, fields, source) != 0) return -1;
 	/*
 	 * Start at the beginning of the *next* minute. Returning the current
 	 * minute would leave next_run <= now after a fire, so the job would
@@ -152,7 +158,8 @@ static int interval_next_run(const char *num, long long now, long long *next_out
 	return 0;
 }
 
-int cron_parse_next_run(const char *schedule, long long now, long long *next_out)
+static int cron_next_run(const char *schedule, long long now, long long *next_out,
+			 cron_schedule_source_t source)
 {
 	if (!schedule || !next_out) return -1;
 	if (strncmp(schedule, CRON_PREFIX_INTERVAL, strlen(CRON_PREFIX_INTERVAL)) == 0)
@@ -172,10 +179,15 @@ int cron_parse_next_run(const char *schedule, long long now, long long *next_out
 	const char *cron_part = schedule;
 	if (strncmp(schedule, CRON_PREFIX_CRON, strlen(CRON_PREFIX_CRON)) == 0)
 		cron_part = schedule + strlen(CRON_PREFIX_CRON);
-	long long next = cron_next_from_expr(cron_part, now);
+	long long next = cron_next_from_expr(cron_part, now, source);
 	if (next < 0) return -1;
 	*next_out = next;
 	return 0;
+}
+
+int cron_parse_next_run(const char *schedule, long long now, long long *next_out)
+{
+	return cron_next_run(schedule, now, next_out, CRON_SCHEDULE_INPUT);
 }
 
 int cron_is_one_shot(const char *schedule)
@@ -582,7 +594,7 @@ int cron_ack_delivery(const char *job_id)
 		return rc;
 	}
 	now = (long long)time(NULL);
-	rc = cron_parse_next_run(row.schedule, now, &next);
+	rc = cron_next_run(row.schedule, now, &next, CRON_SCHEDULE_STORED);
 	if (rc != 0) {
 		/* A stored schedule the parser now rejects (e.g. a legacy comma
 		 * list) would otherwise snooze the job for a year with no trace;
