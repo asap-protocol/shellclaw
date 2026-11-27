@@ -49,8 +49,8 @@ endif
 VENDOR_CFLAGS := $(filter-out -Werror,$(CFLAGS))
 # TweetNaCl 20140427 (unmodified): sign-compare in FOR() and sigma[] string init on Clang/GCC -Wextra
 # -Wunterminated-string-initialization exists on newer Clang/GCC only (not Ubuntu CI GCC 13).
-TWEETNACL_WNO_UNTERM := $(shell $(CC) -Wno-error=unterminated-string-initialization -E -x c -o /dev/null /dev/null 2>&1 \
-	| grep -qE 'unrecognized|unknown option|no option' || echo -Wno-error=unterminated-string-initialization)
+TWEETNACL_WNO_UNTERM := $(shell $(CC) -Werror -Wunterminated-string-initialization \
+	-fsyntax-only -x c /dev/null >/dev/null 2>&1 && echo -Wno-error=unterminated-string-initialization)
 TWEETNACL_CFLAGS := $(CFLAGS) -Wno-error=sign-compare $(TWEETNACL_WNO_UNTERM) -fwrapv
 # cJSON (vendored): cJSON_CreateNumber casts the double to int unconditionally, which is UB for
 # NaN/Inf (NaN fails both saturation comparisons and falls into the plain (int)cast). ShellClaw's
