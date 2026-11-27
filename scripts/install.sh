@@ -135,14 +135,23 @@ validate_env_dir "${STATE_DIR}" SHELLCLAW_HOME
 validate_env_dir "${LLAMA_ENV_DIR}" SHELLCLAW_ETC_DIR
 
 directories=("${STATE_DIR}" "${LLAMA_ENV_DIR}" "${UNIT_DIR}")
+selected_bin="${INSTALL_BIN}"
 copy_binary=0
 if [[ ! -x "${INSTALL_BIN}" || ( -z "${SHELLCLAW_INSTALL_BIN:-}" && -x "${BUILT_BIN}" ) ]]; then
 	if [[ ! -x "${BUILT_BIN}" ]]; then
 		echo "Run make shellclaw before installation." >&2
 		exit 1
 	fi
+	selected_bin="${BUILT_BIN}"
 	copy_binary=1
 	directories+=("$(dirname "${INSTALL_BIN}")")
+fi
+
+# Pass --headless before --help so the binary must parse both options.
+if ! "${selected_bin}" --headless --help >/dev/null 2>&1; then
+	printf 'ShellClaw at %s does not accept --headless.\n' "${selected_bin}" >&2
+	echo 'Run make shellclaw. If you set SHELLCLAW_INSTALL_BIN, use a compatible binary.' >&2
+	exit 1
 fi
 
 umask 077
@@ -162,7 +171,7 @@ for path in "${INSTALL_BIN}" "${STATE_DIR}/config.toml" "${STATE_DIR}/.env" "${L
 done
 
 if ((copy_binary)); then
-	install -m 0755 "${BUILT_BIN}" "${INSTALL_BIN}"
+	install -m 0755 "${selected_bin}" "${INSTALL_BIN}"
 fi
 if [[ ! -e "${STATE_DIR}/config.toml" ]]; then
 	install_config

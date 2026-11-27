@@ -9,6 +9,14 @@ export HOME="${sandbox}/home"
 export XDG_CONFIG_HOME="${HOME}/.config"
 mkdir -p "${HOME}"
 
+# Use a source fixture so these tests control whether a build is available.
+repo="${ROOT}"
+ROOT="${sandbox}/source"
+mkdir -p "${ROOT}/scripts" "${ROOT}/build"
+cp "${repo}/scripts/install.sh" "${ROOT}/scripts/"
+cp "${repo}/config.example.toml" "${repo}/.env.example" "${ROOT}/"
+cp -R "${repo}/systemd" "${ROOT}/"
+
 fake_bin="${sandbox}/bin"
 mkdir -p "${fake_bin}"
 fake_shellclaw="${fake_bin}/shellclaw"
@@ -23,6 +31,9 @@ write_fake_shellclaw() {
 	local board="$1"
 	cat >"${fake_shellclaw}" <<EOF
 #!/usr/bin/env bash
+if [[ "\${1:-}" == "--headless" && "\${2:-}" == "--help" ]]; then
+	exit 0
+fi
 if [[ "\${1:-}" == "--detect-board" ]]; then
 	printf '%s\n' "${board}"
 	exit 0
@@ -101,6 +112,41 @@ SHELLCLAW_INSTALL_NONINTERACTIVE=1 bash "${ROOT}/scripts/install.sh"
 for file in config.toml .env llama-server.env; do
 	grep -Fx '# local file' "${HOME}/.shellclaw/${file}"
 done
+
+# A custom path with an older executable must keep its binary and units.
+cp -R "${unit_dir}" "${sandbox}/previous-units"
+compatible_bin="${sandbox}/compatible-shellclaw"
+cp "${fake_shellclaw}" "${compatible_bin}"
+cat >"${fake_shellclaw}" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+	--help) echo "Usage: shellclaw [--help] [--detect-board]" ;;
+	--detect-board) echo stub ;;
+	*) exit 1 ;;
+esac
+EOF
+cp "${fake_shellclaw}" "${sandbox}/previous-binary"
+
+for build in absent present; do
+	if [[ "${build}" == present ]]; then
+		cp "${compatible_bin}" "${ROOT}/build/shellclaw"
+	fi
+	if SHELLCLAW_INSTALL_BIN="${fake_shellclaw}" SHELLCLAW_INSTALL_NONINTERACTIVE=1 \
+			bash "${ROOT}/scripts/install.sh" >"${sandbox}/rejected.log" 2>&1; then
+		printf 'test_install_script: incompatible custom binary accepted with build %s\n' "${build}" >&2
+		exit 1
+	fi
+	grep -F -- '--headless' "${sandbox}/rejected.log"
+	cmp "${fake_shellclaw}" "${sandbox}/previous-binary"
+	diff -r "${unit_dir}" "${sandbox}/previous-units"
+done
+
+cp "${compatible_bin}" "${fake_shellclaw}"
+SHELLCLAW_INSTALL_BIN="${fake_shellclaw}" SHELLCLAW_INSTALL_NONINTERACTIVE=1 \
+	bash "${ROOT}/scripts/install.sh"
+grep -Fx "ExecStart=:/usr/bin/env -- \"${fake_shellclaw}\" --config \"${HOME}/.shellclaw/config.toml\" --headless" \
+	"${unit_dir}/shellclaw.service"
+cmp "${fake_shellclaw}" "${compatible_bin}"
 
 invalid_xdg="${sandbox}/invalid-xdg"
 touch "${sandbox}/not-a-directory"
