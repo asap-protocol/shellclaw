@@ -6,9 +6,22 @@
 
 #include "asap/manifest.h"
 
-static const char *HEALTH_JSON = "{\"status\":\"ok\"}";
+#include "core/config.h"
+#include "core/version.h"
+#include "cJSON.h"
 
-const char *manifest_health_json(void)
+char *manifest_health_json(const config_t *cfg, double uptime_seconds)
 {
-	return HEALTH_JSON;
+	cJSON *health = cJSON_CreateObject();
+	char *json = NULL;
+
+	if (health &&
+	    cJSON_AddStringToObject(health, "status", "healthy") &&
+	    cJSON_AddStringToObject(health, "agent_id", config_asap_agent_urn(cfg)) &&
+	    cJSON_AddStringToObject(health, "version", SHELLCLAW_RELEASE_VERSION) &&
+	    cJSON_AddStringToObject(health, "asap_version", ASAP_DISCOVERY_VERSION) &&
+	    cJSON_AddNumberToObject(health, "uptime_seconds", uptime_seconds))
+		json = cJSON_PrintUnformatted(health);
+	cJSON_Delete(health);
+	return json;
 }

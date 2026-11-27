@@ -25,16 +25,17 @@
 
 static int test_health_json(void)
 {
-	const char *s = manifest_health_json();
-	ASSERT(s != NULL);
-	ASSERT(strstr(s, "status") != NULL);
-	ASSERT(strstr(s, "ok") != NULL);
-	cJSON *parsed = cJSON_Parse(s);
+	char *json = manifest_health_json(NULL, 12.25);
+	ASSERT(json != NULL);
+	cJSON *parsed = cJSON_Parse(json);
+	free(json);
 	ASSERT(parsed != NULL);
-	cJSON *status = cJSON_GetObjectItem(parsed, "status");
-	ASSERT(status != NULL);
-	ASSERT(cJSON_IsString(status));
-	ASSERT(strcmp(status->valuestring, "ok") == 0);
+	const char *status = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(parsed, "status"));
+	const char *agent = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(parsed, "agent_id"));
+	cJSON *uptime = cJSON_GetObjectItemCaseSensitive(parsed, "uptime_seconds");
+	ASSERT(status && strcmp(status, "healthy") == 0);
+	ASSERT(agent && strcmp(agent, "urn:asap:agent:shellclaw") == 0);
+	ASSERT(cJSON_IsNumber(uptime) && uptime->valuedouble == 12.25);
 	cJSON_Delete(parsed);
 	return 0;
 }

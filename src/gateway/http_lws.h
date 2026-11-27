@@ -37,7 +37,7 @@ typedef struct http_server_ctx {
 	const config_t *cfg;
 	auth_ctx_t *auth;
 	char *config_path;
-	time_t start_time;
+	struct timespec started_at;
 	struct lws_context *lws_ctx;
 	pthread_t thread;
 	volatile int running;

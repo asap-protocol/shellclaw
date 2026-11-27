@@ -7,6 +7,9 @@
 
 #include "cJSON.h"
 
+/** Protocol version advertised by the manifest and health endpoints. */
+#define ASAP_DISCOVERY_VERSION "2.1.0"
+
 struct config;
 typedef struct config config_t;
 

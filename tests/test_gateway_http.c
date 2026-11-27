@@ -644,6 +644,17 @@ static int test_api_config_401_malformed_auth(void)
 	return 0;
 }
 
+static int asap_rpc_id_is(const char *body, const char *expected_json)
+{
+	cJSON *root = cJSON_Parse(body);
+	cJSON *expected = cJSON_Parse(expected_json);
+	int matches = cJSON_Compare(cJSON_GetObjectItemCaseSensitive(root, "id"), expected, 1);
+
+	cJSON_Delete(root);
+	cJSON_Delete(expected);
+	return matches;
+}
+
 static int test_asap_invalid_body(void)
 {
 	long code;
@@ -653,6 +664,7 @@ static int test_asap_invalid_body(void)
 	ASSERT(code == 400);
 	ASSERT(body != NULL);
 	ASSERT(strstr(body, "error") != NULL);
+	ASSERT(asap_rpc_id_is(body, "null"));
 	free(body);
 	return 0;
 }
@@ -661,11 +673,14 @@ static int test_asap_missing_fields(void)
 {
 	long code;
 	char *body = NULL;
-	int r = http_post(gw_url("/asap"), "{\"jsonrpc\":\"2.0\"}", &code, &body);
+	int r = http_post(gw_url("/asap"),
+		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\","
+		"\"params\":{},\"id\":\"qa-missing-fields\"}", &code, &body);
 	ASSERT(r == 0);
 	ASSERT(code == 400);
 	ASSERT(body != NULL);
 	ASSERT(strstr(body, "error") != NULL);
+	ASSERT(asap_rpc_id_is(body, "\"qa-missing-fields\""));
 	free(body);
 	return 0;
 }
@@ -768,6 +783,7 @@ static int test_asap_task_request(void)
 	ASSERT(asap_http_is(code, 200, body));
 	ASSERT(body != NULL);
 	ASSERT(asap_result_payload_type_is(body, "task.response"));
+	ASSERT(asap_rpc_id_is(body, "42"));
 	free(body);
 	return 0;
 }
@@ -802,6 +818,7 @@ static int test_asap_mcp_unknown_tool(void)
 	ASSERT(code == 400);
 	ASSERT(body != NULL);
 	ASSERT(asap_error_code_is(body, -32001));
+	ASSERT(asap_rpc_id_is(body, "42"));
 	free(body);
 	return 0;
 }
@@ -905,6 +922,7 @@ static int test_asap_rejects_oversized_response(const char *token)
 	ASSERT(parsed != NULL);
 	cJSON_Delete(parsed);
 	ASSERT(asap_error_code_is(body, -32603));
+	ASSERT(asap_rpc_id_is(body, "42"));
 	ASSERT(strstr(body, "exceeds gateway buffer") != NULL);
 	free(body);
 	if (token && token[0]) {
@@ -1020,9 +1038,21 @@ static int test_health_wellknown(void)
 	ASSERT(r == 0);
 	ASSERT(code == 200);
 	ASSERT(body != NULL);
-	ASSERT(strstr(body, "status") != NULL);
-	ASSERT(strstr(body, "ok") != NULL);
+	cJSON *json = cJSON_Parse(body);
 	free(body);
+	ASSERT(json != NULL);
+	const char *status = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "status"));
+	const char *agent = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "agent_id"));
+	const char *version = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "version"));
+	const char *asap_version = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "asap_version"));
+	cJSON *uptime = cJSON_GetObjectItemCaseSensitive(json, "uptime_seconds");
+	int valid = status && strcmp(status, "healthy") == 0 &&
+		agent && strcmp(agent, "urn:asap:agent:shellclaw-gateway-test") == 0 &&
+		version && strcmp(version, SHELLCLAW_RELEASE_VERSION) == 0 &&
+		asap_version && strcmp(asap_version, "2.1.0") == 0 &&
+		cJSON_IsNumber(uptime) && uptime->valuedouble >= 0.0;
+	cJSON_Delete(json);
+	ASSERT(valid);
 	return 0;
 }
 
@@ -1749,6 +1779,7 @@ int main(int argc, char **argv)
 	fprintf(f, "[agent]\nmodel = \"test\"\n");
 	fprintf(f, "[providers]\nfallback_chain = [ \"stub\" ]\n");
 	fprintf(f, "[gateway]\nenabled = true\nhost = \"127.0.0.1\"\nport = %d\n", port);
+	fprintf(f, "[asap]\nagent_urn = \"urn:asap:agent:shellclaw-gateway-test\"\n");
 	fprintf(f, "[memory]\ndb_path = \"%s/.shellclaw/memory.db\"\n", g_test_home);
 	fprintf(f, "[skills]\ndir = \"%s\"\n", skills_dir);
 	fclose(f);

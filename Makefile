@@ -330,7 +330,7 @@ src/gateway/static.o: src/gateway/static.c src/gateway/static.h src/gateway/ui_a
 $(JCS_O): src/crypto/jcs.c src/crypto/jcs.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/crypto/jcs.c
 
-$(MANIFEST_O): src/asap/manifest.c src/asap/manifest.h
+$(MANIFEST_O): src/asap/manifest.c src/asap/manifest.h src/asap/manifest_build.h src/core/config.h src/core/version.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/asap/manifest.c
 
 $(MANIFEST_PROFILES_O): src/asap/manifest_profiles.c src/asap/manifest_profiles.h src/core/config.h src/hardware/board_detect.h

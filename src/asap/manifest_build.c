@@ -19,7 +19,6 @@
 #define MAX_SKILL_NAMES 64
 #define MAX_SKILL_DESC 512
 #define MAX_ASAP_ENDPOINT 512
-#define MANIFEST_ASAP_VERSION "2.1.0"
 /* Upstream asap.crypto.models defaults (verified against asap-protocol 2.5.0):
  * the signed inner manifest must carry every field Manifest.model_dump() would
  * populate, since asap.crypto.signing.canonicalize re-derives these defaults. */
@@ -453,7 +452,7 @@ cJSON *manifest_build_tree(const config_t *cfg)
 		cJSON_Delete(root);
 		return NULL;
 	}
-	item = cJSON_CreateString(MANIFEST_ASAP_VERSION);
+	item = cJSON_CreateString(ASAP_DISCOVERY_VERSION);
 	if (!item) {
 		cJSON_Delete(root);
 		return NULL;

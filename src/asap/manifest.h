@@ -13,10 +13,13 @@ extern "C" {
 #endif
 
 /**
- * Return ASAP health JSON string.
- * Static string; do not free.
+ * Return the ASAP health response as JSON, or NULL on allocation failure.
+ * The caller frees the returned string.
+ *
+ * @param cfg             Agent configuration, or NULL for defaults.
+ * @param uptime_seconds  Seconds since the gateway started.
  */
-const char *manifest_health_json(void);
+char *manifest_health_json(const config_t *cfg, double uptime_seconds);
 
 #ifdef __cplusplus
 }
