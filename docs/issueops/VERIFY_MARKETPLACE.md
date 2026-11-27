@@ -18,7 +18,7 @@ Short operator runbook after IssueOps registration for ShellClaw v1.0. Prefill a
 | Derived hardware | Filters or detail show `hardware_class` = `edge_accelerator` |
 | Derived inference | `inference_modes` includes `local_cuda` (and `cloud`) |
 | Derived I/O | `hardware_io` includes `gpio` and `i2c` |
-| Skills | Exactly four: `assistant`, `edge_briefing`, `server_admin`, `gpio_control` |
+| Skills | Match `capabilities.skills[].id` in the published signed manifest |
 | Registry shape | Live entry matches [`docs/fixtures/shellclaw-v1.0-registry-entry.json`](../fixtures/shellclaw-v1.0-registry-entry.json) for derived fields and `online_check: false` |
 
 ## Quick diff (optional)

@@ -16,7 +16,7 @@ When the gateway is enabled and signing keys load successfully, ShellClaw serves
 |-------|------|----------|
 | `GET /.well-known/asap/manifest.json` | Public | **SignedManifest** JSON (inner manifest + Ed25519 signature + public_key) |
 | `GET /.well-known/asap/health` | Public | Agent liveness, manifest identity and version, and gateway uptime |
-| `POST /asap` | Rate-limited | Accepts flat legacy messages and SDK echo tasks. Requests have a 1 MiB limit. Responses that exceed the 64 KiB gateway buffer return HTTP 500 with JSON-RPC error `-32603`. |
+| `POST /asap` | Rate-limited | Accepts flat legacy messages and SDK Echo tasks. The gateway limits the received and decoded bodies to 1 MiB each. See [SDK tasks](#sdk-tasks) for response limits. |
 | `GET /api/asap/log` | Bearer | Inbound ASAP message log |
 
 Implementation: `src/asap/manifest.c`, `src/gateway/routes.c`. If keys cannot load, manifest route returns **500** and agent startup fails fast (`init_subsystems()`).
@@ -135,9 +135,9 @@ Use the table below. These are the **only** fields you enter manually. Do **not*
 - **`hardware_class`**, **`inference_modes`**, **`hardware_io`** — derived from `capabilities.hardware` and `capabilities.inference` in the signed manifest (e.g. Jetson: `edge_accelerator`, `["cloud","local_cuda"]`, `["gpio","i2c"]`).
 - **`self-signed` in tags** — upstream `anti_spam.py` adds the trust tag automatically; including it in your CSV can cause rejection or duplication.
 
-#### Skills: v1.0 allowed vs deferred
+#### Marketplace skills
 
-IssueOps skills CSV must match manifest `capabilities.skills[].id` for v1.0:
+Use `capabilities.skills[].id` from the published signed manifest for the IssueOps skills CSV. The v1.0 fixture lists these installed skills.
 
 | Skill | v1.0 |
 |-------|------|
@@ -150,7 +150,7 @@ IssueOps skills CSV must match manifest `capabilities.skills[].id` for v1.0:
 | `home_monitor` | No — Phase 7 (v1.2) |
 | `visual_monitor` | No — Phase 7 (v1.2) |
 
-Manifest code registers skills from `skills/*.md` on disk; default descriptions in `src/asap/manifest_build.c` align with the four IDs above. **Discovery cap:** the manifest lists the built-in `echo` skill and up to **64** installed skills on `/.well-known/asap/manifest.json`; additional on-disk skills remain available via the authenticated `/api/skills` API at runtime.
+ShellClaw reads installed skills from `skills/*.md`. The current gateway manifest lists the built-in `echo` skill and up to 64 installed skills. The authenticated `/api/skills` endpoint lists additional installed skills.
 
 #### `online_check` and Demo badge
 
@@ -185,7 +185,7 @@ Complete **after** Wave 5 signing is live on GitHub Pages (task 6.1) and **befor
 
 - [ ] `curl` manifest URL; `verify_manifest` succeeds
 - [ ] Open [Register Agent](https://github.com/asap-protocol/asap-protocol/issues/new?template=register_agent.yml) and fill fields from the table above (or prefill doc)
-- [ ] Skills CSV is exactly four v1.0 skills (no sensor/camera/monitor skills)
+- [ ] Skills CSV matches the published signed manifest. Include `echo` if the manifest lists it.
 - [ ] Tags CSV does **not** include `self-signed`
 - [ ] Did **not** manually add `hardware_class`, `inference_modes`, or `hardware_io` in the issue body
 - [ ] Wait for bot merge; confirm listing on marketplace Browse UI
@@ -212,19 +212,27 @@ Security: exposing the agent increases attack surface — complete gateway harde
 
 ## SDK tasks
 
-The Python SDK sends requests to `POST /asap`. Put a `TaskRequest` in `params.envelope`. The recipient must match `[asap].agent_urn`. If you configure `[asap].trusted_senders`, the gateway also checks the sender URN against that list.
+The Python SDK sends requests to `POST /asap`. Put a `TaskRequest` in `params.envelope`. The recipient must match `[asap].agent_urn`. If you configure `[asap].trusted_senders`, the gateway checks the sender URN against that list.
+
+The gateway accepts uncompressed, Brotli (`br`), and `gzip` request bodies. Both the received and decoded bodies must fit within 1 MiB. The gateway returns HTTP 413 if either body exceeds the limit. It returns HTTP 415 for unsupported content codings and HTTP 400 for invalid compressed bodies.
 
 The manifest advertises the built-in `echo` skill once. The skill returns the input object as `TaskResponse.result`. Repeating an echo request produces the same result without using the model, local tools, or conversation history.
 
 The gateway rejects other SDK skill IDs before the model runs. Use the legacy flat request format for tasks that run the agent or call local tools.
 
-SDK replies use `result.envelope`. The reply's `correlation_id` contains the request envelope ID. Both SDK and legacy replies echo the top-level JSON-RPC ID when the gateway can read it. Legacy requests use flat `params` and receive flat `result` envelopes.
+SDK replies use `result.envelope`. The reply's `correlation_id` contains the request envelope ID. Both SDK and legacy replies preserve the JSON-RPC request ID. Legacy requests use flat `params` and receive flat `result` envelopes.
+
+The gateway sends SDK protocol errors in HTTP 200 responses so the SDK can report them as `RemoteRPCError`. An invalid recipient or skill returns JSON-RPC code `-32602`. The gateway returns HTTP 400 for an untrusted sender and HTTP 429 when a client reaches the rate limit.
+
+If a success response exceeds the 64 KiB gateway buffer, the gateway returns JSON-RPC code `-32603`. SDK envelopes receive HTTP 200 and flat envelopes receive HTTP 500.
 
 The sender list compares a URN supplied by the client. Control network access to the legacy route because it uses that list for agent and tool requests.
 
 ## ASAP compliance harness
 
-CI runs the handshake, task state, and SLA validators from `asap-compliance==1.4.0` with `asap-protocol==2.6.0` on Python 3.14. The job starts a real gateway on loopback with a temporary home and a stub provider. All three tests must pass. The SLA check sends an `echo` task and measures it against a five-second timeout.
+CI runs the handshake, task state, and SLA validators from `asap-compliance==1.4.0` with `asap-protocol==2.6.0` on Python 3.14. The validators run against a loopback gateway with a temporary home and a stub provider. The SLA check measures an `echo` task against a five-second timeout.
+
+CI also starts a separate gateway for the Python SDK tests. The tests cover both compression formats, numeric precision, request correlation, and HTTP status codes.
 
 To run the same checks locally, build the gateway and install the pinned packages in a Python 3.14 virtual environment.
 
