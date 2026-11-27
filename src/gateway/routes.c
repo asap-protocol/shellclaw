@@ -564,57 +564,65 @@ static void handle_session_delete(const char *id, char *buf, size_t size, int *s
 	json_response(buf, size, status, "{\"ok\":true}");
 }
 
-static void free_cron_job_rows(cron_job_row_t *rows, int n)
+enum { CRON_LEGACY_LIMIT = 64, CRON_PAGE_SIZE = 16 };
+
+static cJSON *cron_list_item(const cron_job_row_t *row, int preview)
 {
-	int i;
-	if (!rows || n <= 0) return;
-	for (i = 0; i < n; i++)
-		cron_job_row_free(&rows[i]);
+	cJSON *obj = cJSON_CreateObject();
+	if (obj && cJSON_AddStringToObject(obj, "id", row->id) &&
+	    cJSON_AddStringToObject(obj, preview ? "schedule_preview" : "schedule", row->schedule) &&
+	    cJSON_AddStringToObject(obj, preview ? "message_preview" : "message", row->message) &&
+	    cJSON_AddStringToObject(obj, "channel", row->channel) &&
+	    cJSON_AddStringToObject(obj, "recipient", row->recipient) &&
+	    cJSON_AddNumberToObject(obj, "next_run", (double)row->next_run) &&
+	    cJSON_AddBoolToObject(obj, "enabled", row->enabled))
+		return obj;
+	cJSON_Delete(obj);
+	return NULL;
 }
 
-static void handle_cron_list(char *buf, size_t size, int *status)
+static void handle_cron_list(const char *after, char *buf, size_t size, int *status)
 {
-	cron_job_row_t *rows = calloc(64, sizeof(cron_job_row_t));
-	int n;
-	int i;
-	if (!rows) { json_error(buf, size, status, 500, "Out of memory"); return; }
+	int limit = after ? CRON_PAGE_SIZE : CRON_LEGACY_LIMIT;
+	cron_job_row_t *rows = calloc((size_t)limit + 1, sizeof(*rows));
+	cJSON *root = NULL, *jobs;
+	char *serialized = NULL;
+	int n = 0;
+	if (!rows) goto fail;
 	agent_lock();
-	n = cron_job_list(rows, 64);
+	n = after ? cron_job_list_previews(after, rows, limit + 1) : cron_job_list(rows, limit + 1);
 	agent_unlock();
-	if (n < 0) {
-		free(rows);
-		json_error(buf, size, status, 500, "Internal error");
-		return;
+	if (n < 0) goto fail;
+	if (!after && n > limit) goto too_large;
+	if (after) {
+		root = cJSON_CreateObject();
+		jobs = root ? cJSON_AddArrayToObject(root, "jobs") : NULL;
+		if (!jobs || !(n > limit ? cJSON_AddStringToObject(root, "next_after", rows[limit - 1].id)
+					 : cJSON_AddNullToObject(root, "next_after"))) goto fail;
+	} else {
+		root = jobs = cJSON_CreateArray();
+		if (!jobs) goto fail;
 	}
-	cJSON *arr = cJSON_CreateArray();
-	if (!arr) {
-		free_cron_job_rows(rows, n);
-		free(rows);
-		json_error(buf, size, status, 500, "Internal error");
-		return;
+	for (int i = 0; i < n && i < limit; i++) {
+		cJSON *item = cron_list_item(&rows[i], after != NULL);
+		if (!item) goto fail;
+		cJSON_AddItemToArray(jobs, item);
 	}
-	for (i = 0; i < n; i++) {
-		cJSON *obj = cJSON_CreateObject();
-		if (!obj) {
-			free_cron_job_rows(rows, n);
-			free(rows);
-			cJSON_Delete(arr);
-			json_error(buf, size, status, 500, "Internal error");
-			return;
-		}
-		cJSON_AddItemToObject(obj, "id", cJSON_CreateString(rows[i].id));
-		cJSON_AddItemToObject(obj, "schedule", cJSON_CreateString(rows[i].schedule ? rows[i].schedule : ""));
-		cJSON_AddItemToObject(obj, "message", cJSON_CreateString(rows[i].message ? rows[i].message : ""));
-		cJSON_AddItemToObject(obj, "channel", cJSON_CreateString(rows[i].channel));
-		cJSON_AddItemToObject(obj, "recipient", cJSON_CreateString(rows[i].recipient));
-		cJSON_AddItemToObject(obj, "next_run", cJSON_CreateNumber((double)rows[i].next_run));
-		cJSON_AddItemToObject(obj, "enabled", cJSON_CreateBool(rows[i].enabled));
-		cJSON_AddItemToArray(arr, obj);
-	}
-	free_cron_job_rows(rows, n);
+	serialized = cJSON_PrintUnformatted(root);
+	if (!serialized) goto fail;
+	if (strlen(serialized) >= size) goto too_large;
+	json_response(buf, size, status, serialized);
+	goto done;
+too_large:
+	json_error(buf, size, status, 413, "Use /api/cron/page to read the jobs in pages.");
+	goto done;
+fail:
+	json_error(buf, size, status, 500, "Cannot read the jobs.");
+done:
+	free(serialized);
+	cJSON_Delete(root);
+	for (int i = 0; i < n; i++) cron_job_row_free(&rows[i]);
 	free(rows);
-	json_print_to_buf(arr, buf, size, status);
-	cJSON_Delete(arr);
 }
 
 static void handle_cron_create(const char *body, size_t body_len, char *buf, size_t size, int *status)
@@ -1058,9 +1066,23 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		return 0;
 	}
 	if (uri_exact_eq(uri, uri_len, "/api/cron")) {
-		if (method == HTTP_GET) handle_cron_list(buf, size, status);
+		if (method == HTTP_GET) handle_cron_list(NULL, buf, size, status);
 		else if (method == HTTP_POST) handle_cron_create(body, body_len, buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
+		return 0;
+	}
+	if (method == HTTP_GET && uri_exact_eq(uri, uri_len, "/api/cron/page")) {
+		char after[512] = "";
+		int n = -1;
+		if (wsi && lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_URI_ARGS) >= (int)sizeof(after) - 1) {
+			json_error(buf, size, status, 400, "The page cursor is too long.");
+			return 0;
+		}
+		if (wsi) n = lws_get_urlarg_by_name_safe(wsi, "after=", after, sizeof(after));
+		if (n >= 128 || (n >= 0 && strlen(after) != (size_t)n))
+			json_error(buf, size, status, 400, "Invalid page cursor.");
+		else
+			handle_cron_list(n < 0 ? "" : after, buf, size, status);
 		return 0;
 	}
 	if (uri_has_prefix(uri, uri_len, "/api/cron/")) {

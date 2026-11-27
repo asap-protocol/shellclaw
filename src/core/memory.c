@@ -490,26 +490,38 @@ int cron_job_update_next_run(const char *id, long long next_run)
 	return ret;
 }
 
-int cron_job_list(cron_job_row_t *out, int max_count)
+static int read_cron_rows(const char *sql, const char *after, cron_job_row_t *out, int max_count)
 {
+	sqlite3_stmt *stmt = NULL;
+	int count = 0, rc;
 	if (!g_db || !out || max_count <= 0) return -1;
 	memory_sqlite_entry_probe();
-	const char *sql = "SELECT id, schedule, message, channel, recipient, next_run, enabled "
-		"FROM cron_jobs ORDER BY next_run ASC, id ASC";
-	sqlite3_stmt *stmt = NULL;
 	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-	int count = 0;
-	while (count < max_count && sqlite3_step(stmt) == SQLITE_ROW) {
-		if (fill_cron_job_row(stmt, &out[count]) != 0) {
-			for (int i = 0; i < count; i++)
-				cron_job_row_free(&out[i]);
-			sqlite3_finalize(stmt);
-			return -1;
-		}
+	sqlite3_bind_int(stmt, 1, max_count);
+	if (after) sqlite3_bind_text(stmt, 2, after, -1, SQLITE_TRANSIENT);
+	while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+		if (fill_cron_job_row(stmt, &out[count]) != 0) break;
 		count++;
 	}
 	sqlite3_finalize(stmt);
-	return count;
+	if (rc == SQLITE_DONE) return count;
+	for (int i = 0; i < count; i++) cron_job_row_free(&out[i]);
+	return -1;
+}
+
+int cron_job_list(cron_job_row_t *out, int max_count)
+{
+	return read_cron_rows("SELECT id, schedule, message, channel, recipient, next_run, enabled "
+			      "FROM cron_jobs ORDER BY next_run, id LIMIT ?1", NULL, out, max_count);
+}
+
+int cron_job_list_previews(const char *after, cron_job_row_t *out, int max_count)
+{
+	/* SQLite substr counts Unicode characters and preserves complete UTF-8 sequences. */
+	const char *sql = "SELECT id, substr(schedule,1,128) || CASE WHEN length(schedule)>128 THEN '...' ELSE '' END, "
+		"substr(message,1,160) || CASE WHEN length(message)>160 THEN '...' ELSE '' END, "
+		"channel, recipient, next_run, enabled FROM cron_jobs WHERE id > ?2 ORDER BY id LIMIT ?1";
+	return read_cron_rows(sql, after ? after : "", out, max_count);
 }
 
 int cron_job_list_due(long long now, const cron_due_key_t *after,

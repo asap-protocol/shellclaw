@@ -180,3 +180,13 @@ Never commit credentials; use `.env.example` as reference.
 | [LOCAL_INFERENCE.md](LOCAL_INFERENCE.md) | llama.cpp, models, tegrastats |
 | [ASAP.md](ASAP.md) | Manifest, marketplace, compliance harness |
 | [SECURITY.md](SECURITY.md) | Threat model, sandbox audit |
+
+## Read scheduled jobs
+
+Send an authenticated `GET /api/cron/page` request for the first 16 jobs, in ID order.
+Each entry includes a schedule preview and a message preview. ShellClaw keeps the full text for delivery.
+If `next_after` contains an ID, URL-encode it and send `GET /api/cron/page?after=ID`.
+A null cursor means that the list is complete.
+
+`GET /api/cron` returns the original array with full messages when it fits in one response.
+If the list exceeds 64 jobs or the response buffer, this endpoint returns HTTP 413.
