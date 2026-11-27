@@ -361,48 +361,58 @@ int webchat_store_accept(const char *session, const char *request, const char *t
 	return sqlite3_finalize(stmt) == SQLITE_OK ? rc : -1;
 }
 
-int webchat_store_claim(char *session, size_t session_size, char *text, size_t text_size)
+int webchat_store_claim(int64_t *seq, char *session, size_t session_size, char *text, size_t text_size)
 {
 	const char *sql = "UPDATE webchat_turns SET state=1 WHERE seq=("
 		"SELECT seq FROM webchat_turns WHERE state=0 ORDER BY seq LIMIT 1"
 		") AND length(CAST(session AS BLOB)) < ?1 AND length(CAST(text AS BLOB)) < ?2 "
-		"RETURNING session, text";
+		"RETURNING seq, session, text";
 	sqlite3_stmt *stmt = NULL;
-	if (!g_db || sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
-		return -1;
-	sqlite3_bind_int64(stmt, 1, (sqlite3_int64)session_size);
-	sqlite3_bind_int64(stmt, 2, (sqlite3_int64)text_size);
-	int step = sqlite3_step(stmt);
-	int rc = 0;
-	if (step == SQLITE_ROW) {
-		const char *saved_session = (const char *)sqlite3_column_text(stmt, 0);
-		const char *saved_text = (const char *)sqlite3_column_text(stmt, 1);
-		if (saved_session && saved_text) {
-			memcpy(session, saved_session, strlen(saved_session) + 1);
-			memcpy(text, saved_text, strlen(saved_text) + 1);
-			rc = 1;
-		} else {
-			rc = -1;
+	if (!g_db || !seq || !session || !text) return -1;
+	sqlite3_mutex *mutex = sqlite3_db_mutex(g_db);
+	sqlite3_mutex_enter(mutex);
+	int rc = -1;
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+	    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)session_size) == SQLITE_OK &&
+	    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)text_size) == SQLITE_OK) {
+		int step = sqlite3_step(stmt);
+		if (step == SQLITE_ROW) {
+			int64_t claimed = sqlite3_column_int64(stmt, 0);
+			const char *saved_session = (const char *)sqlite3_column_text(stmt, 1);
+			const char *saved_text = (const char *)sqlite3_column_text(stmt, 2);
+			if (saved_session && saved_text) {
+				memcpy(session, saved_session, strlen(saved_session) + 1);
+				memcpy(text, saved_text, strlen(saved_text) + 1);
+				if (sqlite3_step(stmt) == SQLITE_DONE) {
+					*seq = claimed;
+					rc = 1;
+				}
+			}
+		} else if (step == SQLITE_DONE) {
+			rc = 0;
 		}
-	} else if (step != SQLITE_DONE) {
-		rc = -1;
 	}
-	return sqlite3_finalize(stmt) == SQLITE_OK ? rc : -1;
+	if (sqlite3_finalize(stmt) != SQLITE_OK) rc = -1;
+	sqlite3_mutex_leave(mutex);
+	return rc;
 }
 
-int webchat_store_finish(const char *session, const char *reply)
+int webchat_store_finish(int64_t seq, const char *reply)
 {
-	const char *sql = "UPDATE webchat_turns SET state=2, reply=?1 "
-		"WHERE session=?2 AND state=1 RETURNING seq";
+	const char *sql = "UPDATE webchat_turns SET state=2, reply=?1 WHERE seq=?2 AND state=1";
 	sqlite3_stmt *stmt = NULL;
-	if (!g_db || sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
-		return -1;
+	if (!g_db || seq <= 0 || !reply) return -1;
+	sqlite3_mutex *mutex = sqlite3_db_mutex(g_db);
+	sqlite3_mutex_enter(mutex);
 	int rc = -1;
-	if (sqlite3_bind_text(stmt, 1, reply, -1, SQLITE_STATIC) == SQLITE_OK &&
-	    sqlite3_bind_text(stmt, 2, session, -1, SQLITE_STATIC) == SQLITE_OK &&
-	    sqlite3_step(stmt) == SQLITE_ROW)
-		rc = 0;
-	return sqlite3_finalize(stmt) == SQLITE_OK ? rc : -1;
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+	    sqlite3_bind_text(stmt, 1, reply, -1, SQLITE_STATIC) == SQLITE_OK &&
+	    sqlite3_bind_int64(stmt, 2, seq) == SQLITE_OK &&
+	    sqlite3_step(stmt) == SQLITE_DONE)
+		rc = sqlite3_changes(g_db) == 1 ? 0 : WEBCHAT_FINISH_NOT_RUNNING;
+	if (sqlite3_finalize(stmt) != SQLITE_OK) rc = -1;
+	sqlite3_mutex_leave(mutex);
+	return rc;
 }
 
 int webchat_store_recover(void)

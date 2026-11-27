@@ -55,13 +55,13 @@ static int send_then_maybe_ack_cron(const channel_t *ch, const channel_incoming_
 {
 	const char *cron_job_id;
 	int send_err;
-	if (!ch || !ch->send || !msg)
+	if (!ch || (!ch->reply && !ch->send) || !msg)
 		return -1;
 	cron_job_id = ch->name && strcmp(ch->name, "cron") == 0 ? msg->user_id : NULL;
 	/* Keep a silent job due until its destination is available. */
 	if (cron_job_id && agent_err == 0 && provider_text_is_blank(text))
 		return maybe_ack_cron(cron_job_id, msg);
-	send_err = ch->send(msg->session_id, text, NULL, 0);
+	send_err = ch->reply ? ch->reply(msg, text) : ch->send(msg->session_id, text, NULL, 0);
 	if (send_err != 0)
 		return send_err;
 	return agent_err == 0 ? maybe_ack_cron(cron_job_id, NULL) : 0;

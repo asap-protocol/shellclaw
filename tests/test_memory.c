@@ -216,14 +216,16 @@ static int test_webchat_turn_recovery(void)
 {
 	const char *path = "/tmp/shellclaw_test_webchat_turns.db";
 	char id[128], text[128], history[1024];
+	int64_t seq;
 	remove(path);
 	ASSERT(memory_init(path) == 0);
 	ASSERT(webchat_store_accept("device-a", "id-a", "A private draft") == 0);
 	ASSERT(webchat_store_accept("device-a", "id-a", "A private draft") == 0);
 	ASSERT(webchat_store_accept("device-a", "id-a", "Different content") == 1);
 	ASSERT(webchat_store_accept("device-b", "id-a", "Other device") == 0);
-	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 1);
+	ASSERT(webchat_store_claim(&seq, id, sizeof(id), text, sizeof(text)) == 1);
 	ASSERT(strcmp(id, "device-a") == 0 && strcmp(text, "A private draft") == 0);
+	int64_t interrupted = seq;
 	memory_cleanup();
 
 	ASSERT(memory_init(path) == 0);
@@ -233,12 +235,15 @@ static int test_webchat_turn_recovery(void)
 	ASSERT(!strstr(history, "Other device"));
 	ASSERT(webchat_store_history("device-b", 0, history, sizeof(history)) == 0);
 	ASSERT(strstr(history, "Other device") && !strstr(history, "A private draft"));
-	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 1);
+	ASSERT(webchat_store_claim(&seq, id, sizeof(id), text, sizeof(text)) == 1);
 	ASSERT(strcmp(id, "device-b") == 0 && strcmp(text, "Other device") == 0);
-	ASSERT(webchat_store_finish(id, "Persisted reply") == 0);
-	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 0);
+	ASSERT(seq > interrupted);
+	ASSERT(webchat_store_finish(interrupted, "Stale reply") == WEBCHAT_FINISH_NOT_RUNNING);
+	ASSERT(webchat_store_finish(seq, "Persisted reply") == 0);
+	ASSERT(webchat_store_finish(seq, "Other reply") == WEBCHAT_FINISH_NOT_RUNNING);
+	ASSERT(webchat_store_claim(&seq, id, sizeof(id), text, sizeof(text)) == 0);
 	ASSERT(webchat_store_accept("device-b", "id-a", "Other device") == 0);
-	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 0);
+	ASSERT(webchat_store_claim(&seq, id, sizeof(id), text, sizeof(text)) == 0);
 	ASSERT(webchat_store_history("device-b", 0, history, sizeof(history)) == 0);
 	ASSERT(strstr(history, "Persisted reply"));
 	memory_cleanup();
@@ -250,6 +255,7 @@ static int test_webchat_delete_transaction(void)
 {
 	const char *path = "/tmp/shellclaw_test_webchat_delete.db";
 	char id[128], text[128], history[1024];
+	int64_t seq;
 	sqlite3 *db = NULL;
 	remove(path);
 	ASSERT(memory_init(path) == 0);
@@ -258,8 +264,8 @@ static int test_webchat_delete_transaction(void)
 	ASSERT(webchat_store_accept("device-a", "id-a", "A private draft") == 0);
 	ASSERT(webchat_store_accept("device-b", "id-b", "Other device") == 0);
 	ASSERT(webchat_store_delete("device-a") == WEBCHAT_DELETE_BUSY);
-	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 1);
-	ASSERT(webchat_store_finish(id, "A private reply") == 0);
+	ASSERT(webchat_store_claim(&seq, id, sizeof(id), text, sizeof(text)) == 1);
+	ASSERT(webchat_store_finish(seq, "A private reply") == 0);
 
 	ASSERT(sqlite3_open(path, &db) == SQLITE_OK);
 	const char *abort_delete = "CREATE TRIGGER block_webchat_delete BEFORE UPDATE ON webchat_turns "

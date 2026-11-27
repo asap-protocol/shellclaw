@@ -115,10 +115,12 @@ int session_list(char **session_ids_out, int max_count);
 int webchat_store_accept(const char *session, const char *request, const char *text);
 
 /** Claim the next WebChat turn. Return 1 when claimed, 0 when empty, or -1 on error. */
-int webchat_store_claim(char *session, size_t session_size, char *text, size_t text_size);
+int webchat_store_claim(int64_t *seq, char *session, size_t session_size, char *text, size_t text_size);
 
-/** Save the reply for the current WebChat turn. Return 0 on success or -1 on error. */
-int webchat_store_finish(const char *session, const char *reply);
+enum { WEBCHAT_FINISH_NOT_RUNNING = 1 };
+
+/** Save the reply for @p seq. Return 0, WEBCHAT_FINISH_NOT_RUNNING, or -1 on error. */
+int webchat_store_finish(int64_t seq, const char *reply);
 
 /** Finish interrupted turns. Call once after the gateway binds its listen socket. */
 int webchat_store_recover(void);

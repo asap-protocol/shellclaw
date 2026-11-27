@@ -7,9 +7,13 @@
 #include "channels/channel.h"
 #include "channels/webchat.h"
 #include "core/agent.h"
+#include "core/dispatch.h"
 #include "core/memory.h"
 #include "gateway/http_lws.h"
 #include "gateway/routes.h"
+#include "sqlite3.h"
+#include <stdlib.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -93,10 +97,61 @@ static int test_dashboard_sqlite_holds_agent_lock(void)
 	return 0;
 }
 
+static int test_webchat_retries_reply(void)
+{
+	char path[] = "/tmp/shellclaw_test_webchat_retry_XXXXXX";
+	const char *session = WEBCHAT_DEVICE_PREFIX "test-device";
+	const char *reject_reply = "CREATE TRIGGER reject_chat_reply BEFORE UPDATE ON webchat_turns "
+		"WHEN new.state=2 BEGIN SELECT RAISE(ABORT,'Test failed reply write'); END;";
+	sqlite3 *maintenance = NULL;
+	channel_incoming_msg_t msg = {0};
+	char history[2048];
+	const channel_t *chat = channel_webchat_get();
+	int fd = mkstemp(path);
+	ASSERT(fd >= 0);
+	close(fd);
+	ASSERT(memory_init(path) == 0);
+	ASSERT(chat->init(NULL) == 0);
+	ASSERT(webchat_store_accept(session, "first", "/status") == 0);
+	ASSERT(webchat_store_accept(session, "second", "/reset") == 0);
+	ASSERT(chat->poll(&msg, 0) == 1);
+	ASSERT(strcmp(msg.text, "/status") == 0);
+	ASSERT(sqlite3_open(path, &maintenance) == SQLITE_OK);
+	ASSERT(sqlite3_exec(maintenance, reject_reply, NULL, NULL, NULL) == SQLITE_OK);
+	(void)handle_message(chat, &msg);
+	channel_incoming_msg_clear(&msg);
+	ASSERT(webchat_store_history(session, 0, history, sizeof(history)) == 0);
+	ASSERT(strstr(history, "\"reply\":null") != NULL);
+	ASSERT(!strstr(history, "second"));
+	ASSERT(sqlite3_exec(maintenance, "DROP TRIGGER reject_chat_reply", NULL, NULL, NULL) == SQLITE_OK);
+
+	ASSERT(chat->poll(&msg, 0) == 1);
+	ASSERT(strcmp(msg.text, "/reset") == 0);
+	ASSERT(webchat_store_history(session, 0, history, sizeof(history)) == 0);
+	int saved_before_next = strstr(history, "\"id\":\"first\",\"text\":\"/status\",\"reply\":\"ShellClaw ") != NULL;
+	ASSERT(sqlite3_exec(maintenance, reject_reply, NULL, NULL, NULL) == SQLITE_OK);
+	(void)handle_message(chat, &msg);
+	channel_incoming_msg_clear(&msg);
+	ASSERT(sqlite3_exec(maintenance, "DROP TRIGGER reject_chat_reply", NULL, NULL, NULL) == SQLITE_OK);
+	ASSERT(sqlite3_close(maintenance) == SQLITE_OK);
+	chat->cleanup();
+
+	ASSERT(webchat_store_recover() == 0);
+	ASSERT(webchat_store_history(session, 0, history, sizeof(history)) == 0);
+	int separate_replies = strstr(history, "\"id\":\"first\",\"text\":\"/status\",\"reply\":\"ShellClaw ") &&
+		strstr(history, "\"id\":\"second\",\"text\":\"/reset\",\"reply\":\"Model context cleared.");
+	ASSERT(webchat_store_delete(session) == 0);
+	memory_cleanup();
+	remove(path);
+	ASSERT(saved_before_next && separate_replies);
+	return 0;
+}
+
 int main(void)
 {
-	if (test_dashboard_sqlite_holds_agent_lock() != 0)
-		return 1;
+	int failed = test_dashboard_sqlite_holds_agent_lock();
+	failed |= test_webchat_retries_reply();
+	if (failed) return 1;
 	printf("test_gateway_db_lock: all tests passed\n");
 	return 0;
 }
