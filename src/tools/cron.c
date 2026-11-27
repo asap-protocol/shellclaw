@@ -80,7 +80,12 @@ static int cron_expr_matches(const int fields[10], int min, int hour, int mday, 
 	       field_matches(wday, fields[8], fields[9]);
 }
 
-static int parse_cron_expr(const char *s, int fields[10])
+typedef enum {
+	CRON_SCHEDULE_INPUT,
+	CRON_SCHEDULE_STORED
+} cron_schedule_source_t;
+
+static int parse_cron_expr(const char *s, int fields[10], cron_schedule_source_t source)
 {
 	char buf[256];
 	if (!s || strlen(s) >= sizeof(buf)) return -1;
@@ -89,9 +94,11 @@ static int parse_cron_expr(const char *s, int fields[10])
 	char *ctx = NULL;
 	const char *tokens[5];
 	int n = 0;
-	for (char *p = strtok_r(buf, " \t", &ctx); p && n < 5; p = strtok_r(NULL, " \t", &ctx))
+	char *p = strtok_r(buf, " \t", &ctx);
+	for (; p && n < 5; p = strtok_r(NULL, " \t", &ctx))
 		tokens[n++] = p;
-	if (n != 5) return -1;
+	/* Older versions accepted text after the fifth field of a stored schedule. */
+	if (n != 5 || (p && source == CRON_SCHEDULE_INPUT)) return -1;
 	int lo, hi;
 	if (parse_range(tokens[0], &lo, &hi, 0, 59) != 0) return -1;
 	fields[0] = lo; fields[1] = hi;
@@ -108,10 +115,10 @@ static int parse_cron_expr(const char *s, int fields[10])
 	return 0;
 }
 
-static long long cron_next_from_expr(const char *cron_part, long long now)
+static long long cron_next_from_expr(const char *cron_part, long long now, cron_schedule_source_t source)
 {
 	int fields[10];
-	if (parse_cron_expr(cron_part, fields) != 0) return -1;
+	if (parse_cron_expr(cron_part, fields, source) != 0) return -1;
 	/*
 	 * Start at the beginning of the *next* minute. Returning the current
 	 * minute would leave next_run <= now after a fire, so the job would
@@ -151,7 +158,8 @@ static int interval_next_run(const char *num, long long now, long long *next_out
 	return 0;
 }
 
-int cron_parse_next_run(const char *schedule, long long now, long long *next_out)
+static int cron_next_run(const char *schedule, long long now, long long *next_out,
+			 cron_schedule_source_t source)
 {
 	if (!schedule || !next_out) return -1;
 	if (strncmp(schedule, CRON_PREFIX_INTERVAL, strlen(CRON_PREFIX_INTERVAL)) == 0)
@@ -162,18 +170,24 @@ int cron_parse_next_run(const char *schedule, long long now, long long *next_out
 		long long ts;
 		/* A partial convert (at:2026-10-08 -> 2026) is already due, so the
 		 * one-shot fires on the next poll and ack deletes the future reminder. */
+		errno = 0;
 		ts = strtoll(num, &end, 10);
-		if (!end || end == num || *end != '\0') return -1;
+		if (end == num || *end != '\0' || errno == ERANGE) return -1;
 		*next_out = ts;
 		return 0;
 	}
 	const char *cron_part = schedule;
 	if (strncmp(schedule, CRON_PREFIX_CRON, strlen(CRON_PREFIX_CRON)) == 0)
 		cron_part = schedule + strlen(CRON_PREFIX_CRON);
-	long long next = cron_next_from_expr(cron_part, now);
+	long long next = cron_next_from_expr(cron_part, now, source);
 	if (next < 0) return -1;
 	*next_out = next;
 	return 0;
+}
+
+int cron_parse_next_run(const char *schedule, long long now, long long *next_out)
+{
+	return cron_next_run(schedule, now, next_out, CRON_SCHEDULE_INPUT);
 }
 
 int cron_is_one_shot(const char *schedule)
@@ -289,6 +303,28 @@ static cron_target_status_t cron_stored_target(const char *channel, const char *
 			return CRON_TARGET_INVALID;
 	}
 	return cron_resolve_target(channel, recipient, CRON_TARGET_STORED, NULL);
+}
+
+static cron_target_status_t cron_row_target(const cron_job_row_t *row)
+{
+	return cron_stored_target(row->channel, row->recipient, row->channel_truncated, row->recipient_truncated);
+}
+
+const char *cron_job_delivery_state(const struct cron_job_row *row)
+{
+	cron_target_status_t target = cron_row_target(row);
+	if (target == CRON_TARGET_INVALID) return "invalid_destination";
+	if (!row->enabled) return "paused";
+	return target == CRON_TARGET_READY ? "scheduled" : "waiting_for_channel";
+}
+
+int cron_toggle_job(const char *id)
+{
+	cron_job_row_t row;
+	if (cron_job_get_by_id(id, &row) != 1) return -1;
+	int cannot_resume = !row.enabled && cron_row_target(&row) == CRON_TARGET_INVALID;
+	cron_job_row_free(&row);
+	return cannot_resume ? CRON_INVALID_DESTINATION : cron_job_toggle(id);
 }
 
 int cron_create_job(const char *schedule, const char *message,
@@ -515,8 +551,7 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 		cron_sleep_ms((long)timeout_ms);
 	agent_lock();
 	found = cron_job_get_by_id(first, row) == 1 && row->enabled && row->next_run <= now &&
-		cron_stored_target(row->channel, row->recipient, row->channel_truncated,
-				   row->recipient_truncated) == CRON_TARGET_READY;
+		cron_row_target(row) == CRON_TARGET_READY;
 	agent_unlock();
 	if (found)
 		return 1;
@@ -570,7 +605,7 @@ int cron_ack_delivery(const char *job_id)
 		return rc;
 	}
 	now = (long long)time(NULL);
-	rc = cron_parse_next_run(row.schedule, now, &next);
+	rc = cron_next_run(row.schedule, now, &next, CRON_SCHEDULE_STORED);
 	if (rc != 0) {
 		/* A stored schedule the parser now rejects (e.g. a legacy comma
 		 * list) would otherwise snooze the job for a year with no trace;
@@ -729,9 +764,11 @@ static int cron_tool_execute(const char *args_json, char *result_buf, size_t max
 			snprintf(result_buf, max_len, "{\"error\":\"id required\"}");
 			return -1;
 		}
-		if (cron_job_toggle(id_node->valuestring) != 0) {
+		int rc = cron_toggle_job(id_node->valuestring);
+		if (rc != 0) {
 			cJSON_Delete(root);
-			snprintf(result_buf, max_len, "{\"error\":\"job not found\"}");
+			snprintf(result_buf, max_len, "{\"error\":\"%s\"}", rc == CRON_INVALID_DESTINATION
+				 ? "Cannot resume a job with an invalid destination" : "job not found");
 			return -1;
 		}
 		snprintf(result_buf, max_len, "{\"ok\":true}");

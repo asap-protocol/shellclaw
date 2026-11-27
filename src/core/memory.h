@@ -230,6 +230,9 @@ int cron_job_list_due(long long now, const cron_due_key_t *after,
  */
 int cron_job_list(cron_job_row_t *out, int max_count);
 
+/** List job previews after an exclusive ID, in ID order. Free each returned row. */
+int cron_job_list_previews(const char *after, cron_job_row_t *out, int max_count);
+
 /**
  * Get the next due job (next_run <= now, enabled).
  *

@@ -194,6 +194,9 @@ static int test_schedule_rejects_partial_numbers(void)
 	ASSERT(next == 99);
 	ASSERT(cron_parse_next_run("at:tomorrow", now, &next) == -1);
 	ASSERT(cron_parse_next_run("at:", now, &next) == -1);
+	ASSERT(cron_parse_next_run("at:9223372036854775808", now, &next) == -1);
+	ASSERT(cron_parse_next_run("at:-9223372036854775809", now, &next) == -1);
+	ASSERT(cron_parse_next_run("cron:0 9 * * * extra", now, &next) == -1);
 	ASSERT(cron_parse_next_run("interval:60abc", now, &next) == -1);
 	ASSERT(cron_parse_next_run("cron:0 9 * * 1,3,5", now, &next) == -1);
 	ASSERT(cron_parse_next_run("cron:0 9 1,15 * *", now, &next) == -1);
@@ -510,6 +513,25 @@ static int test_cron_ack_advances_recurring_past_due_minute(void)
 	return 0;
 }
 
+static int test_ack_keeps_a_legacy_five_field_schedule(void)
+{
+	const char *schedule = "cron:* * * * * daily";
+	char id[] = "new-report";
+	long long now = (long long)time(NULL);
+	cron_job_row_t row;
+
+	ASSERT(memory_init(":memory:") == 0);
+	ASSERT(cron_create_job(schedule, "Report", "cli", "default", id, sizeof(id)) == -1);
+	ASSERT(cron_job_create("existing-report", schedule, "Report", "cli", "default", now - 1, 1) == 0);
+	ASSERT(cron_ack_delivery("existing-report") == 0);
+	ASSERT(cron_job_get_by_id("existing-report", &row) == 1);
+	ASSERT(row.enabled && strcmp(row.schedule, schedule) == 0);
+	ASSERT(row.next_run > now && row.next_run <= (long long)time(NULL) + 60);
+	cron_job_row_free(&row);
+	memory_cleanup();
+	return 0;
+}
+
 static int test_cron_ack_fail_closed_on_parse_error(void)
 {
 	const char *path = "/tmp/shellclaw_test_cron_ack_fail_closed.db";
@@ -804,6 +826,7 @@ static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
 	ASSERT(cron_ack_delivery(msg.user_id) == 0);
 	channel_incoming_msg_clear(&msg);
 	ASSERT(cron_job_get_by_id("old-chat", &row) == 1 && row.enabled == 0);
+	ASSERT(strcmp(cron_job_delivery_state(&row), "invalid_destination") == 0);
 	ASSERT(strcmp(row.channel, "webchat") == 0 && strcmp(row.recipient, "webchat:42") == 0);
 	ASSERT(strcmp(row.message, "old") == 0 && strcmp(row.schedule, "at:1") == 0 && row.next_run == due - 2);
 	cron_job_row_free(&row);
@@ -813,6 +836,11 @@ static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
 	cron_job_row_free(&row);
 	ASSERT(cron_job_get_by_id("waiting00", &row) == 1 && row.enabled == 1);
 	ASSERT(row.next_run == due - 1);
+	cron_job_row_free(&row);
+	char result[128];
+	ASSERT(tool_cron_get()->execute("{\"operation\":\"toggle\",\"id\":\"old-chat\"}", result, sizeof(result)) != 0);
+	ASSERT(strstr(result, "destination") != NULL);
+	ASSERT(cron_job_get_by_id("old-chat", &row) == 1 && row.enabled == 0);
 	cron_job_row_free(&row);
 	ASSERT(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
 	ASSERT(cron->poll(&msg, 80) == 0);
@@ -944,6 +972,7 @@ int main(void)
 	RUN(test_cron_poll_holds_agent_lock());
 	RUN(test_cron_poll_keeps_job_until_ack());
 	RUN(test_cron_ack_advances_recurring_past_due_minute());
+	RUN(test_ack_keeps_a_legacy_five_field_schedule());
 	RUN(test_cron_ack_fail_closed_on_parse_error());
 	RUN(test_cron_poll_waits_before_reoffer());
 	RUN(test_cron_job_rejects_oversized_text());

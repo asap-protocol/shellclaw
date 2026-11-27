@@ -90,44 +90,49 @@
     if (!token) { window.location.hash = '#/pair'; return; }
     stopDashboardLive();
     render(app, '<h1>Dashboard</h1><p class="status-note">Loading live status…</p>');
+    let active = true;
+    let timer, ctxTimer, ws;
+    dashboardLiveStop = function () {
+      active = false;
+      window.clearInterval(timer);
+      window.clearInterval(ctxTimer);
+      if (ws) ws.close();
+    };
     let lastHealth = {};
     let lastStatus = {};
     let lastCtx = {};
     function paint() {
-      render(app, dashboardMarkup(lastHealth, lastStatus, lastCtx));
+      if (active) render(app, dashboardMarkup(lastHealth, lastStatus, lastCtx));
     }
     Promise.all([
       api('GET', '/health'),
       api('GET', '/api/status'),
       api('GET', '/api/context/snapshot')
     ]).then(function (results) {
+      if (!active) return;
       lastHealth = results[0] || {};
       lastStatus = results[1] || {};
       lastCtx = results[2] || {};
       paint();
-      const timer = window.setInterval(function () {
+      timer = window.setInterval(function () {
         api('GET', '/api/status').then(function (st) {
           lastStatus = st || lastStatus;
           paint();
         }).catch(function () {});
       }, 12000);
-      const ctxTimer = window.setInterval(function () {
+      ctxTimer = window.setInterval(function () {
         api('GET', '/api/context/snapshot').then(function (snap) {
           lastCtx = snap || lastCtx;
           paint();
         }).catch(function () {});
       }, 45000);
-      const ws = wsConnect(function (msg) {
+      ws = wsConnect(function (msg) {
         if (!msg || msg.type !== 'provider_status') return;
         lastStatus = mergeStatusWithWs(lastStatus, msg);
         paint();
       });
-      dashboardLiveStop = function () {
-        window.clearInterval(timer);
-        window.clearInterval(ctxTimer);
-        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-      };
     }).catch(function (err) {
+      if (!active) return;
       render(app, '<h1>Dashboard</h1><p class="status-err">' + escapeHtml(err || 'Load failed') + '</p>');
     });
   }
@@ -184,26 +189,32 @@
   function renderSkills() {
     const token = getToken();
     if (!token) { window.location.hash = '#/pair'; return; }
+    const page = pageVersion;
+    const list = ++listVersion;
+    const current = () => page === pageVersion && list === listVersion;
+    const refresh = () => { if (page === pageVersion) renderSkills(); };
+    const reportError = err => { if (page === pageVersion) alert('Error: ' + err); };
     api('GET', '/api/skills').then(arr => {
+      if (!current()) return;
       let html = '<h1>Skills</h1><ul class="skill-list" id="skill-list"></ul>' +
         '<h2>Create skill</h2><form id="skill-create"><input name="name" placeholder="Name"><textarea name="content" placeholder="Content" rows="4"></textarea><button type="submit">Create</button></form>';
       render(app, html);
       const ul = document.getElementById('skill-list');
       (arr || []).forEach(n => {
         const li = document.createElement('li');
-        li.innerHTML = '<span>' + escapeHtml(n) + '</span><span><a href="#/skills/' + encodeURIComponent(n) + '">View</a> <button class="danger" data-delete="' + escapeHtml(n) + '">Delete</button></span>';
+        li.innerHTML = '<span>' + escapeHtml(n) + '</span><span><a href="#/skills/' + encodeURIComponent(n) + '">View</a> <button class="danger" data-delete>Delete</button></span>';
         li.querySelector('[data-delete]').onclick = () => {
           if (!confirm('Delete ' + n + '?')) return;
-          api('DELETE', '/api/skills/' + encodeURIComponent(n)).then(() => { window.location.hash = '#/skills'; });
+          api('DELETE', '/api/skills/' + encodeURIComponent(n)).then(refresh).catch(reportError);
         };
         ul.appendChild(li);
       });
       document.getElementById('skill-create').onsubmit = function (e) {
         e.preventDefault();
         const f = e.target;
-        api('POST', '/api/skills', { name: f.name.value, content: f.content.value }).then(() => { window.location.hash = '#/skills'; });
+        api('POST', '/api/skills', { name: f.name.value, content: f.content.value }).then(refresh).catch(reportError);
       };
-    }).catch(e => { render(app, '<h1>Skills</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
+    }).catch(e => { if (current()) render(app, '<h1>Skills</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
   }
 
   function renderSkillView(name) {
@@ -236,26 +247,192 @@
   function renderSessions() {
     const token = getToken();
     if (!token) { window.location.hash = '#/pair'; return; }
+    const page = pageVersion;
+    const list = ++listVersion;
+    const current = () => page === pageVersion && list === listVersion;
+    const refresh = () => { if (page === pageVersion) renderSessions(); };
+    const reportError = err => {
+      if (page !== pageVersion) return;
+      let message = String(err);
+      try { message = JSON.parse(message).error || message; } catch (_) {}
+      window.alert(message);
+    };
     api('GET', '/api/sessions').then(arr => {
+      if (!current()) return;
       let html = '<h1>Sessions</h1><ul class="session-list" id="session-list"></ul>';
       render(app, html);
       const ul = document.getElementById('session-list');
       (arr || []).forEach(id => {
         const li = document.createElement('li');
-        li.innerHTML = '<span>' + escapeHtml(id) + '</span><button class="danger" data-delete="' + escapeHtml(id) + '">Delete</button>';
+        li.innerHTML = '<span>' + escapeHtml(id) + '</span><button class="danger" data-delete>Delete</button>';
         li.querySelector('[data-delete]').onclick = () => {
-          api('DELETE', '/api/sessions/' + encodeURIComponent(id)).then(() => { window.location.hash = '#/sessions'; });
+          const prompt = id.startsWith('webchat:device:')
+            ? 'Delete this conversation and its transcript?' : 'Delete session ' + id + '?';
+          if (!window.confirm(prompt)) return;
+          api('DELETE', '/api/sessions/' + encodeURIComponent(id)).then(refresh).catch(reportError);
         };
         ul.appendChild(li);
       });
-    }).catch(e => { render(app, '<h1>Sessions</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
+    }).catch(e => { if (current()) render(app, '<h1>Sessions</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
   }
 
   function renderCron() {
-    const token = getToken();
-    if (!token) { window.location.hash = '#/pair'; return; }
-    api('GET', '/api/cron').then(() => {}).catch(() => {});
-    render(app, '<h1>Cron</h1><p>GET /api/cron returns 501 Not Implemented. Placeholder for create/delete/toggle.</p>');
+    if (!getToken()) { window.location.hash = '#/pair'; return; }
+    render(app, '<h1>Cron</h1><form id="cron-create">' +
+      '<label>Schedule <input name="schedule" required placeholder="interval:3600"></label>' +
+      '<p>Use interval:seconds, at:unix_time, or five cron fields. The gateway uses its local time. ' +
+      'The day of the month and the weekday must both match.</p>' +
+      '<label>Message <textarea name="message" required></textarea></label>' +
+      '<label for="cron-channel">Channel</label><select id="cron-channel" name="channel"><option value="cli">CLI</option>' +
+      '<option value="telegram">Telegram</option><option value="discord">Discord</option></select>' +
+      '<label>Recipient <input name="recipient" placeholder="default"></label>' +
+      '<button type="button" id="cron-check">Preview next run</button> ' +
+      '<button type="submit" disabled>Create job</button><p id="cron-preview" aria-live="polite"></p></form>' +
+      '<p id="cron-result" role="alert"></p><h2>Scheduled jobs</h2><div id="cron-jobs"></div>' +
+      '<button type="button" id="cron-prev" disabled>Previous page</button> ' +
+      '<button type="button" id="cron-next" disabled>Next page</button>');
+    const form = document.getElementById('cron-create');
+    const fields = form.elements;
+    const create = form.querySelector('button[type=submit]');
+    const preview = document.getElementById('cron-preview');
+    const result = document.getElementById('cron-result');
+    const jobs = document.getElementById('cron-jobs');
+    const prev = document.getElementById('cron-prev');
+    const next = document.getElementById('cron-next');
+    const cursors = [''];
+    let nextAfter = null;
+    let request = 0;
+    let previewRequest = 0;
+    let checkedSchedule = '';
+    let saving = false;
+
+    function timeText(seconds) {
+      const date = new Date(seconds * 1000);
+      return Number.isFinite(date.getTime()) ? date.toLocaleString(undefined, {timeZoneName:'short'}) : String(seconds);
+    }
+
+    function showError(error) {
+      let text = String(error);
+      try { text = JSON.parse(text).error || text; } catch (_) {}
+      result.textContent = text;
+    }
+
+    function cell(row, value) {
+      row.insertCell().textContent = value;
+    }
+
+    function action(cell, label, method, path, id) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      cell.appendChild(button);
+      button.onclick = async function () {
+        if (method === 'DELETE' && !window.confirm('Delete job ' + id + '?')) return;
+        for (const control of cell.querySelectorAll('button')) control.disabled = true;
+        try {
+          await api(method, path, method === 'POST' ? {} : undefined);
+          result.textContent = '';
+          await load();
+        } catch (error) {
+          showError(error);
+          for (const control of cell.querySelectorAll('button')) control.disabled = false;
+        }
+      };
+    }
+
+    async function load() {
+      const revision = ++request;
+      const after = cursors[cursors.length - 1];
+      prev.disabled = next.disabled = true;
+      try {
+        const page = await api('GET', '/api/cron/page?after=' + encodeURIComponent(after));
+        if (revision !== request) return;
+        nextAfter = page.next_after;
+        if (page.jobs.length === 0 && cursors.length > 1) {
+          cursors.pop();
+          return load();
+        }
+        jobs.textContent = '';
+        if (page.jobs.length === 0) jobs.textContent = 'No scheduled jobs.';
+        else {
+          const table = document.createElement('table');
+          table.className = 'dash-table';
+          table.innerHTML = '<thead><tr><th>Job</th><th>Schedule</th><th>Message</th><th>Destination</th>' +
+            '<th>Next run</th><th>Status</th><th>Actions</th></tr></thead>';
+          const body = table.createTBody();
+          const states = {scheduled:'Scheduled', paused:'Paused', waiting_for_channel:'Waiting for channel',
+            invalid_destination:'Invalid destination. Create a job with a supported destination.'};
+          for (const job of page.jobs) {
+            const row = body.insertRow();
+            cell(row, job.id);
+            cell(row, job.schedule_preview);
+            cell(row, job.message_preview);
+            cell(row, job.channel + ' / ' + job.recipient);
+            cell(row, timeText(job.next_run));
+            cell(row, states[job.delivery_status] || job.delivery_status);
+            const controls = row.insertCell();
+            const path = '/api/cron/job/' + encodeURIComponent(job.key);
+            if (job.enabled || job.delivery_status !== 'invalid_destination')
+              action(controls, job.enabled ? 'Pause' : 'Resume', 'POST', path + '/toggle', job.id);
+            action(controls, 'Delete', 'DELETE', path, job.id);
+          }
+          jobs.appendChild(table);
+        }
+      } catch (error) {
+        if (revision !== request) return;
+        nextAfter = null;
+        showError(error);
+        jobs.textContent = 'Could not load the current jobs. ';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.textContent = 'Retry list';
+        retry.onclick = () => { result.textContent = ''; load(); };
+        jobs.appendChild(retry);
+      }
+      prev.disabled = cursors.length === 1;
+      next.disabled = !nextAfter;
+    }
+    prev.onclick = () => { cursors.pop(); load(); };
+    next.onclick = () => { cursors.push(nextAfter); load(); };
+
+    function clearPreview() {
+      previewRequest++;
+      checkedSchedule = '';
+      create.disabled = true;
+      preview.textContent = '';
+    }
+    fields.schedule.oninput = clearPreview;
+    document.getElementById('cron-check').onclick = async function () {
+      clearPreview();
+      const revision = previewRequest;
+      const schedule = fields.schedule.value.trim();
+      result.textContent = '';
+      try {
+        const data = await api('POST', '/api/cron/preview', {schedule});
+        if (revision !== previewRequest) return;
+        checkedSchedule = schedule;
+        preview.textContent = 'Next run: ' + timeText(data.next_run);
+        create.disabled = saving;
+      } catch (error) { if (revision === previewRequest) showError(error); }
+    };
+    form.onsubmit = async function (event) {
+      event.preventDefault();
+      const schedule = fields.schedule.value.trim();
+      if (saving || !checkedSchedule || schedule !== checkedSchedule) return;
+      saving = true;
+      create.disabled = true;
+      try {
+        const data = await api('POST', '/api/cron', {schedule, message:fields.message.value,
+          channel:fields.channel.value, recipient:fields.recipient.value.trim()});
+        result.textContent = 'Created job ' + data.id + '.';
+        form.reset();
+        clearPreview();
+        cursors.length = 1;
+        await load();
+      } catch (error) { showError(error); }
+      finally { saving = false; create.disabled = !checkedSchedule; }
+    };
+    load();
   }
 
   function renderLogs() {
@@ -286,14 +463,15 @@
       .catch(() => null);
     const logP = api('GET', '/api/asap/log').catch(() => null);
     Promise.all([manifestP, logP]).then(function (results) {
-      const manifest = results[0];
+      const signedManifest = results[0];
+      const manifest = signedManifest && (signedManifest.manifest || signedManifest);
       const logData = results[1];
       let html = '';
       /* Dashboard cards */
       html += '<div class="dashboard-cards">';
       if (manifest) {
-        html += '<div class="card"><div class="card-label">Agent URN</div><div class="card-value">' + escapeHtml(manifest.urn || manifest.agent_urn || '-') + '</div></div>';
-        html += '<div class="card"><div class="card-label">ASAP Version</div><div class="card-value status-ok">' + escapeHtml(manifest.asap_version || '-') + '</div></div>';
+        html += '<div class="card"><div class="card-label">Agent URN</div><div class="card-value">' + escapeHtml(manifest.id || manifest.urn || manifest.agent_urn || '-') + '</div></div>';
+        html += '<div class="card"><div class="card-label">ASAP Version</div><div class="card-value status-ok">' + escapeHtml((manifest.capabilities && manifest.capabilities.asap_version) || manifest.asap_version || '-') + '</div></div>';
         html += '<div class="card"><div class="card-label">Agent Name</div><div class="card-value">' + escapeHtml(manifest.name || '-') + '</div></div>';
       } else {
         html += '<div class="card"><div class="card-label">Manifest</div><div class="card-value status-err">unavailable</div></div>';
@@ -301,7 +479,7 @@
       html += '</div>';
       /* Manifest detail */
       if (manifest) {
-        html += '<h2>Manifest</h2><pre class="pre-wrap">' + escapeHtml(JSON.stringify(manifest, null, 2)) + '</pre>';
+        html += '<h2>Manifest</h2><pre class="pre-wrap">' + escapeHtml(JSON.stringify(signedManifest, null, 2)) + '</pre>';
       }
       /* Envelope log table */
       html += '<h2>Envelope Log</h2>';
@@ -335,7 +513,10 @@
   }
 
   const app = document.getElementById('app');
+  let pageVersion = 0;
+  let listVersion = 0;
   function navigate() {
+    pageVersion++;
     stopDashboardLive();
     const route = getRoute();
     const m = route.match(/^\/skills\/(.+)$/);

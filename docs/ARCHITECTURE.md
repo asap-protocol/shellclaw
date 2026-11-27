@@ -180,3 +180,23 @@ Never commit credentials; use `.env.example` as reference.
 | [LOCAL_INFERENCE.md](LOCAL_INFERENCE.md) | llama.cpp, models, tegrastats |
 | [ASAP.md](ASAP.md) | Manifest, marketplace, compliance harness |
 | [SECURITY.md](SECURITY.md) | Threat model, sandbox audit |
+
+## Read scheduled jobs
+
+Send an authenticated `GET /api/cron/page` request for the first 16 jobs, in ID order.
+Each entry includes a schedule preview and a message preview. ShellClaw keeps the full text for delivery.
+If `next_after` contains a cursor, send it in `GET /api/cron/page?after=CURSOR`.
+Use the job `key` in `POST /api/cron/job/KEY/toggle` and `DELETE /api/cron/job/KEY`.
+A null cursor means that the list is complete.
+
+`GET /api/cron` returns the original array with full messages when it fits in one response.
+If the list exceeds 64 jobs or the response buffer, this endpoint returns HTTP 413.
+
+Send a schedule to `POST /api/cron/preview` to see the next run before you save it.
+The gateway evaluates the expression in its local time zone. Both the day of the month and the weekday must match.
+For example, `0 9 1 * 1` runs at 09:00 when the first day of a month is a Monday.
+
+Each entry in a page includes `delivery_status`. A paused job stays paused after a restart.
+A job with `waiting_for_channel` stays in the queue until its delivery channel becomes available.
+A job with `invalid_destination` keeps this status when the scheduler disables it. A request to resume it returns HTTP 409.
+Create a job with a supported destination before you delete the old job.

@@ -1261,7 +1261,7 @@ static int test_api_skill_create_delete(const char *token)
 		"{\"name\":\"test_integration_skill\",\"content\":\"# Test skill for integration\"}",
 		&code, &body);
 	ASSERT(r == 0);
-	ASSERT(code == 200 || code == 201);
+	ASSERT(code == 201);
 	free(body);
 	body = NULL;
 	r = http_get_auth(gw_url("/api/skills/test_integration_skill"), token, &code, &body);
@@ -1358,6 +1358,124 @@ static int test_api_cron_list(const char *token)
 	ASSERT(code == 200);
 	ASSERT(body != NULL);
 	ASSERT(strstr(body, "[") != NULL);
+	free(body);
+	return 0;
+}
+
+static int test_api_cron_pages(const char *token)
+{
+	char message[6001], json[6500], path[512], cursor[256] = "";
+	char *body = NULL;
+	long status;
+	int seen = 0;
+	memset(message, 'a', sizeof(message) - 1);
+	message[sizeof(message) - 1] = '\0';
+	for (int i = 0; i < 67; i++) {
+		snprintf(json, sizeof(json),
+			"{\"id\":\"qa-%03d\",\"schedule\":\"interval:86400\",\"message\":\"%s\"}",
+			i, i < 12 ? message : "note");
+		ASSERT(http_post_auth(gw_url("/api/cron"), token, json, &status, &body) == 0);
+		ASSERT(status == 201);
+		free(body);
+		if (i == 11 || i == 66) {
+			ASSERT(http_get_auth(gw_url("/api/cron"), token, &status, &body) == 0);
+			cJSON *error = cJSON_Parse(body);
+			ASSERT(status == 413 && cJSON_IsString(cJSON_GetObjectItem(error, "error")));
+			cJSON_Delete(error);
+			free(body);
+		}
+	}
+	do {
+		snprintf(path, sizeof(path), "/api/cron/page?after=%s", cursor);
+		ASSERT(http_get_auth(gw_url(path), token, &status, &body) == 0);
+		cJSON *page = cJSON_Parse(body);
+		cJSON *jobs = cJSON_GetObjectItem(page, "jobs");
+		ASSERT(status == 200 && cJSON_IsArray(jobs));
+		ASSERT(cJSON_GetArraySize(jobs) > 0 && cJSON_GetArraySize(jobs) <= 16);
+		cJSON *job;
+		cJSON_ArrayForEach(job, jobs) {
+			char expected[32];
+			snprintf(expected, sizeof(expected), "qa-%03d", seen++);
+			ASSERT(strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(job, "id")), expected) == 0);
+			ASSERT(cJSON_IsString(cJSON_GetObjectItem(job, "message_preview")));
+		}
+		cJSON *next = cJSON_GetObjectItem(page, "next_after");
+		ASSERT(cJSON_IsNull(next) || cJSON_IsString(next));
+		snprintf(cursor, sizeof(cursor), "%s", cJSON_IsString(next) ? next->valuestring : "");
+		cJSON_Delete(page);
+		free(body);
+	} while (cursor[0] && seen < 68);
+	ASSERT(seen == 67 && !cursor[0]);
+	for (int i = 0; i < seen; i++) {
+		snprintf(path, sizeof(path), "/api/cron/qa-%03d", i);
+		ASSERT(http_delete_auth(gw_url(path), token, &status, &body) == 0 && status == 200);
+		free(body);
+	}
+	return 0;
+}
+
+static int test_cron_job_id_bytes(const char *token)
+{
+	char id[132], json[320], path[320], *body = NULL;
+	long status;
+	memset(id, 'x', 125);
+	memcpy(id + 125, "é", sizeof("é"));
+	id[0] = '/';
+	snprintf(json, sizeof(json), "{\"id\":\"%s\",\"schedule\":\"interval:86400\",\"message\":\"note\"}", id);
+	ASSERT(http_post_auth(gw_url("/api/cron"), token, json, &status, &body) == 0 && status == 201);
+	free(body);
+	ASSERT(http_get_auth(gw_url("/api/cron/page"), token, &status, &body) == 0 && status == 200);
+	cJSON *page = cJSON_Parse(body);
+	cJSON *job = cJSON_GetArrayItem(cJSON_GetObjectItem(page, "jobs"), 0);
+	const char *key = cJSON_GetStringValue(cJSON_GetObjectItem(job, "key"));
+	const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(job, "id"));
+	ASSERT(name && !strcmp(name, id) && key && strlen(key) == 255);
+	snprintf(path, sizeof(path), "/api/cron/job/%s", key);
+	cJSON_Delete(page);
+	free(body);
+	ASSERT(http_delete_auth(gw_url(path), token, &status, &body) == 0 && status == 200);
+	free(body);
+	memcpy(id + 125, "xé", sizeof("xé"));
+	snprintf(json, sizeof(json), "{\"id\":\"%s\",\"schedule\":\"interval:86400\",\"message\":\"note\"}", id);
+	ASSERT(http_post_auth(gw_url("/api/cron"), token, json, &status, &body) == 0 && status == 400);
+	free(body);
+	return 0;
+}
+
+static int test_cron_preview_and_delivery(const char *token)
+{
+	char *body = NULL;
+	long status;
+	const char *schedule = "{\"schedule\":\"at:4070908800\"}";
+	ASSERT(http_post_auth(gw_url("/api/cron/preview"), token, schedule, &status, &body) == 0);
+	cJSON *result = cJSON_Parse(body);
+	ASSERT(status == 200 && cJSON_GetNumberValue(cJSON_GetObjectItem(result, "next_run")) == 4070908800.0);
+	cJSON_Delete(result);
+	free(body);
+	ASSERT(http_post_auth(gw_url("/api/cron/preview"), token, "{\"schedule\":\"invalid\"}", &status, &body) == 0);
+	ASSERT(status == 400);
+	free(body);
+	ASSERT(http_post_auth(gw_url("/api/cron"), token,
+		"{\"id\":\"qa-offline\",\"schedule\":\"at:4070908800\",\"channel\":\"telegram\","
+		"\"recipient\":\"-10012\",\"message\":\"reminder\"}", &status, &body) == 0 && status == 201);
+	free(body);
+	const char *states[] = { "waiting_for_channel", "paused" };
+	for (int i = 0; i < 2; i++) {
+		ASSERT(http_get_auth(gw_url("/api/cron/page"), token, &status, &body) == 0 && status == 200);
+		result = cJSON_Parse(body);
+		cJSON *jobs = cJSON_GetObjectItem(result, "jobs");
+		ASSERT(cJSON_GetArraySize(jobs) == 1);
+		cJSON *job = cJSON_GetArrayItem(jobs, 0);
+		cJSON *state = cJSON_GetObjectItem(job, "delivery_status");
+		ASSERT(cJSON_IsString(state) && strcmp(state->valuestring, states[i]) == 0);
+		cJSON_Delete(result);
+		free(body);
+		if (i == 0) {
+			ASSERT(http_post_auth(gw_url("/api/cron/qa-offline/toggle"), token, "{}", &status, &body) == 0 && status == 200);
+			free(body);
+		}
+	}
+	ASSERT(http_delete_auth(gw_url("/api/cron/qa-offline"), token, &status, &body) == 0 && status == 200);
 	free(body);
 	return 0;
 }
@@ -1889,6 +2007,9 @@ int main(int argc, char **argv)
 		}
 		if (test_api_memory(token) != 0) { fprintf(stderr, "test_api_memory failed\n"); failed++; }
 		if (test_api_cron_list(token) != 0) { fprintf(stderr, "test_api_cron_list failed\n"); failed++; }
+		if (test_cron_job_id_bytes(token) != 0) failed++;
+		if (test_cron_preview_and_delivery(token) != 0) failed++;
+		if (test_api_cron_pages(token) != 0) failed++;
 		if (test_api_cron_create_delete(token) != 0) { fprintf(stderr, "test_api_cron_create_delete failed\n"); failed++; }
 		if (test_api_cron_toggle_post(token) != 0) { fprintf(stderr, "test_api_cron_toggle_post failed\n"); failed++; }
 		if (test_api_sessions(token) != 0) { fprintf(stderr, "test_api_sessions failed\n"); failed++; }
