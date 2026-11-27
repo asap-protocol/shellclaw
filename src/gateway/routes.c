@@ -697,9 +697,10 @@ static void handle_cron_toggle(const char *id, char *buf, size_t size, int *stat
 	json_response(buf, size, status, "{\"ok\":true}");
 }
 
-static void write_asap_error(char *buf, size_t size, int *status, int http_code, cJSON *error)
+static void write_asap_error(char *buf, size_t size, int *status, int http_code,
+	cJSON *error, const asap_request_wire_t *wire)
 {
-	char *json = error ? cJSON_PrintUnformatted(error) : NULL;
+	char *json = asap_jsonrpc_print_response(error, wire);
 	cJSON_Delete(error);
 	*status = http_code;
 	if (json && strlen(json) < size)
@@ -711,9 +712,9 @@ static void write_asap_error(char *buf, size_t size, int *status, int http_code,
 }
 
 static void jsonrpc_error(char *buf, size_t size, int *status,
-	int http_code, int rpc_code, const char *msg, cJSON *id)
+	int http_code, int rpc_code, const char *msg, const asap_request_wire_t *wire)
 {
-	write_asap_error(buf, size, status, http_code, asap_jsonrpc_error(rpc_code, msg, id));
+	write_asap_error(buf, size, status, http_code, asap_jsonrpc_error(rpc_code, msg, NULL), wire);
 }
 
 static void handle_asap_log_get(char *buf, size_t size, int *status)
@@ -785,7 +786,8 @@ static void asap_ctx_bind_bootstrap(asap_server_ctx_t *asap_ctx, const config_t 
  * Takes ownership of @p resp_json.
  * @return 0 if copied, -1 if rejected as too large.
  */
-static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_json, cJSON *id)
+static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_json,
+	const asap_request_wire_t *wire)
 {
 	size_t rlen;
 	rlen = strlen(resp_json);
@@ -795,7 +797,7 @@ static int write_asap_jsonrpc(char *buf, size_t size, int *status, char *resp_js
 			"ASAP response length %zu exceeds gateway buffer %zu",
 			rlen, size);
 		free(resp_json);
-		jsonrpc_error(buf, size, status, 500, -32603, too_big, id);
+		jsonrpc_error(buf, size, status, wire->sdk_wire ? 200 : 500, -32603, too_big, wire);
 		return -1;
 	}
 	*status = 200;
@@ -811,6 +813,7 @@ static void handle_asap(http_server_ctx_t *ctx, struct lws *wsi, const char *cli
 	asap_envelope_t in;
 	asap_envelope_t out;
 	asap_server_ctx_t asap_ctx;
+	asap_request_wire_t wire;
 	cJSON *parse_err = NULL;
 	char err_msg[256];
 	char *snippet;
@@ -839,11 +842,11 @@ static void handle_asap(http_server_ctx_t *ctx, struct lws *wsi, const char *cli
 		free(decoded);
 		return;
 	}
-	rc = asap_envelope_parse(body, &in, &parse_err);
-	free(decoded);
+	rc = asap_envelope_parse_request(body, &in, &parse_err, &wire);
 	if (rc != 0) {
-		write_asap_error(buf, size, status, 400, parse_err);
+		write_asap_error(buf, size, status, wire.sdk_wire ? 200 : 400, parse_err, &wire);
 		asap_envelope_clear(&in);
+		free(decoded);
 		return;
 	}
 	snippet = in.payload ? cJSON_PrintUnformatted(in.payload) : NULL;
@@ -858,14 +861,17 @@ static void handle_asap(http_server_ctx_t *ctx, struct lws *wsi, const char *cli
 		rc = asap_server_handle(&in, &out, &asap_ctx, err_msg, sizeof err_msg);
 	}
 	if (rc != 0) {
-		jsonrpc_error(buf, size, status, 400, rc, err_msg[0] ? err_msg : "Handler error",
-			in.jsonrpc_request_id);
+		int http_status = wire.sdk_wire && rc != ASAP_SERVER_RPC_SENDER_UNTRUSTED ? 200 : 400;
+		jsonrpc_error(buf, size, status, http_status, rc,
+			err_msg[0] ? err_msg : "Handler error", &wire);
 	} else {
-		char *resp_json = asap_envelope_to_jsonrpc_string(&out, in.jsonrpc_request_id);
+		cJSON *response = asap_envelope_to_jsonrpc(&out, NULL);
+		char *resp_json = asap_jsonrpc_print_response(response, &wire);
+		cJSON_Delete(response);
 		if (!resp_json) {
-			jsonrpc_error(buf, size, status, 500, -32603, "Cannot serialize response",
-				in.jsonrpc_request_id);
-		} else if (write_asap_jsonrpc(buf, size, status, resp_json, in.jsonrpc_request_id) == 0) {
+			jsonrpc_error(buf, size, status, wire.sdk_wire ? 200 : 500, -32603,
+				"Cannot serialize response", &wire);
+		} else if (write_asap_jsonrpc(buf, size, status, resp_json, &wire) == 0) {
 			snippet = cJSON_PrintUnformatted(out.payload);
 			asap_log_append_out(out.payload_type, out.id, snippet);
 			free(snippet);
@@ -873,6 +879,7 @@ static void handle_asap(http_server_ctx_t *ctx, struct lws *wsi, const char *cli
 	}
 	asap_envelope_clear(&in);
 	asap_envelope_clear(&out);
+	free(decoded);
 }
 
 static void handle_well_known(http_server_ctx_t *ctx, const char *uri, int uri_len,

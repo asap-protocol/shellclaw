@@ -378,25 +378,170 @@ int asap_envelope_parse_jsonrpc_response(const char *json, asap_envelope_t *out,
 	}
 }
 
-int asap_envelope_parse(const char *json, asap_envelope_t *out, cJSON **err_out)
+static const char *json_string_end(const char *text)
+{
+	if (*text != '"')
+		return NULL;
+	for (text++; *text && *text != '"'; text++) {
+		if ((unsigned char)*text < 0x20)
+			return NULL;
+		if (*text == '\\' && !*++text)
+			return NULL;
+	}
+	return *text == '"' ? text + 1 : NULL;
+}
+
+static const char *json_number_end(const char *text)
+{
+	static const char digits[] = "0123456789";
+	text += (*text == '-');
+	size_t count = strspn(text, digits);
+	if (count == 0 || (count > 1 && *text == '0'))
+		return NULL;
+	text += count;
+	if (*text == '.') {
+		count = strspn(++text, digits);
+		if (count == 0)
+			return NULL;
+		text += count;
+	}
+	if (*text == 'e' || *text == 'E') {
+		text++;
+		text += (*text == '+' || *text == '-');
+		count = strspn(text, digits);
+		if (count == 0)
+			return NULL;
+		text += count;
+	}
+	return text;
+}
+
+static const char *json_skip_space(const char *text)
+{
+	return text + strspn(text, " \r\n\t");
+}
+
+/* Match source values to the tree that cJSON already parsed. Check token
+ * boundaries before a source value can appear in a response. */
+static const char *capture_wire_values(const char *text, const cJSON *item,
+	const cJSON *id, const cJSON *echo_input, asap_request_wire_t *wire)
+{
+	const char *start = json_skip_space(text);
+	text = start;
+	if (cJSON_IsObject(item) || cJSON_IsArray(item)) {
+		int object = cJSON_IsObject(item);
+		if (*text != (object ? '{' : '['))
+			return NULL;
+		text = json_skip_space(text + 1);
+		const cJSON *child;
+		cJSON_ArrayForEach(child, item) {
+			if (object) {
+				if (!(text = json_string_end(text)))
+					return NULL;
+				text = json_skip_space(text);
+				if (*text++ != ':')
+					return NULL;
+			}
+			text = capture_wire_values(text, child, id, echo_input, wire);
+			if (!text)
+				return NULL;
+			text = json_skip_space(text);
+			if (child->next) {
+				if (*text++ != ',')
+					return NULL;
+				text = json_skip_space(text);
+			}
+		}
+		if (*text++ != (object ? '}' : ']'))
+			return NULL;
+	} else if (cJSON_IsNumber(item)) {
+		text = json_number_end(text);
+	} else if (cJSON_IsString(item)) {
+		text = json_string_end(text);
+	} else {
+		const char *literal = cJSON_IsNull(item) ? "null" : cJSON_IsTrue(item) ? "true" : "false";
+		size_t len = strlen(literal);
+		if (strncmp(text, literal, len) != 0)
+			return NULL;
+		text += len;
+	}
+	if (!text)
+		return NULL;
+	if (item == id)
+		wire->id = (asap_json_span_t){start, (size_t)(text - start)};
+	if (item == echo_input)
+		wire->echo_input = (asap_json_span_t){start, (size_t)(text - start)};
+	return text;
+}
+
+static int capture_request_wire(const char *json, cJSON *root, cJSON *id,
+	cJSON *nested, asap_request_wire_t *wire)
+{
+	const cJSON *payload = cJSON_GetObjectItemCaseSensitive(nested, "payload");
+	const cJSON *input = cJSON_GetObjectItemCaseSensitive(payload, "input");
+	if (strncmp(json, "\xef\xbb\xbf", 3) == 0)
+		json += 3;
+	const char *end = capture_wire_values(json, root, id, input, wire);
+	return end && *json_skip_space(end) == '\0';
+}
+
+static int replace_wire_value(cJSON *object, const char *key, asap_json_span_t span)
+{
+	char *value = strndup(span.start, span.len);
+	if (!value)
+		return 0;
+	cJSON *raw = cJSON_CreateRaw(value);
+	free(value);
+	if (!raw)
+		return 0;
+	if (!cJSON_ReplaceItemInObjectCaseSensitive(object, key, raw)) {
+		cJSON_Delete(raw);
+		return 0;
+	}
+	return 1;
+}
+
+char *asap_jsonrpc_print_response(cJSON *response, const asap_request_wire_t *wire)
+{
+	if (!response)
+		return NULL;
+	if (wire && wire->id.start && !replace_wire_value(response, "id", wire->id))
+		return NULL;
+	cJSON *result = cJSON_GetObjectItemCaseSensitive(response, "result");
+	if (wire && wire->echo_input.start && result) {
+		cJSON *envelope = cJSON_GetObjectItemCaseSensitive(result, "envelope");
+		cJSON *payload = cJSON_GetObjectItemCaseSensitive(envelope, "payload");
+		if (!replace_wire_value(payload, "result", wire->echo_input))
+			return NULL;
+	}
+	return cJSON_PrintUnformatted(response);
+}
+
+int asap_envelope_parse_request(const char *json, asap_envelope_t *out,
+	cJSON **err_out, asap_request_wire_t *wire)
 {
 	if (err_out) *err_out = NULL;
+	if (wire) memset(wire, 0, sizeof(*wire));
 	if (!json || !out) return -1;
 	asap_envelope_init(out);
 	cJSON *root = cJSON_Parse(json);
-	if (!root) {
-		if (err_out) {
-			cJSON *null_id = cJSON_CreateNull();
-			if (null_id) {
-				*err_out = asap_jsonrpc_error(-32700, "Parse error", null_id);
-				cJSON_Delete(null_id);
-			}
-		}
+	cJSON *request_id = cJSON_GetObjectItemCaseSensitive(root, "id");
+	cJSON *jrpc = cJSON_GetObjectItemCaseSensitive(root, "jsonrpc");
+	cJSON *meth = cJSON_GetObjectItemCaseSensitive(root, "method");
+	cJSON *params = cJSON_GetObjectItemCaseSensitive(root, "params");
+	cJSON *nested = cJSON_GetObjectItemCaseSensitive(params, "envelope");
+	int sdk_wire = cJSON_IsObject(params) && nested && cJSON_IsString(meth) &&
+		strcmp(meth->valuestring, "asap.send") == 0;
+	if (!root || (wire && !capture_request_wire(json, root, request_id, sdk_wire ? nested : NULL, wire))) {
+		if (wire) memset(wire, 0, sizeof(*wire));
+		if (err_out)
+			*err_out = asap_jsonrpc_error(-32700, "Parse error", NULL);
+		cJSON_Delete(root);
 		return -1;
 	}
-	cJSON *request_id = cJSON_GetObjectItemCaseSensitive(root, "id");
 	if (request_id && !cJSON_IsString(request_id) && !cJSON_IsNumber(request_id) &&
 	    !cJSON_IsNull(request_id)) {
+		if (wire) memset(wire, 0, sizeof(*wire));
 		if (err_out)
 			*err_out = asap_jsonrpc_error(-32600, "Invalid JSON-RPC request ID", NULL);
 		cJSON_Delete(root);
@@ -407,31 +552,33 @@ int asap_envelope_parse(const char *json, asap_envelope_t *out, cJSON **err_out)
 		cJSON_Delete(root);
 		return -1;
 	}
-	cJSON *jrpc = cJSON_GetObjectItemCaseSensitive(root, "jsonrpc");
 	if (!cJSON_IsString(jrpc) || !jrpc->valuestring || strcmp(jrpc->valuestring, "2.0") != 0) {
 		cJSON_Delete(root);
 		return parse_fail(out, rpc_id, err_out, "Invalid Request: jsonrpc must be \"2.0\"");
 	}
-	cJSON *meth = cJSON_GetObjectItemCaseSensitive(root, "method");
 	if (!cJSON_IsString(meth) || !meth->valuestring || meth->valuestring[0] == '\0') {
 		cJSON_Delete(root);
 		return parse_fail(out, rpc_id, err_out, "Invalid Request: method must be a non-empty string");
 	}
-	cJSON *params = cJSON_GetObjectItemCaseSensitive(root, "params");
 	if (!params || !cJSON_IsObject(params)) {
 		cJSON_Delete(root);
 		return parse_fail(out, rpc_id, err_out, "Invalid Request: params must be an object");
 	}
-	cJSON *nested = cJSON_GetObjectItemCaseSensitive(params, "envelope");
-	if (nested && (!cJSON_IsObject(nested) || strcmp(meth->valuestring, "asap.send") != 0)) {
+	if (wire) wire->sdk_wire = sdk_wire;
+	if (nested && (!cJSON_IsObject(nested) || !sdk_wire)) {
 		cJSON_Delete(root);
 		return parse_fail(out, rpc_id, err_out, "Invalid SDK request");
 	}
-	if (envelope_from_object(nested ? nested : params, rpc_id, out, err_out, nested != NULL) != 0) {
+	if (envelope_from_object(nested ? nested : params, rpc_id, out, err_out, sdk_wire) != 0) {
 		cJSON_Delete(root);
 		return -1;
 	}
 	out->jsonrpc_request_id = rpc_id;
 	cJSON_Delete(root);
 	return 0;
+}
+
+int asap_envelope_parse(const char *json, asap_envelope_t *out, cJSON **err_out)
+{
+	return asap_envelope_parse_request(json, out, err_out, NULL);
 }

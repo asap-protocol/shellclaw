@@ -65,6 +65,31 @@ void asap_envelope_clear(asap_envelope_t *env);
  */
 int asap_envelope_parse(const char *json, asap_envelope_t *out, cJSON **err_out);
 
+typedef struct asap_json_span {
+	const char *start;
+	size_t len;
+} asap_json_span_t;
+
+typedef struct asap_request_wire {
+	asap_json_span_t id;
+	asap_json_span_t echo_input;
+	int sdk_wire;
+} asap_request_wire_t;
+
+/**
+ * Parse an HTTP request and record the original ID and Echo input.
+ * The spans borrow bytes from @p json. Keep the body until the response is printed.
+ */
+int asap_envelope_parse_request(const char *json, asap_envelope_t *out,
+	cJSON **err_out, asap_request_wire_t *wire);
+
+/**
+ * Insert the request's exact ID and Echo input before printing a response.
+ * This changes @p response. The caller owns the returned string.
+ */
+char *asap_jsonrpc_print_response(cJSON *response, const asap_request_wire_t *wire);
+
+
 /**
  * Load envelope fields from a plain JSON object (same key layout as
  * JSON-RPC @c params / @c result). Used for result bodies and tests.
