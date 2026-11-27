@@ -59,6 +59,9 @@ const tool_t *tool_cron_get(void);
 
 #define CRON_INVALID_DESTINATION (-2)
 
+/** Toggle a stored job under the agent lock. Return CRON_INVALID_DESTINATION if it cannot resume. */
+int cron_toggle_job(const char *id);
+
 /**
  * Create a cron job (shared by tool and HTTP handler).
  * If id_out[0] == '\0', a random ID is generated.

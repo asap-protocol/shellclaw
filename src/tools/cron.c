@@ -305,14 +305,26 @@ static cron_target_status_t cron_stored_target(const char *channel, const char *
 	return cron_resolve_target(channel, recipient, CRON_TARGET_STORED, NULL);
 }
 
+static cron_target_status_t cron_row_target(const cron_job_row_t *row)
+{
+	return cron_stored_target(row->channel, row->recipient, row->channel_truncated, row->recipient_truncated);
+}
+
 const char *cron_job_delivery_state(const struct cron_job_row *row)
 {
+	cron_target_status_t target = cron_row_target(row);
+	if (target == CRON_TARGET_INVALID) return "invalid_destination";
 	if (!row->enabled) return "paused";
-	switch (cron_stored_target(row->channel, row->recipient, row->channel_truncated, row->recipient_truncated)) {
-	case CRON_TARGET_READY: return "scheduled";
-	case CRON_TARGET_DEFERRED: return "waiting_for_channel";
-	default: return "invalid_destination";
-	}
+	return target == CRON_TARGET_READY ? "scheduled" : "waiting_for_channel";
+}
+
+int cron_toggle_job(const char *id)
+{
+	cron_job_row_t row;
+	if (cron_job_get_by_id(id, &row) != 1) return -1;
+	int cannot_resume = !row.enabled && cron_row_target(&row) == CRON_TARGET_INVALID;
+	cron_job_row_free(&row);
+	return cannot_resume ? CRON_INVALID_DESTINATION : cron_job_toggle(id);
 }
 
 int cron_create_job(const char *schedule, const char *message,
@@ -539,8 +551,7 @@ static int cron_pick_due_row(long long now, int timeout_ms, cron_job_row_t *row)
 		cron_sleep_ms((long)timeout_ms);
 	agent_lock();
 	found = cron_job_get_by_id(first, row) == 1 && row->enabled && row->next_run <= now &&
-		cron_stored_target(row->channel, row->recipient, row->channel_truncated,
-				   row->recipient_truncated) == CRON_TARGET_READY;
+		cron_row_target(row) == CRON_TARGET_READY;
 	agent_unlock();
 	if (found)
 		return 1;
@@ -753,9 +764,11 @@ static int cron_tool_execute(const char *args_json, char *result_buf, size_t max
 			snprintf(result_buf, max_len, "{\"error\":\"id required\"}");
 			return -1;
 		}
-		if (cron_job_toggle(id_node->valuestring) != 0) {
+		int rc = cron_toggle_job(id_node->valuestring);
+		if (rc != 0) {
 			cJSON_Delete(root);
-			snprintf(result_buf, max_len, "{\"error\":\"job not found\"}");
+			snprintf(result_buf, max_len, "{\"error\":\"%s\"}", rc == CRON_INVALID_DESTINATION
+				 ? "Cannot resume a job with an invalid destination" : "job not found");
 			return -1;
 		}
 		snprintf(result_buf, max_len, "{\"ok\":true}");

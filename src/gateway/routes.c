@@ -760,8 +760,12 @@ static void handle_cron_toggle(const char *id, char *buf, size_t size, int *stat
 {
 	int rc;
 	agent_lock();
-	rc = cron_job_toggle(id);
+	rc = cron_toggle_job(id);
 	agent_unlock();
+	if (rc == CRON_INVALID_DESTINATION) {
+		json_error(buf, size, status, 409, "Cannot resume a job with an invalid destination");
+		return;
+	}
 	if (rc != 0) {
 		json_error(buf, size, status, 404, "Job not found");
 		return;

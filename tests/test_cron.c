@@ -826,6 +826,7 @@ static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
 	ASSERT(cron_ack_delivery(msg.user_id) == 0);
 	channel_incoming_msg_clear(&msg);
 	ASSERT(cron_job_get_by_id("old-chat", &row) == 1 && row.enabled == 0);
+	ASSERT(strcmp(cron_job_delivery_state(&row), "invalid_destination") == 0);
 	ASSERT(strcmp(row.channel, "webchat") == 0 && strcmp(row.recipient, "webchat:42") == 0);
 	ASSERT(strcmp(row.message, "old") == 0 && strcmp(row.schedule, "at:1") == 0 && row.next_run == due - 2);
 	cron_job_row_free(&row);
@@ -835,6 +836,11 @@ static int test_cron_unavailable_targets_do_not_block_ready_jobs(void)
 	cron_job_row_free(&row);
 	ASSERT(cron_job_get_by_id("waiting00", &row) == 1 && row.enabled == 1);
 	ASSERT(row.next_run == due - 1);
+	cron_job_row_free(&row);
+	char result[128];
+	ASSERT(tool_cron_get()->execute("{\"operation\":\"toggle\",\"id\":\"old-chat\"}", result, sizeof(result)) != 0);
+	ASSERT(strstr(result, "destination") != NULL);
+	ASSERT(cron_job_get_by_id("old-chat", &row) == 1 && row.enabled == 0);
 	cron_job_row_free(&row);
 	ASSERT(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
 	ASSERT(cron->poll(&msg, 80) == 0);

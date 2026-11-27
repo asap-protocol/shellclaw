@@ -198,3 +198,5 @@ For example, `0 9 1 * 1` runs at 09:00 when the first day of a month is a Monday
 
 Each entry in a page includes `delivery_status`. A paused job stays paused after a restart.
 A job with `waiting_for_channel` stays in the queue until its delivery channel becomes available.
+A job with `invalid_destination` keeps this status when the scheduler disables it. A request to resume it returns HTTP 409.
+Create a job with a supported destination before you delete the old job.

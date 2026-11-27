@@ -85,6 +85,12 @@ static int test_dashboard_sqlite_holds_agent_lock(void)
 	ASSERT(status == 200);
 	ASSERT(call_route(&ctx, HTTP_DELETE, "/api/cron/job_lock", NULL, &status) == 0);
 	ASSERT(status == 200);
+	agent_lock();
+	int seeded = cron_job_create("legacy", "at:1", "Report", "webchat", "42", 1, 0);
+	agent_unlock();
+	ASSERT(seeded == 0);
+	ASSERT(call_route(&ctx, HTTP_POST, "/api/cron/legacy/toggle", NULL, &status) == 0);
+	ASSERT(status == 409);
 
 	memory_sqlite_entry_set_hook_for_test(NULL);
 	ASSERT(agent_mutex_is_locked_for_test() == 0);

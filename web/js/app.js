@@ -361,7 +361,7 @@
             '<th>Next run</th><th>Status</th><th>Actions</th></tr></thead>';
           const body = table.createTBody();
           const states = {scheduled:'Scheduled', paused:'Paused', waiting_for_channel:'Waiting for channel',
-            invalid_destination:'Invalid destination'};
+            invalid_destination:'Invalid destination. Create a job with a supported destination.'};
           for (const job of page.jobs) {
             const row = body.insertRow();
             cell(row, job.id);
@@ -372,7 +372,8 @@
             cell(row, states[job.delivery_status] || job.delivery_status);
             const controls = row.insertCell();
             const path = '/api/cron/job/' + encodeURIComponent(job.key);
-            action(controls, job.enabled ? 'Pause' : 'Resume', 'POST', path + '/toggle', job.id);
+            if (job.delivery_status !== 'invalid_destination')
+              action(controls, job.enabled ? 'Pause' : 'Resume', 'POST', path + '/toggle', job.id);
             action(controls, 'Delete', 'DELETE', path, job.id);
           }
           jobs.appendChild(table);
