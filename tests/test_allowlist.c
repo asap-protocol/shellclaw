@@ -821,8 +821,24 @@ static int test_in_workspace_env_and_scanner_edges(void)
 /* main                                                                 */
 /* ------------------------------------------------------------------ */
 
+static int test_relative_file_uses_working_directory(void)
+{
+	char workspace[] = "/tmp/shellclaw-relative-path-XXXXXX";
+	char previous[PATH_MAX];
+	ASSERT(getcwd(previous, sizeof(previous)) != NULL);
+	ASSERT(mkdtemp(workspace) != NULL);
+	ASSERT(allowlist_path_is_under_workspace("new-note.txt", workspace) == 0);
+	ASSERT(chdir(workspace) == 0);
+	int inside = allowlist_path_is_under_workspace("new-note.txt", workspace);
+	ASSERT(chdir(previous) == 0);
+	ASSERT(rmdir(workspace) == 0);
+	ASSERT(inside == 1);
+	return 0;
+}
+
 int main(void)
 {
+	RUN(test_relative_file_uses_working_directory());
 	RUN(test_block_rm_rf_root());
 	RUN(test_block_rm_rf_wildcard());
 	RUN(test_block_mkfs());

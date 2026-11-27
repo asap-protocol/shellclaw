@@ -145,6 +145,9 @@ static int lexical_collapse_path(const char *path, char *out, size_t out_cap)
         if (seg[0] == '\0' || strcmp(seg, ".") == 0)
             continue;
         if (strcmp(seg, "..") == 0) {
+            /* An unresolved relative parent has no known directory to cancel. */
+            if (!absolute && nparts == 0)
+                return -1;
             if (nparts > 0) {
                 if (stacked_path_is_symlink(parts, nparts, absolute))
                     return -1;
