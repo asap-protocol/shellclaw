@@ -99,6 +99,9 @@ static inline int http_listen_iface(const char *host, int allow_bind_all,
  */
 int http_start(const config_t *cfg, struct auth_ctx *auth_ctx, const char *config_path);
 
+/** Request a temporary pairing code from the main thread. */
+void http_request_pairing_code(void);
+
 /**
  * Stop HTTP server. Safe to call if not started.
  */

@@ -464,7 +464,7 @@
   }
 
   function renderPair() {
-    render(app, '<h1>Pair</h1><p>Enter the 6-digit pairing code shown on the server.</p>' +
+    render(app, '<h1>Pair</h1><p>Enter the six-digit code from the gateway. If you need a new code, ask the gateway operator.</p>' +
       '<form class="pair-form" id="pair-form"><input name="code" placeholder="Code" maxlength="6" autocomplete="off">' +
       '<button type="submit">Pair</button></form>');
     document.getElementById('pair-form').onsubmit = function (e) {

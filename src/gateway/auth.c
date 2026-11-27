@@ -23,8 +23,9 @@
 #include <unistd.h>
 
 #define DEFAULT_TOKENS_PATH "~/.shellclaw/auth_tokens.json"
-#define PAIRING_CODE_LEN 6
+#define PAIRING_CODE_LEN (PAIR_CODE_SIZE - 1)
 #define TOKEN_LEN 32
+#define TOKEN_CAP 16
 
 #define LOCKOUT_TABLE_SIZE 32
 #define LOCKOUT_IP_SIZE 48
@@ -37,17 +38,29 @@ typedef struct pair_lockout_entry {
 
 struct auth_ctx {
 	char *tokens_path;
-	char *pending_pairing_code;
+	char pairing_code[PAIR_CODE_SIZE];
+	int code_pending;
+	time_t code_expires_at;
 	pair_lockout_entry_t lockout[LOCKOUT_TABLE_SIZE];
 };
 
-static int is_file_empty_or_missing(const char *path)
+/* Return an empty array for a new store. Fail if an existing store is unreadable. */
+static cJSON *read_tokens(const char *path)
 {
+	char buf[8192];
 	FILE *f = fopen(path, "r");
-	if (!f) return 1;
-	int c = fgetc(f);
+	if (!f)
+		return errno == ENOENT ? cJSON_CreateArray() : NULL;
+	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+	int complete = feof(f) && !ferror(f);
 	fclose(f);
-	return (c == EOF);
+	if (!complete) return NULL;
+	if (n == 0) return cJSON_CreateArray();
+	buf[n] = '\0';
+	cJSON *arr = cJSON_ParseWithOpts(buf, NULL, 1);
+	if (cJSON_IsArray(arr)) return arr;
+	cJSON_Delete(arr);
+	return NULL;
 }
 
 static int ensure_tokens_dir(const char *path);
@@ -119,20 +132,41 @@ void auth_cleanup(auth_ctx_t *ctx)
 {
 	if (!ctx) return;
 	free(ctx->tokens_path);
-	free(ctx->pending_pairing_code);
 	free(ctx);
+}
+
+static int issue_code(auth_ctx_t *ctx, time_t expires_at, char code[PAIR_CODE_SIZE])
+{
+	do {
+		if (generate_pairing_code(code, PAIR_CODE_SIZE) != 0) return -1;
+	} while (strcmp(code, ctx->pairing_code) == 0);
+	memcpy(ctx->pairing_code, code, PAIR_CODE_SIZE);
+	ctx->code_pending = 1;
+	ctx->code_expires_at = expires_at;
+	return 0;
+}
+
+int auth_issue_device_code(auth_ctx_t *ctx, time_t now, char code[PAIR_CODE_SIZE])
+{
+	if (!ctx || !code) return -1;
+	cJSON *tokens = read_tokens(ctx->tokens_path);
+	if (!tokens) return -1;
+	int count = cJSON_GetArraySize(tokens);
+	cJSON_Delete(tokens);
+	if (count >= TOKEN_CAP) return -1;
+	return issue_code(ctx, now + PAIR_DEVICE_CODE_SECS, code);
 }
 
 char *auth_get_or_create_pairing_code(auth_ctx_t *ctx)
 {
-	if (!ctx || !ctx->tokens_path) return NULL;
-	if (!is_file_empty_or_missing(ctx->tokens_path)) return NULL;
-	free(ctx->pending_pairing_code);
-	ctx->pending_pairing_code = NULL;
-	char code[PAIRING_CODE_LEN + 1];
-	if (generate_pairing_code(code, sizeof(code)) != 0) return NULL;
-	ctx->pending_pairing_code = strdup(code);
-	if (!ctx->pending_pairing_code) return NULL;
+	if (!ctx) return NULL;
+	cJSON *tokens = read_tokens(ctx->tokens_path);
+	if (!tokens) return NULL;
+	int count = cJSON_GetArraySize(tokens);
+	cJSON_Delete(tokens);
+	if (count != 0) return NULL;
+	char code[PAIR_CODE_SIZE];
+	if (issue_code(ctx, 0, code) != 0) return NULL;
 	printf("ShellClaw pairing code: %s\n", code);
 	fflush(stdout);
 	if (getenv("SHELLCLAW_TEST_MODE")) {
@@ -239,37 +273,33 @@ static int write_tokens_atomic(const char *path, const char *json)
 
 int auth_pair(auth_ctx_t *ctx, const char *code, char *token_out, size_t token_size)
 {
-	if (!ctx || !ctx->tokens_path || !code || !token_out || token_size == 0) return -1;
-	if (!is_valid_6digit(code)) return -1;
-	if (!ctx->pending_pairing_code ||
-	    !constant_time_cmp(code, ctx->pending_pairing_code, PAIRING_CODE_LEN))
+	if (!ctx || !token_out || token_size <= TOKEN_LEN || !ctx->code_pending ||
+	    !is_valid_6digit(code))
 		return -1;
-	char new_token[TOKEN_LEN + 1];
-	/* Fail closed: never persist or return an uninitialized bearer on RNG/OOM. */
-	if (generate_random_hex(new_token, TOKEN_LEN) != 0)
-		return -1;
-	/* Read existing tokens and append (multi-device support). */
-	cJSON *arr = NULL;
-	{
-		FILE *f = fopen(ctx->tokens_path, "r");
-		if (f) {
-			char buf[8192];
-			size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-			fclose(f);
-			buf[n] = '\0';
-			cJSON *existing = cJSON_Parse(buf);
-			if (existing && cJSON_IsArray(existing))
-				arr = existing;
-			else if (existing)
-				cJSON_Delete(existing);
+	if (ctx->code_expires_at != 0) {
+		struct timespec now;
+		if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec >= ctx->code_expires_at) {
+			ctx->code_pending = 0;
+			return -1;
 		}
 	}
-	if (!arr) arr = cJSON_CreateArray();
+	if (!constant_time_cmp(code, ctx->pairing_code, PAIRING_CODE_LEN))
+		return -1;
+	char new_token[TOKEN_LEN + 1];
+	if (generate_random_hex(new_token, TOKEN_LEN) != 0)
+		return -1;
+	cJSON *arr = read_tokens(ctx->tokens_path);
 	if (!arr) return -1;
-	/* Cap at 16 tokens to prevent unbounded growth. */
-	while (cJSON_GetArraySize(arr) >= 16)
-		cJSON_DeleteItemFromArray(arr, 0);
-	cJSON_AddItemToArray(arr, cJSON_CreateString(new_token));
+	if (cJSON_GetArraySize(arr) >= TOKEN_CAP) {
+		cJSON_Delete(arr);
+		return -1;
+	}
+	cJSON *item = cJSON_CreateString(new_token);
+	if (!item || !cJSON_AddItemToArray(arr, item)) {
+		cJSON_Delete(item);
+		cJSON_Delete(arr);
+		return -1;
+	}
 	char *json = cJSON_PrintUnformatted(arr);
 	cJSON_Delete(arr);
 	if (!json) return -1;
@@ -282,28 +312,16 @@ int auth_pair(auth_ctx_t *ctx, const char *code, char *token_out, size_t token_s
 		return -1;
 	}
 	free(json);
-	size_t copy_len = (size_t)TOKEN_LEN < token_size - 1 ? (size_t)TOKEN_LEN : token_size - 1;
-	memcpy(token_out, new_token, copy_len);
-	token_out[copy_len] = '\0';
-	free(ctx->pending_pairing_code);
-	ctx->pending_pairing_code = NULL;
+	memcpy(token_out, new_token, sizeof(new_token));
+	ctx->code_pending = 0;
 	return 0;
 }
 
 int auth_validate_token(auth_ctx_t *ctx, const char *token)
 {
 	if (!ctx || !ctx->tokens_path || !token || token[0] == '\0') return 0;
-	FILE *f = fopen(ctx->tokens_path, "r");
-	if (!f) return 0;
-	char buf[8192];
-	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-	fclose(f);
-	buf[n] = '\0';
-	cJSON *root = cJSON_Parse(buf);
-	if (!root || !cJSON_IsArray(root)) {
-		if (root) cJSON_Delete(root);
-		return 0;
-	}
+	cJSON *root = read_tokens(ctx->tokens_path);
+	if (!root) return 0;
 	int found = 0;
 	int count = cJSON_GetArraySize(root);
 	size_t tok_len = strlen(token);
