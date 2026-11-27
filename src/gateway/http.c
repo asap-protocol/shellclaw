@@ -6,6 +6,7 @@
 
 #include "gateway/http.h"
 #include "gateway/http_lws.h"
+#include "core/memory.h"
 #include "gateway/ws.h"
 #include "gateway/ws_rx.h"
 #include "providers/provider.h"
@@ -134,7 +135,8 @@ int http_start(const config_t *cfg, struct auth_ctx *auth_ctx, const char *confi
 #endif
 	info.mounts = &mount_ws;
 	ctx->lws_ctx = lws_create_context(&info);
-	if (!ctx->lws_ctx) {
+	if (!ctx->lws_ctx || webchat_store_recover() != 0) {
+		if (ctx->lws_ctx) lws_context_destroy(ctx->lws_ctx);
 		free(ctx->config_path);
 		free(ctx);
 		return -1;

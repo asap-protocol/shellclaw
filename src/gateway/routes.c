@@ -6,6 +6,7 @@
 
 #include "gateway/routes.h"
 #include "gateway/routes_hardware.h"
+#include "gateway/routes_webchat.h"
 #include "gateway/http.h"
 #include "gateway/auth.h"
 #include "gateway/rate_limit.h"
@@ -531,7 +532,13 @@ static void handle_memory_get(const char *query, int limit, char *buf, size_t si
 	}
 }
 
-static void handle_sessions_list(char *buf, size_t size, int *status)
+static int can_access_session(const char *id, const char *device_session)
+{
+	return strncmp(id, WEBCHAT_DEVICE_PREFIX, sizeof(WEBCHAT_DEVICE_PREFIX) - 1) != 0 ||
+		strcmp(id, device_session) == 0;
+}
+
+static void handle_sessions_list(const char *device_session, char *buf, size_t size, int *status)
 {
 	char *ids[64];
 	int n;
@@ -541,7 +548,8 @@ static void handle_sessions_list(char *buf, size_t size, int *status)
 	cJSON *arr = cJSON_CreateArray();
 	if (!arr) { json_error(buf, size, status, 500, "Internal error"); return; }
 	for (int i = 0; i < n; i++) {
-		cJSON_AddItemToArray(arr, cJSON_CreateString(ids[i]));
+		if (can_access_session(ids[i], device_session))
+			cJSON_AddItemToArray(arr, cJSON_CreateString(ids[i]));
 		free(ids[i]);
 	}
 	char *s = cJSON_PrintUnformatted(arr);
@@ -1042,8 +1050,14 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 		handle_memory_get(qbuf[0] ? qbuf : NULL, limit, buf, size, status);
 		return 0;
 	}
+	if (uri_exact_eq(uri, uri_len, WEBCHAT_ROUTE)) {
+		handle_webchat(wsi, method, body, body_len, buf, size, status);
+		return 0;
+	}
 	if (uri_exact_eq(uri, uri_len, "/api/sessions")) {
-		if (method == HTTP_GET) handle_sessions_list(buf, size, status);
+		char session[WEBCHAT_SESSION_SIZE] = {0};
+		webchat_request_session(wsi, session);
+		if (method == HTTP_GET) handle_sessions_list(session, buf, size, status);
 		else json_error(buf, size, status, 405, "Method not allowed");
 		return 0;
 	}
@@ -1054,7 +1068,10 @@ int dispatch_route(http_server_ctx_t *ctx, struct lws *wsi, int method,
 			json_error(buf, size, status, 404, "Not found");
 			return 0;
 		}
-		handle_session_delete(id, buf, size, status);
+		char session[WEBCHAT_SESSION_SIZE] = {0};
+		webchat_request_session(wsi, session);
+		if (can_access_session(id, session)) handle_session_delete(id, buf, size, status);
+		else json_error(buf, size, status, 404, "Session not found");
 		return 0;
 	}
 	if (uri_exact_eq(uri, uri_len, "/api/cron")) {

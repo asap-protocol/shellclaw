@@ -97,6 +97,7 @@ CHANNEL_WEBCHAT_O := $(if $(filter 1,$(GATEWAY)),src/channels/webchat.o,)
 STATIC_O := $(if $(filter 1,$(GATEWAY)),src/gateway/static.o,)
 HTTP_O     := $(if $(filter 1,$(GATEWAY)),src/gateway/http.o,)
 HTTP_LWS_O := $(if $(filter 1,$(GATEWAY)),src/gateway/http_lws.o,)
+ROUTES_WEBCHAT_O := $(if $(filter 1,$(GATEWAY)),src/gateway/routes_webchat.o,)
 ROUTES_O   := $(if $(filter 1,$(GATEWAY)),src/gateway/routes.o,)
 ROUTES_HARDWARE_O := $(if $(filter 1,$(GATEWAY)),src/gateway/routes_hardware.o,)
 WS_O       := $(if $(filter 1,$(GATEWAY)),src/gateway/ws.o,)
@@ -173,7 +174,7 @@ OBJS := $(CORE_OBJS) $(VENDOR_OBJS)
 PROVIDER_OBJS := $(PROVIDER_COMMON_O) $(STUB_O) $(ROUTER_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O)
 CHANNEL_OBJS := $(CHANNEL_COMMON_O) $(CHANNEL_CLI_O) $(CHANNEL_TG_O) $(CHANNEL_DISCORD_O) $(DISCORD_HELPERS_O) $(CHANNEL_HEARTBEAT_O) $(CHANNEL_WEBCHAT_O)
 ASAP_HTTP_BODY_O := $(if $(filter 1,$(GATEWAY)),src/gateway/asap_http_body.o,)
-GATEWAY_OBJS := $(AUTH_O) $(STATIC_O) $(HTTP_O) $(HTTP_LWS_O) $(ASAP_HTTP_BODY_O) $(ROUTES_O) $(ROUTES_HARDWARE_O) $(WS_O) $(RATE_LIMIT_O)
+GATEWAY_OBJS := $(AUTH_O) $(STATIC_O) $(HTTP_O) $(HTTP_LWS_O) $(ASAP_HTTP_BODY_O) $(ROUTES_O) $(ROUTES_HARDWARE_O) $(ROUTES_WEBCHAT_O) $(WS_O) $(RATE_LIMIT_O)
 GATEWAY_OBJS += $(if $(filter 1,$(GATEWAY)),$(WS_RX_O))
 TOOL_OBJS := $(SHELL_O) $(WEBSEARCH_O) $(FILE_O) $(REGISTRY_O) $(CONTEXT_O) $(CONTEXT_CACHE_O) $(CONTEXT_HTTP_O) $(CONTEXT_GEO_O) $(CRYPTO_LINK) $(HARDWARE_STUB_O) $(HARDWARE_INIT_O) $(HARDWARE_GPIO_SNAPSHOT_O) $(HARDWARE_TEGRASTATS_O) $(HARDWARE_TOOLS_O) $(BOARD_DETECT_O) $(HARDWARE_I2C_O) $(HARDWARE_CAMERA_O) $(HARDWARE_LIBGPIOD_O) $(CRON_O) $(ASAP_INVOKE_O)
 ASAP_OBJS := $(MANIFEST_O) $(MANIFEST_PROFILES_O) $(MANIFEST_BUILD_O) $(MANIFEST_SIGN_O) $(MANIFEST_KEYS_O) $(JCS_O) $(ENVELOPE_O) $(ULID_O) $(CLIENT_O) $(ASAP_REGISTRY_O) $(SERVER_O) $(ASAP_LOG_O)
@@ -309,7 +310,7 @@ $(HEARTBEAT_TEST_O): src/channels/heartbeat.c src/channels/heartbeat.h src/chann
 	@mkdir -p $(BINDIR)
 	$(CC) $(CFLAGS) $(INC) -DSHELLCLAW_TEST -c -o $@ src/channels/heartbeat.c
 
-$(CHANNEL_WEBCHAT_O): src/channels/webchat.c src/channels/channel.h src/channels/webchat.h src/core/config.h
+$(CHANNEL_WEBCHAT_O): src/channels/webchat.c src/channels/channel.h src/channels/webchat.h src/core/config.h src/core/memory.h src/crypto/crypto.h src/gateway/ws.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -c -o $@ src/channels/webchat.c
 
 $(AUTH_O): src/gateway/auth.c src/gateway/auth.h src/core/config.h src/crypto/crypto.h
@@ -373,13 +374,16 @@ $(ASAP_REGISTRY_TEST_O): src/asap/registry.c src/asap/registry.h src/asap/client
 $(RATE_LIMIT_O): src/gateway/rate_limit.c src/gateway/rate_limit.h
 	$(CC) $(CFLAGS) $(INC) -pthread -c -o $@ src/gateway/rate_limit.c
 
-$(HTTP_O): src/gateway/http.c src/gateway/http.h src/gateway/http_lws.h src/gateway/ws.h src/gateway/ws_rx.h src/providers/provider.h
+$(HTTP_O): src/gateway/http.c src/core/memory.h src/gateway/http.h src/gateway/http_lws.h src/gateway/ws.h src/gateway/ws_rx.h src/providers/provider.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/http.c
 
-$(HTTP_LWS_O): src/gateway/http_lws.c src/gateway/http_lws.h src/gateway/asap_http_body.h src/gateway/routes.h src/gateway/auth.h src/gateway/static.h src/gateway/ws.h src/gateway/ws_rx.h
+$(HTTP_LWS_O): src/gateway/http_lws.c src/gateway/routes_webchat.h src/gateway/http_lws.h src/gateway/asap_http_body.h src/gateway/routes.h src/gateway/auth.h src/gateway/static.h src/gateway/ws.h src/gateway/ws_rx.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/http_lws.c
 
-$(ROUTES_O): src/gateway/routes.c src/gateway/routes.h src/gateway/routes_hardware.h src/gateway/http.h src/gateway/http_lws.h src/gateway/auth.h src/gateway/rate_limit.h src/tools/context.h src/asap/manifest.h src/asap/envelope.h src/asap/server.h src/asap/log.h src/core/bootstrap.h src/core/agent.h src/core/config.h src/core/config_patch.h src/core/dispatch.h src/core/reload.h src/core/memory.h src/core/skill.h src/providers/provider.h src/channels/channel.h src/tools/cron.h src/tools/tool.h
+$(ROUTES_WEBCHAT_O): src/gateway/routes_webchat.c src/gateway/routes_webchat.h src/gateway/routes.h src/channels/webchat.h src/core/memory.h src/vendor/tweetnacl/tweetnacl.h
+	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -c -o $@ $<
+
+$(ROUTES_O): src/gateway/routes.c src/gateway/routes_webchat.h src/gateway/routes.h src/gateway/routes_hardware.h src/gateway/http.h src/gateway/http_lws.h src/gateway/auth.h src/gateway/rate_limit.h src/tools/context.h src/asap/manifest.h src/asap/envelope.h src/asap/server.h src/asap/log.h src/core/bootstrap.h src/core/agent.h src/core/config.h src/core/config_patch.h src/core/dispatch.h src/core/reload.h src/core/memory.h src/core/skill.h src/providers/provider.h src/channels/channel.h src/tools/cron.h src/tools/tool.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -pthread -c -o $@ src/gateway/routes.c
 
 $(ROUTES_HARDWARE_O): src/gateway/routes_hardware.c src/gateway/routes_hardware.h src/gateway/routes.h src/gateway/http_lws.h src/gateway/uri_match.h src/hardware/hardware.h src/hardware/hardware_gpio_snapshot.h src/hardware/hardware_tegrastats.h src/hardware/board_detect.h src/core/config.h
@@ -945,7 +949,7 @@ clean-root-dsym:
 	@rm -f shellclaw test_agent test_anthropic test_channel test_cli test_config test_file test_memory test_local_provider test_openai test_provider test_router test_shell test_skill test_telegram test_web_search test_ws
 
 clean: clean-root-dsym
-	rm -f $(OBJS) $(PROVIDER_COMMON_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(ROUTER_O) $(CJSON_O) $(TWEETNACL_O) $(ANTHROPIC_TEST_O) $(OPENAI_TEST_O) $(LOCAL_TEST_O) $(CONTEXT_TEST_OBJS) $(HEARTBEAT_TEST_O) $(CHANNEL_TG_TEST_O) $(CHANNEL_COMMON_O) $(CHANNEL_STUB_O) $(CHANNEL_CLI_O) $(CHANNEL_TG_O) $(CHANNEL_DISCORD_O) $(DISCORD_HELPERS_O) $(CHANNEL_HEARTBEAT_O) $(CHANNEL_WEBCHAT_O) $(AUTH_O) $(STATIC_O) $(HTTP_O) $(HTTP_LWS_O) $(ASAP_HTTP_BODY_O) $(ROUTES_O) $(ROUTES_HARDWARE_O) $(WS_O) $(MANIFEST_O) $(MANIFEST_PROFILES_O) $(MANIFEST_BUILD_O) $(MANIFEST_SIGN_O) $(MANIFEST_KEYS_O) $(ENVELOPE_O) $(ULID_O) $(CLIENT_O) $(ASAP_REGISTRY_O) $(SERVER_O) $(ASAP_LOG_O) $(RATE_LIMIT_O) $(SHELL_O) $(WEBSEARCH_O) $(FILE_O) $(REGISTRY_O) $(CONTEXT_O) $(CONTEXT_CACHE_O) $(CONTEXT_HTTP_O) $(CONTEXT_GEO_O) $(CRYPTO_O) $(JCS_O) $(HARDWARE_STUB_O) $(HARDWARE_INIT_O) $(HARDWARE_GPIO_SNAPSHOT_O) $(HARDWARE_TEGRASTATS_O) $(HARDWARE_TOOLS_O) $(BOARD_DETECT_O) src/hardware/hardware_libgpiod.o $(HARDWARE_I2C_O) $(HARDWARE_CAMERA_O) $(CRON_O) $(ASAP_INVOKE_O) $(SANDBOX_CORE_O) $(SANDBOX_LANDLOCK_O) $(SANDBOX_ENV_O) $(ALLOWLIST_SCAN_O) $(ALLOWLIST_PATH_O)
+	rm -f $(OBJS) $(PROVIDER_COMMON_O) $(STUB_O) $(ANTHROPIC_O) $(OPENAI_COMPAT_O) $(OPENAI_O) $(LOCAL_O) $(ROUTER_O) $(CJSON_O) $(TWEETNACL_O) $(ANTHROPIC_TEST_O) $(OPENAI_TEST_O) $(LOCAL_TEST_O) $(CONTEXT_TEST_OBJS) $(HEARTBEAT_TEST_O) $(CHANNEL_TG_TEST_O) $(CHANNEL_COMMON_O) $(CHANNEL_STUB_O) $(CHANNEL_CLI_O) $(CHANNEL_TG_O) $(CHANNEL_DISCORD_O) $(DISCORD_HELPERS_O) $(CHANNEL_HEARTBEAT_O) $(CHANNEL_WEBCHAT_O) $(AUTH_O) $(STATIC_O) $(HTTP_O) $(HTTP_LWS_O) $(ASAP_HTTP_BODY_O) $(ROUTES_O) $(ROUTES_HARDWARE_O) $(ROUTES_WEBCHAT_O) $(WS_O) $(MANIFEST_O) $(MANIFEST_PROFILES_O) $(MANIFEST_BUILD_O) $(MANIFEST_SIGN_O) $(MANIFEST_KEYS_O) $(ENVELOPE_O) $(ULID_O) $(CLIENT_O) $(ASAP_REGISTRY_O) $(SERVER_O) $(ASAP_LOG_O) $(RATE_LIMIT_O) $(SHELL_O) $(WEBSEARCH_O) $(FILE_O) $(REGISTRY_O) $(CONTEXT_O) $(CONTEXT_CACHE_O) $(CONTEXT_HTTP_O) $(CONTEXT_GEO_O) $(CRYPTO_O) $(JCS_O) $(HARDWARE_STUB_O) $(HARDWARE_INIT_O) $(HARDWARE_GPIO_SNAPSHOT_O) $(HARDWARE_TEGRASTATS_O) $(HARDWARE_TOOLS_O) $(BOARD_DETECT_O) src/hardware/hardware_libgpiod.o $(HARDWARE_I2C_O) $(HARDWARE_CAMERA_O) $(CRON_O) $(ASAP_INVOKE_O) $(SANDBOX_CORE_O) $(SANDBOX_LANDLOCK_O) $(SANDBOX_ENV_O) $(ALLOWLIST_SCAN_O) $(ALLOWLIST_PATH_O)
 	rm -f src/gateway/ui_assets.h $(WS_RX_O) $(BINDIR)/test_ws_rx
 	find . -name '*.gcno' -o -name '*.gcda' -o -name '*.gcov' | xargs rm -f 2>/dev/null || true
 	rm -f $(WS_TEST_O) $(SANDBOX_TEST_O) $(BINDIR)/asap_registry_test.o $(BINDIR)/asap_invoke_test.o $(CONTEXT_TEST_OBJS) $(HEARTBEAT_TEST_O) $(BINDIR)/shellclaw $(BINDIR)/test_tweetnacl_smoke $(BINDIR)/test_config $(BINDIR)/test_config_patch $(BINDIR)/test_memory $(BINDIR)/test_skill $(BINDIR)/test_provider $(BINDIR)/test_anthropic $(BINDIR)/test_openai $(BINDIR)/test_local_provider $(BINDIR)/test_router $(BINDIR)/test_heartbeat $(BINDIR)/test_crypto $(BINDIR)/test_hardware_stub $(BINDIR)/test_board_detect $(BINDIR)/test_hardware_libgpiod $(BINDIR)/test_hardware_i2c $(BINDIR)/test_hardware_camera $(BINDIR)/test_pin_tables $(BINDIR)/test_hardware_init $(BINDIR)/test_hardware_tools $(BINDIR)/test_registry $(BINDIR)/test_ws $(BINDIR)/test_agent $(BINDIR)/test_channel $(BINDIR)/test_cli $(BINDIR)/test_shell $(BINDIR)/test_file $(BINDIR)/test_telegram $(BINDIR)/test_discord_helpers $(BINDIR)/test_web_search $(BINDIR)/test_cron $(BINDIR)/test_context $(BINDIR)/test_manifest_build $(BINDIR)/test_manifest_keys $(BINDIR)/test_jcs $(BINDIR)/test_asap_envelope $(BINDIR)/test_asap_ulid $(BINDIR)/test_asap_client $(BINDIR)/test_asap_registry $(BINDIR)/test_asap_server $(BINDIR)/test_asap_invoke $(BINDIR)/test_asap_log $(BINDIR)/test_auth $(BINDIR)/test_gateway_http $(BINDIR)/test_gateway_db_lock $(BINDIR)/test_static $(BINDIR)/test_sandbox $(BINDIR)/test_allowlist $(BINDIR)/test_rate_limit
