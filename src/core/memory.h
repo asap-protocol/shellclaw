@@ -111,7 +111,11 @@ void memory_sqlite_entry_set_hook_for_test(void (*hook)(void));
  */
 int session_list(char **session_ids_out, int max_count);
 
-/** Accept a WebChat turn. Return 0 when stored, 1 for an ID conflict, or -1 on error. */
+#define WEBCHAT_PENDING_LIMIT 64
+
+enum { WEBCHAT_ACCEPT_CONFLICT = 1, WEBCHAT_ACCEPT_FULL = 2 };
+
+/** Accept a WebChat turn. Return 0, WEBCHAT_ACCEPT_CONFLICT, WEBCHAT_ACCEPT_FULL, or -1. */
 int webchat_store_accept(const char *session, const char *request, const char *text);
 
 /** Claim the next WebChat turn. Return 1 when claimed, 0 when empty, or -1 on error. */

@@ -83,6 +83,7 @@ static void setup_signals(void)
 
 static void main_loop(int one_shot, config_t **pcfg)
 {
+	int next_channel = 0;
 	while (!g_shutdown) {
 		if (g_reload_requested) {
 			g_reload_requested = 0;
@@ -96,7 +97,8 @@ static void main_loop(int one_shot, config_t **pcfg)
 		int got = 0;
 		const channel_t *which = NULL;
 		int nch = bootstrap_channel_count();
-		for (int i = 0; i < nch && !got; i++) {
+		for (int visited = 0; visited < nch && !got; visited++) {
+			int i = (next_channel + visited) % nch;
 #ifdef SHELLCLAW_GATEWAY
 			if (g_pair_requested) {
 				g_pair_requested = 0;
@@ -108,6 +110,7 @@ static void main_loop(int one_shot, config_t **pcfg)
 				continue;
 			int r = ch->poll(&msg, POLL_TIMEOUT_MS);
 			if (r == 1) {
+				next_channel = (i + 1) % nch;
 				got = 1;
 				which = ch;
 				break;

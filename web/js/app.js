@@ -243,6 +243,10 @@
             if (signal.aborted || getToken() !== token) return;
             acceptDraft();
             wait = 0;
+          } else if (result.status === 503) {
+            status.textContent = 'The chat queue is full. Your message is pending.';
+            wait = 1200;
+            return;
           } else if (result.status >= 400 && result.status < 500) {
             draft.pending = null;
             input.readOnly = false;

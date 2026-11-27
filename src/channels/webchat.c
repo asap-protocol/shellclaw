@@ -20,6 +20,7 @@
 #define WS_SESSION_PREFIX "webchat:"
 
 static char g_native_prefix[sizeof(NATIVE_SESSION_PREFIX) + 17];
+static int g_prefer_socket;
 static int64_t g_pending_seq;
 static char g_pending_reply[WS_TEXT_BUF_SIZE];
 
@@ -52,6 +53,7 @@ static int webchat_init(const config_t *cfg)
 	uint64_t id;
 	if (crypto_read_urandom(&id, sizeof(id)) != 0) return -1;
 	snprintf(g_native_prefix, sizeof(g_native_prefix), NATIVE_SESSION_PREFIX "%016" PRIx64 ":", id);
+	g_prefer_socket = 0;
 	return 0;
 }
 
@@ -60,21 +62,26 @@ static int webchat_poll(channel_incoming_msg_t *out, int timeout_ms)
 	if (!out) return -1;
 	memset(out, 0, sizeof(*out));
 	char session_id[128];
+	char socket_session[32];
 	char text[WS_TEXT_BUF_SIZE];
 	int64_t seq = 0;
 	int r = 0;
+	if (g_prefer_socket)
+		r = ws_pop_incoming(socket_session, sizeof(socket_session), text, sizeof(text), 0);
 	/* Hold at most one calculated reply while its write is pending. */
-	if (webchat_flush_reply() >= 0)
+	if (r == 0 && webchat_flush_reply() >= 0)
 		r = webchat_store_claim(&seq, session_id, sizeof(session_id), text, sizeof(text));
 	if (r != 1) {
 		if (r < 0) fprintf(stderr, "Cannot read the WebChat queue.\n");
-		char socket_session[32];
 		r = ws_pop_incoming(socket_session, sizeof(socket_session), text, sizeof(text), timeout_ms);
 		if (r != 1) return r;
+	}
+	if (!seq) {
 		/* Connection numbers can repeat after restart. Give each run its own prefix. */
 		snprintf(session_id, sizeof(session_id), "%s%s", g_native_prefix,
 		         socket_session + sizeof(WS_SESSION_PREFIX) - 1);
 	}
+	g_prefer_socket = seq != 0;
 	out->session_id = strdup(session_id);
 	out->user_id = strdup(WEBCHAT_USER_ID);
 	out->text = strdup(text);

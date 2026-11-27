@@ -63,8 +63,10 @@ static void handle_send(const char *session, const char *body, size_t body_len,
 		json_error(buf, size, status, 400, "Invalid chat message");
 	} else {
 		int rc = webchat_store_accept(session, id, text);
-		if (rc == 1)
+		if (rc == WEBCHAT_ACCEPT_CONFLICT)
 			json_error(buf, size, status, 409, "The message ID is already in use");
+		else if (rc == WEBCHAT_ACCEPT_FULL)
+			json_error(buf, size, status, 503, "The chat queue is full. Try again shortly.");
 		else if (rc != 0)
 			json_error(buf, size, status, 500, "Cannot save the message");
 		else {

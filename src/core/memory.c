@@ -344,21 +344,33 @@ int session_list(char **session_ids_out, int max_count)
  * can hold agent_lock while the gateway accepts requests and reads receipts. */
 int webchat_store_accept(const char *session, const char *request, const char *text)
 {
-	const char *sql = "INSERT INTO webchat_turns(session, request, text) VALUES(?1, ?2, ?3) "
+	const char *sql = "INSERT INTO webchat_turns(session, request, text) SELECT ?1, ?2, ?3 "
+		"WHERE EXISTS(SELECT 1 FROM webchat_turns WHERE session=?1 AND request=?2) "
+		"OR (SELECT count(*) FROM (SELECT 1 FROM webchat_turns WHERE state<2 LIMIT ?4)) < ?4 "
 		"ON CONFLICT(session, request) DO UPDATE SET request=excluded.request "
-		"WHERE webchat_turns.state<>3 AND webchat_turns.text=excluded.text RETURNING seq";
+		"RETURNING state<>3 AND text=?3";
 	sqlite3_stmt *stmt = NULL;
-	if (!g_db || sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK)
-		return -1;
+	if (!g_db) return -1;
+	sqlite3_mutex *mutex = sqlite3_db_mutex(g_db);
+	sqlite3_mutex_enter(mutex);
 	int rc = -1;
-	if (sqlite3_bind_text(stmt, 1, session, -1, SQLITE_STATIC) == SQLITE_OK &&
+	if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+	    sqlite3_bind_text(stmt, 1, session, -1, SQLITE_STATIC) == SQLITE_OK &&
 	    sqlite3_bind_text(stmt, 2, request, -1, SQLITE_STATIC) == SQLITE_OK &&
-	    sqlite3_bind_text(stmt, 3, text, -1, SQLITE_STATIC) == SQLITE_OK) {
+	    sqlite3_bind_text(stmt, 3, text, -1, SQLITE_STATIC) == SQLITE_OK &&
+	    sqlite3_bind_int(stmt, 4, WEBCHAT_PENDING_LIMIT) == SQLITE_OK) {
 		int step = sqlite3_step(stmt);
-		if (step == SQLITE_ROW) rc = 0;
-		if (step == SQLITE_DONE) rc = 1;
+		if (step == SQLITE_ROW) {
+			int accepted = sqlite3_column_int(stmt, 0);
+			if (sqlite3_step(stmt) == SQLITE_DONE)
+				rc = accepted ? 0 : WEBCHAT_ACCEPT_CONFLICT;
+		} else if (step == SQLITE_DONE) {
+			rc = WEBCHAT_ACCEPT_FULL;
+		}
 	}
-	return sqlite3_finalize(stmt) == SQLITE_OK ? rc : -1;
+	if (sqlite3_finalize(stmt) != SQLITE_OK) rc = -1;
+	sqlite3_mutex_leave(mutex);
+	return rc;
 }
 
 int webchat_store_claim(int64_t *seq, char *session, size_t session_size, char *text, size_t text_size)

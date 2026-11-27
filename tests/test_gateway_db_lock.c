@@ -11,6 +11,7 @@
 #include "core/memory.h"
 #include "gateway/http_lws.h"
 #include "gateway/routes.h"
+#include "gateway/ws.h"
 #include "sqlite3.h"
 #include <stdlib.h>
 #include <unistd.h>
@@ -147,10 +148,37 @@ static int test_webchat_retries_reply(void)
 	return 0;
 }
 
+static int test_webchat_alternates_with_websocket(void)
+{
+	const char *session = WEBCHAT_DEVICE_PREFIX "test-device";
+	const channel_t *chat = channel_webchat_get();
+	channel_incoming_msg_t msg = {0};
+	ASSERT(memory_init(":memory:") == 0);
+	ASSERT(chat->init(NULL) == 0);
+	ASSERT(webchat_store_accept(session, "first", "/status") == 0);
+	ASSERT(webchat_store_accept(session, "second", "/reset") == 0);
+	ws_push_incoming(14, "/status");
+
+	int socket_turn = -1;
+	for (int turn = 0; turn < 3; turn++) {
+		ASSERT(chat->poll(&msg, 0) == 1);
+		if (strncmp(msg.session_id, "webchat:socket:", sizeof("webchat:socket:") - 1) == 0)
+			socket_turn = turn;
+		ASSERT(handle_message(chat, &msg) == 0);
+		channel_incoming_msg_clear(&msg);
+	}
+	chat->cleanup();
+	ws_cleanup();
+	memory_cleanup();
+	ASSERT(socket_turn == 1);
+	return 0;
+}
+
 int main(void)
 {
 	int failed = test_dashboard_sqlite_holds_agent_lock();
 	failed |= test_webchat_retries_reply();
+	failed |= test_webchat_alternates_with_websocket();
 	if (failed) return 1;
 	printf("test_gateway_db_lock: all tests passed\n");
 	return 0;
