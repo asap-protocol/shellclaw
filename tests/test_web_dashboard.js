@@ -202,7 +202,41 @@ async function testHardwareFetchMocks() {
   delete global.fetch;
 }
 
-testPairedChatDisplaysRepliesAsText().then(testHardwareFetchMocks).then(function () {
+async function testBusySessionShowsTheDeleteError() {
+  const session = 'webchat:device:sample';
+  const message = 'Wait for the current message before you delete this conversation';
+  const location = { hash: '#/sessions' };
+  const button = {};
+  const rows = [];
+  const alerts = [];
+  const app = {};
+  const list = { appendChild: row => rows.push(row) };
+  const requests = [];
+  const script = fs.readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
+  vm.runInNewContext(script, {
+    window: { location, addEventListener() {}, confirm: () => true, alert: text => alerts.push(text) },
+    document: {
+      getElementById: id => id === 'app' ? app : list,
+      querySelectorAll: () => [],
+      createElement: () => ({ querySelector: () => button })
+    },
+    localStorage: { getItem: () => 'paired' },
+    ShellClawDashboard: dash,
+    fetch: async (url, options) => {
+      requests.push([url, options.method]);
+      if (options.method === 'GET') return { ok: true, json: async () => [session] };
+      return { ok: false, status: 409, text: async () => JSON.stringify({ error: message }) };
+    }
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  button.onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert(requests.length === 2 && requests[1][0] === '/api/sessions/' + encodeURIComponent(session) &&
+    requests[1][1] === 'DELETE', 'the browser deletes the selected session once');
+  assert(alerts[0] === message && rows.length === 1, 'a pending turn keeps its session and shows the reason');
+}
+
+testPairedChatDisplaysRepliesAsText().then(testBusySessionShowsTheDeleteError).then(testHardwareFetchMocks).then(function () {
   console.log('test_web_dashboard: all tests passed');
 }).catch(function (err) {
   console.error('FAIL:', err && err.message ? err.message : err);

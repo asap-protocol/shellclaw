@@ -382,19 +382,33 @@
   function renderSessions() {
     const token = getToken();
     if (!token) { window.location.hash = '#/pair'; return; }
+    const page = pageVersion;
+    const list = ++listVersion;
+    const current = () => page === pageVersion && list === listVersion;
+    const refresh = () => { if (page === pageVersion) renderSessions(); };
+    const reportError = err => {
+      if (page !== pageVersion) return;
+      let message = String(err);
+      try { message = JSON.parse(message).error || message; } catch (_) {}
+      window.alert(message);
+    };
     api('GET', '/api/sessions').then(arr => {
+      if (!current()) return;
       let html = '<h1>Sessions</h1><ul class="session-list" id="session-list"></ul>';
       render(app, html);
       const ul = document.getElementById('session-list');
       (arr || []).forEach(id => {
         const li = document.createElement('li');
-        li.innerHTML = '<span>' + escapeHtml(id) + '</span><button class="danger" data-delete="' + escapeHtml(id) + '">Delete</button>';
+        li.innerHTML = '<span>' + escapeHtml(id) + '</span><button class="danger" data-delete>Delete</button>';
         li.querySelector('[data-delete]').onclick = () => {
-          api('DELETE', '/api/sessions/' + encodeURIComponent(id)).then(() => { window.location.hash = '#/sessions'; });
+          const prompt = id.startsWith('webchat:device:')
+            ? 'Delete this conversation and its transcript?' : 'Delete session ' + id + '?';
+          if (!window.confirm(prompt)) return;
+          api('DELETE', '/api/sessions/' + encodeURIComponent(id)).then(refresh).catch(reportError);
         };
         ul.appendChild(li);
       });
-    }).catch(e => { render(app, '<h1>Sessions</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
+    }).catch(e => { if (current()) render(app, '<h1>Sessions</h1><p class="status-err">' + escapeHtml(e || 'Load failed') + '</p>'); });
   }
 
   function renderCron() {
@@ -481,7 +495,10 @@
   }
 
   const app = document.getElementById('app');
+  let pageVersion = 0;
+  let listVersion = 0;
   function navigate() {
+    pageVersion++;
     stopDashboardLive();
     if (chatStop) {
       chatStop();
