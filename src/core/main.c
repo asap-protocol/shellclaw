@@ -83,7 +83,6 @@ static void setup_signals(void)
 
 static void main_loop(int one_shot, config_t **pcfg)
 {
-	int next_channel = 0;
 	while (!g_shutdown) {
 		if (g_reload_requested) {
 			g_reload_requested = 0;
@@ -96,6 +95,7 @@ static void main_loop(int one_shot, config_t **pcfg)
 		memset(&msg, 0, sizeof(msg));
 		int got = 0;
 		const channel_t *which = NULL;
+		static int next_channel;
 		int nch = bootstrap_channel_count();
 		for (int visited = 0; visited < nch && !got; visited++) {
 			int i = (next_channel + visited) % nch;
