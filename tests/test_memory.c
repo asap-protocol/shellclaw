@@ -212,6 +212,40 @@ static int test_existing_db_preserved_on_open_failure(void)
 	return 0;
 }
 
+static int test_webchat_turn_recovery(void)
+{
+	const char *path = "/tmp/shellclaw_test_webchat_turns.db";
+	char id[128], text[128], history[1024];
+	remove(path);
+	ASSERT(memory_init(path) == 0);
+	ASSERT(webchat_store_accept("device-a", "id-a", "A private draft") == 0);
+	ASSERT(webchat_store_accept("device-a", "id-a", "A private draft") == 0);
+	ASSERT(webchat_store_accept("device-a", "id-a", "Different content") == 1);
+	ASSERT(webchat_store_accept("device-b", "id-a", "Other device") == 0);
+	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 1);
+	ASSERT(strcmp(id, "device-a") == 0 && strcmp(text, "A private draft") == 0);
+	memory_cleanup();
+
+	ASSERT(memory_init(path) == 0);
+	ASSERT(webchat_store_recover() == 0);
+	ASSERT(webchat_store_history("device-a", 0, history, sizeof(history)) == 0);
+	ASSERT(strstr(history, "A private draft") && strstr(history, "Gateway restarted"));
+	ASSERT(!strstr(history, "Other device"));
+	ASSERT(webchat_store_history("device-b", 0, history, sizeof(history)) == 0);
+	ASSERT(strstr(history, "Other device") && !strstr(history, "A private draft"));
+	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 1);
+	ASSERT(strcmp(id, "device-b") == 0 && strcmp(text, "Other device") == 0);
+	ASSERT(webchat_store_finish(id, "Persisted reply") == 0);
+	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 0);
+	ASSERT(webchat_store_accept("device-b", "id-a", "Other device") == 0);
+	ASSERT(webchat_store_claim(id, sizeof(id), text, sizeof(text)) == 0);
+	ASSERT(webchat_store_history("device-b", 0, history, sizeof(history)) == 0);
+	ASSERT(strstr(history, "Persisted reply"));
+	memory_cleanup();
+	remove(path);
+	return 0;
+}
+
 int main(void)
 {
 	RUN(test_schema_and_fts5());
@@ -223,6 +257,7 @@ int main(void)
 	RUN(test_session_load_rejects_oversized());
 	RUN(test_gateway_schema_new_db());
 	RUN(test_gateway_schema_migration_v01());
+	RUN(test_webchat_turn_recovery());
 	printf("test_memory: all tests passed\n");
 	return 0;
 }
