@@ -834,12 +834,13 @@ test_hardware_on_device: shellclaw
 	@chmod +x tests/test_hardware_on_device.sh
 	@SHELLCLAW_TEST_BIN="$(BINDIR)/shellclaw" ./tests/test_hardware_on_device.sh
 
-test_web_dashboard:
+test_web_dashboard: $(if $(filter 1,$(GATEWAY)),src/gateway/ui_assets.h,)
 	@if [ "$${CI:-}" = "true" ] && ! command -v node >/dev/null 2>&1; then \
 		echo "test_web_dashboard: node required when CI=true" >&2; exit 1; \
 	fi
 	@if command -v node >/dev/null 2>&1; then node tests/test_web_dashboard.js; \
 	else echo "test_web_dashboard: skipped (node not installed)"; fi
+	@if [ "$(GATEWAY)" = "1" ] && command -v node >/dev/null 2>&1; then node tests/test_embedded_web.js; fi
 
 # Mirrors .github/workflows/ci.yml AddressSanitizer job (CI=true GATEWAY=1).
 # -fno-sanitize-recover=all + halt_on_error make any UBSan/ASan finding a hard

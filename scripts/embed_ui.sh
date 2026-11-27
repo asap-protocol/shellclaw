@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Embed Web UI assets: minify (optional), gzip, xxd -i -> src/gateway/ui_assets.h
+# Embed Web UI assets: gzip, xxd -i -> src/gateway/ui_assets.h
 # Input: web/index.html, web/hardware.html, web/css/style.css,
 #        web/js/dashboardView.js + web/js/app.js (concatenated),
 #        web/js/hardwareView.js (hardware page bundle)
@@ -15,42 +15,26 @@ OUT_HEADER="$PROJECT_ROOT/src/gateway/ui_assets.h"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Optional minimal minify: collapse multiple spaces (safe for CSS/JS)
-minify_sed() {
-    sed -e 's/[[:space:]]\+/ /g' \
-        -e 's/^[[:space:]]*//' \
-        -e 's/[[:space:]]*$//' \
-        "$@"
-}
-
 process_file() {
     local src="$1"
-    local dst="$2"
-    local var_base="$3"
+    local var_base="$2"
     if [ ! -f "$src" ]; then
         echo "Error: $src not found" >&2
         exit 1
     fi
-    # Optional minimal minify for CSS/JS; HTML left as-is to avoid breaking structure
-    case "$src" in
-        *.html) cp "$src" "$TMP_DIR/$dst" ;;
-        *.css)  minify_sed "$src" > "$TMP_DIR/$dst" ;;
-        *.js)   minify_sed "$src" > "$TMP_DIR/$dst" ;;
-        *)      cp "$src" "$TMP_DIR/$dst" ;;
-    esac
-    gzip -c -9 "$TMP_DIR/$dst" > "$TMP_DIR/${var_base}_gz.bin"
+    gzip -n -c -9 "$src" > "$TMP_DIR/${var_base}_gz.bin"
     (cd "$TMP_DIR" && xxd -i "${var_base}_gz.bin") | \
         sed "s/unsigned char ${var_base}_gz_bin/unsigned char ${var_base}_gz/" | \
         sed "s/unsigned int ${var_base}_gz_bin_len/unsigned int ${var_base}_gz_len/"
 }
 
 mkdir -p "$(dirname "$OUT_HEADER")"
-process_file "$WEB_DIR/index.html" "index.html" "ui_index_html" > "$TMP_DIR/index_html.txt"
-process_file "$WEB_DIR/hardware.html" "hardware.html" "ui_hardware_html" > "$TMP_DIR/hardware_html.txt"
-process_file "$WEB_DIR/css/style.css" "style.css" "ui_style_css" > "$TMP_DIR/style_css.txt"
+process_file "$WEB_DIR/index.html" "ui_index_html" > "$TMP_DIR/index_html.txt"
+process_file "$WEB_DIR/hardware.html" "ui_hardware_html" > "$TMP_DIR/hardware_html.txt"
+process_file "$WEB_DIR/css/style.css" "ui_style_css" > "$TMP_DIR/style_css.txt"
 cat "$WEB_DIR/js/dashboardView.js" "$WEB_DIR/js/app.js" > "$TMP_DIR/app_bundle.js"
-process_file "$TMP_DIR/app_bundle.js" "app.js" "ui_app_js" > "$TMP_DIR/app_js.txt"
-process_file "$WEB_DIR/js/hardwareView.js" "hardware.js" "ui_hardware_js" > "$TMP_DIR/hardware_js.txt"
+process_file "$TMP_DIR/app_bundle.js" "ui_app_js" > "$TMP_DIR/app_js.txt"
+process_file "$WEB_DIR/js/hardwareView.js" "ui_hardware_js" > "$TMP_DIR/hardware_js.txt"
 
 # Compute total size and verify < 50 KB
 TOTAL=0
