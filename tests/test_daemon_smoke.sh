@@ -49,6 +49,22 @@ fi
 kill "${service_pid}"
 wait "${service_pid}"
 
+# A systemd service can also pass a finite stream from its caller.
+printf '/help\n' | INVOCATION_ID="${service_id}" "${BIN}" --config "${CFG}" >"${TMP_HOME}/pipe.log" &
+pipe_pid=$!
+for ((i = 0; i < 50; i++)); do
+	kill -0 "${pipe_pid}" 2>/dev/null || break
+	sleep 0.1
+done
+if kill -0 "${pipe_pid}" 2>/dev/null; then
+	kill "${pipe_pid}"
+	wait "${pipe_pid}" || true
+	echo "test_daemon_smoke: ShellClaw stayed active after the service pipe closed" >&2
+	exit 1
+fi
+wait "${pipe_pid}"
+grep -Fq '/reset' "${TMP_HOME}/pipe.log"
+
 "${BIN}" --daemon --config "${CFG}"
 
 sleep 1

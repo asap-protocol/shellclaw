@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -76,13 +77,20 @@ static int has_background_channels(void)
 	return 0;
 }
 
+/* Older systemd units use /dev/null for stdin and start ShellClaw without --headless. */
+static int uses_systemd_null_input(void)
+{
+	const char *invocation_id = getenv("INVOCATION_ID");
+	struct stat input, null_device;
+	return invocation_id && invocation_id[0] && fstat(STDIN_FILENO, &input) == 0 &&
+	       S_ISCHR(input.st_mode) && stat("/dev/null", &null_device) == 0 &&
+	       input.st_rdev == null_device.st_rdev;
+}
+
 static int main_loop(int one_shot, config_t **pcfg)
 {
 	int cli_closed = g_headless || g_want_daemon;
-	const char *invocation_id = getenv("INVOCATION_ID");
-	/* Units installed before --headless rely on systemd to supervise the process. */
-	int systemd_service = invocation_id && invocation_id[0] && !isatty(STDIN_FILENO);
-	int keep_running = cli_closed || has_background_channels() || (!one_shot && systemd_service);
+	int keep_running = cli_closed || has_background_channels() || (!one_shot && uses_systemd_null_input());
 	while (!g_shutdown) {
 		if (g_reload_requested) {
 			g_reload_requested = 0;
