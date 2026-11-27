@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "asap/envelope.h"
+#include "asap/ulid.h"
 #include <stdio.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@ void asap_envelope_clear(asap_envelope_t *env)
 	str_free(&env->correlation_id);
 	str_free(&env->trace_id);
 	str_free(&env->timestamp);
+	env->sdk_wire = 0;
 }
 
 cJSON *asap_jsonrpc_error(int code, const char *message, cJSON *id)
@@ -130,11 +132,11 @@ static int require_str_in_params(cJSON *params, const char *key, char **out, cJS
 }
 
 static int optional_str_in_params(cJSON *params, const char *key, char **out, cJSON *rpc_id,
-		asap_envelope_t *env, cJSON **err_out)
+		asap_envelope_t *env, cJSON **err_out, int sdk_wire)
 {
-	*out = NULL;
-	if (!cJSON_HasObjectItem(params, key)) return 0;
 	cJSON *j = cJSON_GetObjectItemCaseSensitive(params, key);
+	*out = NULL;
+	if (!j || (sdk_wire && cJSON_IsNull(j))) return 0;
 	if (!cJSON_IsString(j) || !j->valuestring)
 		return parse_fail(env, rpc_id, err_out, "Invalid params: optional field has wrong type");
 	*out = strdup(j->valuestring);
@@ -142,7 +144,25 @@ static int optional_str_in_params(cJSON *params, const char *key, char **out, cJ
 	return 0;
 }
 
-int asap_envelope_from_object(const cJSON *obj, cJSON *rpc_id, asap_envelope_t *out, cJSON **err_out)
+static int parse_envelope_id(cJSON *obj, cJSON *rpc_id, asap_envelope_t *out,
+	cJSON **err_out, int sdk_wire)
+{
+	cJSON *id = cJSON_GetObjectItemCaseSensitive(obj, "id");
+	if (!sdk_wire || (id && !cJSON_IsNull(id))) {
+		if (require_str_in_params(obj, "id", &out->id, rpc_id, out, err_out) != 0)
+			return -1;
+		if (sdk_wire && !out->id[0])
+			return parse_fail(out, rpc_id, err_out, "Envelope ID must not be empty");
+		return 0;
+	}
+	char generated[ULID_STRING_LEN + 1];
+	if (ulid_generate(generated, sizeof generated) != 0 || !(out->id = strdup(generated)))
+		return parse_fail(out, rpc_id, err_out, "Cannot generate envelope ID");
+	return 0;
+}
+
+static int envelope_from_object(const cJSON *obj, cJSON *rpc_id,
+	asap_envelope_t *out, cJSON **err_out, int sdk_wire)
 {
 	cJSON *r = (cJSON *)obj;
 	cJSON *rid_temp = NULL;
@@ -156,13 +176,18 @@ int asap_envelope_from_object(const cJSON *obj, cJSON *rpc_id, asap_envelope_t *
 	}
 	asap_envelope_clear(out);
 	asap_envelope_init(out);
-	if (require_str_in_params(r, "id", &out->id, rpc_id, out, err_out) != 0) return -1;
+	if (parse_envelope_id(r, rpc_id, out, err_out, sdk_wire) != 0) return -1;
 	if (require_str_in_params(r, "asap_version", &out->asap_version, rpc_id, out, err_out) != 0) return -1;
 	if (require_str_in_params(r, "sender", &out->sender, rpc_id, out, err_out) != 0) return -1;
 	if (require_str_in_params(r, "recipient", &out->recipient, rpc_id, out, err_out) != 0) return -1;
 	if (require_str_in_params(r, "payload_type", &out->payload_type, rpc_id, out, err_out) != 0) return -1;
-	if (!payload_type_is_allowed(out->payload_type))
+	if (sdk_wire) {
+		if (strcmp(out->payload_type, "TaskRequest") != 0 &&
+		    strcmp(out->payload_type, "task.request") != 0)
+			return parse_fail(out, rpc_id, err_out, "The SDK request must contain a TaskRequest");
+	} else if (!payload_type_is_allowed(out->payload_type)) {
 		return parse_fail(out, rpc_id, err_out, "Invalid params: unknown payload_type");
+	}
 	{
 		cJSON *pl = cJSON_GetObjectItemCaseSensitive(r, "payload");
 		if (pl == NULL || cJSON_IsNull(pl))
@@ -170,11 +195,17 @@ int asap_envelope_from_object(const cJSON *obj, cJSON *rpc_id, asap_envelope_t *
 		out->payload = cJSON_Duplicate(pl, 1);
 		if (!out->payload) return parse_fail(out, rpc_id, err_out, "Invalid params: allocation failed");
 	}
-	if (optional_str_in_params(r, "correlation_id", &out->correlation_id, rpc_id, out, err_out) != 0) return -1;
-	if (optional_str_in_params(r, "trace_id", &out->trace_id, rpc_id, out, err_out) != 0) return -1;
-	if (optional_str_in_params(r, "timestamp", &out->timestamp, rpc_id, out, err_out) != 0) return -1;
+	if (optional_str_in_params(r, "correlation_id", &out->correlation_id, rpc_id, out, err_out, sdk_wire) != 0) return -1;
+	if (optional_str_in_params(r, "trace_id", &out->trace_id, rpc_id, out, err_out, sdk_wire) != 0) return -1;
+	if (optional_str_in_params(r, "timestamp", &out->timestamp, rpc_id, out, err_out, sdk_wire) != 0) return -1;
+	out->sdk_wire = sdk_wire;
 	if (rid_temp) cJSON_Delete(rid_temp);
 	return 0;
+}
+
+int asap_envelope_from_object(const cJSON *obj, cJSON *rpc_id, asap_envelope_t *out, cJSON **err_out)
+{
+	return envelope_from_object(obj, rpc_id, out, err_out, 0);
 }
 
 /** Envelope key/value object for params or result (same shape). */
@@ -220,6 +251,15 @@ cJSON *asap_envelope_to_jsonrpc(const asap_envelope_t *env, cJSON *jsonrpc_id)
 	cJSON *result = envelope_fields_cjson(env);
 	cJSON *root;
 	if (!result) return NULL;
+	if (env->sdk_wire) {
+		cJSON *wrapped = cJSON_CreateObject();
+		if (!wrapped || !cJSON_AddItemToObject(wrapped, "envelope", result)) {
+			cJSON_Delete(wrapped);
+			cJSON_Delete(result);
+			return NULL;
+		}
+		result = wrapped;
+	}
 	root = cJSON_CreateObject();
 	if (!root) { cJSON_Delete(result); return NULL; }
 	if (!cJSON_AddStringToObject(root, "jsonrpc", "2.0") || !cJSON_AddItemToObject(root, "result", result)) {
@@ -354,6 +394,14 @@ int asap_envelope_parse(const char *json, asap_envelope_t *out, cJSON **err_out)
 		}
 		return -1;
 	}
+	cJSON *request_id = cJSON_GetObjectItemCaseSensitive(root, "id");
+	if (request_id && !cJSON_IsString(request_id) && !cJSON_IsNumber(request_id) &&
+	    !cJSON_IsNull(request_id)) {
+		if (err_out)
+			*err_out = asap_jsonrpc_error(-32600, "Invalid JSON-RPC request ID", NULL);
+		cJSON_Delete(root);
+		return -1;
+	}
 	cJSON *rpc_id = dup_request_id(root);
 	if (!rpc_id) {
 		cJSON_Delete(root);
@@ -374,7 +422,12 @@ int asap_envelope_parse(const char *json, asap_envelope_t *out, cJSON **err_out)
 		cJSON_Delete(root);
 		return parse_fail(out, rpc_id, err_out, "Invalid Request: params must be an object");
 	}
-	if (asap_envelope_from_object(params, rpc_id, out, err_out) != 0) {
+	cJSON *nested = cJSON_GetObjectItemCaseSensitive(params, "envelope");
+	if (nested && (!cJSON_IsObject(nested) || strcmp(meth->valuestring, "asap.send") != 0)) {
+		cJSON_Delete(root);
+		return parse_fail(out, rpc_id, err_out, "Invalid SDK request");
+	}
+	if (envelope_from_object(nested ? nested : params, rpc_id, out, err_out, nested != NULL) != 0) {
 		cJSON_Delete(root);
 		return -1;
 	}

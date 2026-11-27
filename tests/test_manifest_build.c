@@ -157,6 +157,10 @@ static int test_manifest_skill_objects(void)
 	ASSERT(f);
 	fprintf(f, "# Demo skill headline\nBody ignored for manifest.\n");
 	fclose(f);
+	f = fopen("/tmp/shellclaw_test_manifest_skills_obj/echo.md", "w");
+	ASSERT(f);
+	fprintf(f, "# Local echo skill\n");
+	fclose(f);
 	f = fopen(TMP_CONFIG, "w");
 	ASSERT(f);
 	fprintf(f, "[agent]\nmodel = \"test\"\n");
@@ -173,9 +177,15 @@ static int test_manifest_skill_objects(void)
 	skills = cJSON_GetObjectItem(cJSON_GetObjectItem(parsed, "capabilities"), "skills");
 	ASSERT(skills != NULL);
 	item = NULL;
+	int echo_count = 0;
 	for (int i = 0; i < cJSON_GetArraySize(skills); i++) {
 		cJSON *s = cJSON_GetArrayItem(skills, i);
 		const char *sid = cJSON_GetObjectItem(s, "id")->valuestring;
+		if (strcmp(sid, ASAP_SDK_ECHO_SKILL) == 0) {
+			echo_count++;
+			ASSERT(strcmp(cJSON_GetObjectItem(s, "description")->valuestring,
+				"Return the task input.") == 0);
+		}
 		if (strcmp(sid, "demo") == 0)
 			item = s;
 		if (strcmp(sid, "override_skill") == 0)
@@ -183,6 +193,7 @@ static int test_manifest_skill_objects(void)
 				"From config table") == 0);
 	}
 	ASSERT(item != NULL);
+	ASSERT(echo_count == 1);
 	ASSERT(strcmp(cJSON_GetObjectItem(item, "description")->valuestring,
 		"Demo skill headline") == 0);
 	cJSON_Delete(parsed);

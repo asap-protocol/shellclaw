@@ -348,7 +348,7 @@ $(MANIFEST_KEYS_O): src/asap/manifest_keys.c src/asap/manifest_keys.h src/core/c
 $(ASAP_HTTP_BODY_O): src/gateway/asap_http_body.c src/gateway/asap_http_body.h src/gateway/http_lws.h
 	$(CC) $(CFLAGS) $(INC) $(GATEWAY_CFLAGS) -c -o $@ src/gateway/asap_http_body.c
 
-$(ENVELOPE_O): src/asap/envelope.c src/asap/envelope.h src/asap/asap_version.h vendor/cJSON/cJSON.h
+$(ENVELOPE_O): src/asap/envelope.c src/asap/envelope.h src/asap/asap_version.h src/asap/ulid.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/asap/envelope.c
 
 $(ULID_O): src/asap/ulid.c src/asap/ulid.h src/crypto/crypto.h
@@ -360,7 +360,7 @@ $(CLIENT_O): src/asap/client.c src/asap/client.h src/asap/envelope.h src/asap/ul
 $(ASAP_REGISTRY_O): src/asap/registry.c src/asap/registry.h src/asap/client.h src/providers/provider.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ src/asap/registry.c
 
-$(SERVER_O): src/asap/server.c src/asap/server.h src/asap/envelope.h src/asap/asap_version.h src/asap/ulid.h src/core/agent.h src/core/config.h src/core/memory.h src/providers/provider.h vendor/cJSON/cJSON.h
+$(SERVER_O): src/asap/server.c src/asap/server.h src/asap/envelope.h src/asap/manifest_build.h src/asap/asap_version.h src/asap/ulid.h src/core/agent.h src/core/config.h src/core/memory.h src/providers/provider.h vendor/cJSON/cJSON.h
 	$(CC) $(CFLAGS) $(INC) -pthread -c -o $@ src/asap/server.c
 
 $(ASAP_LOG_O): src/asap/log.c src/asap/log.h
@@ -713,9 +713,9 @@ test_manifest: test_manifest_build test_manifest_keys test_jcs
 	$(BINDIR)/test_manifest_keys
 	$(BINDIR)/test_jcs
 
-test_asap_envelope: tests/test_asap_envelope.c $(ENVELOPE_O) $(CJSON_O)
+test_asap_envelope: tests/test_asap_envelope.c $(ENVELOPE_O) $(ULID_O) $(CRYPTO_LINK) $(CJSON_O)
 	@mkdir -p $(BINDIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_asap_envelope.c $(ENVELOPE_O) $(CJSON_O) $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(INC) -o $(BINDIR)/$@ tests/test_asap_envelope.c $(ENVELOPE_O) $(ULID_O) $(CRYPTO_LINK) $(CJSON_O) $(LDLIBS) -pthread
 	$(DSYM_SCRIPT)
 
 test_asap_ulid: tests/test_asap_ulid.c $(ULID_O) $(CRYPTO_LINK)

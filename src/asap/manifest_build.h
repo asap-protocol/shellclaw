@@ -10,6 +10,9 @@
 /** Protocol version advertised by the manifest and health endpoints. */
 #define ASAP_DISCOVERY_VERSION "2.1.0"
 
+/** Name of the built-in SDK skill that returns its task input. */
+#define ASAP_SDK_ECHO_SKILL "echo"
+
 struct config;
 typedef struct config config_t;
 

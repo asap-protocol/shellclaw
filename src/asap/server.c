@@ -6,6 +6,7 @@
 
 #include "asap/server.h"
 #include "asap/asap_version.h"
+#include "asap/manifest_build.h"
 #include "asap/ulid.h"
 #include "core/agent.h"
 #include "core/config.h"
@@ -101,11 +102,14 @@ static int fill_response_envelope(asap_envelope_t *out, const asap_envelope_t *i
 	out->payload_type = strdup(payload_type);
 	/* Ownership of payload moves to out; asap_envelope_clear frees it once. */
 	out->payload = payload;
-	if (in->correlation_id)
-		out->correlation_id = strdup(in->correlation_id);
+	const char *correlation = in->sdk_wire ? in->id : in->correlation_id;
+	out->sdk_wire = in->sdk_wire;
+	if (correlation)
+		out->correlation_id = strdup(correlation);
 	if (in->trace_id)
 		out->trace_id = strdup(in->trace_id);
-	if (!out->id || !out->asap_version || !out->sender || !out->recipient || !out->payload_type) {
+	if (!out->id || !out->asap_version || !out->sender || !out->recipient || !out->payload_type ||
+	    (correlation && !out->correlation_id) || (in->trace_id && !out->trace_id)) {
 		asap_envelope_clear(out);
 		asap_envelope_init(out);
 		return -32603;
@@ -128,6 +132,19 @@ const char *asap_resolve_task_session_id(const char *sender, char *buf, size_t b
 	if (n < 0 || (size_t)n >= buf_size)
 		return NULL;
 	return buf;
+}
+
+static int fill_sdk_task_response(asap_envelope_t *out, const asap_envelope_t *in, cJSON *result)
+{
+	cJSON *payload = cJSON_CreateObject();
+	if (!payload || !result || !cJSON_AddStringToObject(payload, "task_id", in->id) ||
+	    !cJSON_AddStringToObject(payload, "status", "completed") ||
+	    !cJSON_AddItemToObject(payload, "result", result)) {
+		cJSON_Delete(payload);
+		cJSON_Delete(result);
+		return -32603;
+	}
+	return fill_response_envelope(out, in, "task.response", payload);
 }
 
 static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
@@ -155,8 +172,7 @@ static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
 	resp_buf[0] = '\0';
 	/* Isolate SQLite history by sender URN; "asap:inbound" mixed clients (#64).
 	 * Ignore ctx->session_id so a later constant (including asap:inbound)
-	 * cannot restore a shared bucket. Authenticity is sender_is_trusted():
-	 * POST /asap is protocol-public; empty trusted_senders allows every URN. */
+	 * cannot restore a shared bucket. */
 	sid = asap_resolve_task_session_id(in->sender, sid_buf, sizeof sid_buf);
 	if (!sid) {
 		char too_long[128];
@@ -202,6 +218,29 @@ static int handle_task_request(const asap_envelope_t *in, asap_envelope_t *out,
 	if (fill_rc != 0)
 		set_err(err_message, err_message_size, "task.request: failed to build envelope");
 	return fill_rc;
+}
+
+static int handle_sdk_task(const asap_envelope_t *in, asap_envelope_t *out,
+	asap_server_ctx_t *ctx, char *err_message, size_t err_message_size)
+{
+	const char *skill = payload_pick_string(in->payload, "skill_id");
+	const char *conversation = payload_pick_string(in->payload, "conversation_id");
+	const cJSON *input = cJSON_GetObjectItemCaseSensitive(in->payload, "input");
+
+	if (!in->sender || !in->sender[0] || !in->recipient ||
+	    strcmp(in->recipient, config_asap_agent_urn(ctx->cfg)) != 0) {
+		set_err(err_message, err_message_size, "Invalid sender or recipient");
+		return -32602;
+	}
+	if (!skill || !*skill || !conversation || !*conversation || !cJSON_IsObject(input)) {
+		set_err(err_message, err_message_size, "TaskRequest needs a skill, conversation and input object");
+		return -32602;
+	}
+	if (strcmp(skill, ASAP_SDK_ECHO_SKILL) != 0) {
+		set_err(err_message, err_message_size, "SDK tasks support only the echo skill");
+		return -32602;
+	}
+	return fill_sdk_task_response(out, in, cJSON_Duplicate(input, 1));
 }
 
 static int handle_task_cancel(const asap_envelope_t *in, asap_envelope_t *out,
@@ -381,6 +420,8 @@ int asap_server_handle(const asap_envelope_t *in, asap_envelope_t *out,
 		return ASAP_SERVER_RPC_SENDER_UNTRUSTED;
 	}
 	asap_envelope_init(out);
+	if (in->sdk_wire)
+		return handle_sdk_task(in, out, ctx, err_message, err_message_size);
 	if (strcmp(in->payload_type, "task.response") == 0 ||
 	    strcmp(in->payload_type, "mcp.tool_result") == 0) {
 		set_err(err_message, err_message_size, "payload_type not accepted on inbound server");

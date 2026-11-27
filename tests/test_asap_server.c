@@ -222,6 +222,26 @@ static void teardown_env(asap_envelope_t *e)
 	asap_envelope_init(e);
 }
 
+static int test_sdk_unknown_skill(void)
+{
+	const char *request =
+		"{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":1,\"params\":{\"envelope\":{"
+		"\"id\":\"this-request\",\"correlation_id\":\"earlier-request\",\"asap_version\":\"0.1\","
+		"\"sender\":\"urn:asap:agent:peer\",\"recipient\":\"urn:asap:agent:shellclaw\","
+		"\"payload_type\":\"TaskRequest\",\"payload\":{\"conversation_id\":\"c\",\"skill_id\":\"chat\",\"input\":{}}}}}";
+	asap_envelope_t in;
+	asap_envelope_t out = {0};
+	asap_server_ctx_t ctx = {.task_request_hook = test_hook_task};
+	char err[128];
+
+	ASSERT(asap_envelope_parse(request, &in, NULL) == 0);
+	ASSERT(asap_server_handle(&in, &out, &ctx, err, sizeof err) == -32602);
+	ASSERT(out.payload == NULL);
+	teardown_env(&in);
+	teardown_env(&out);
+	return 0;
+}
+
 static int test_task_request_hook(void)
 {
 	asap_envelope_t in;
@@ -1064,6 +1084,7 @@ static int test_state_query_hook_holds_agent_mutex(void)
 int main(void)
 {
 	int r = 0;
+	r |= test_sdk_unknown_skill();
 	r |= test_task_request_hook();
 	r |= test_task_cancel_stub();
 	r |= test_state_query_hook();
