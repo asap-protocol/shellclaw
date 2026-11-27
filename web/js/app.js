@@ -251,7 +251,12 @@
     const list = ++listVersion;
     const current = () => page === pageVersion && list === listVersion;
     const refresh = () => { if (page === pageVersion) renderSessions(); };
-    const reportError = err => { if (page === pageVersion) alert('Error: ' + err); };
+    const reportError = err => {
+      if (page !== pageVersion) return;
+      let message = String(err);
+      try { message = JSON.parse(message).error || message; } catch (_) {}
+      window.alert(message);
+    };
     api('GET', '/api/sessions').then(arr => {
       if (!current()) return;
       let html = '<h1>Sessions</h1><ul class="session-list" id="session-list"></ul>';
@@ -261,7 +266,9 @@
         const li = document.createElement('li');
         li.innerHTML = '<span>' + escapeHtml(id) + '</span><button class="danger" data-delete>Delete</button>';
         li.querySelector('[data-delete]').onclick = () => {
-          if (!confirm('Delete session ' + id + '?')) return;
+          const prompt = id.startsWith('webchat:device:')
+            ? 'Delete this conversation and its transcript?' : 'Delete session ' + id + '?';
+          if (!window.confirm(prompt)) return;
           api('DELETE', '/api/sessions/' + encodeURIComponent(id)).then(refresh).catch(reportError);
         };
         ul.appendChild(li);
