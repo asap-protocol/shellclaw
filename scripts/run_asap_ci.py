@@ -1,5 +1,7 @@
-"""Start a local gateway and run the ASAP compliance checks."""
+"""Start a local gateway and run the ASAP compliance and SDK checks."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import socket
@@ -26,7 +28,8 @@ def wait_for_gateway(process: subprocess.Popen, url: str) -> None:
     raise RuntimeError("The test gateway did not become ready")
 
 
-def run(binary: Path) -> None:
+@contextmanager
+def running_gateway(binary: Path) -> Iterator[str]:
     fixture = ROOT / "tests/fixtures/ci_asap_test.toml"
     with tempfile.TemporaryDirectory(prefix="shellclaw-asap-") as directory:
         home = Path(directory)
@@ -45,11 +48,7 @@ def run(binary: Path) -> None:
         ) as gateway:
             try:
                 wait_for_gateway(gateway, url)
-                python_path = f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
-                env = dict(os.environ, PATH=python_path, ASAP_COMPLIANCE_SKIP_PIP="1",
-                           NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
-                env.setdefault("ASAP_COMPLIANCE_TIMEOUT", "5")
-                subprocess.run([ROOT / "scripts/run_asap_compliance.sh", url], env=env, check=True)
+                yield url
             finally:
                 if gateway.poll() is None:
                     gateway.terminate()
@@ -57,6 +56,18 @@ def run(binary: Path) -> None:
                         gateway.wait(timeout=2)
                     except subprocess.TimeoutExpired:
                         gateway.kill()
+
+
+def run(binary: Path) -> None:
+    python_path = f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
+    env = dict(os.environ, PATH=python_path, ASAP_COMPLIANCE_SKIP_PIP="1",
+               NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+    env.setdefault("ASAP_COMPLIANCE_TIMEOUT", "5")
+    with running_gateway(binary) as url:
+        subprocess.run([ROOT / "scripts/run_asap_compliance.sh", url], env=env, check=True)
+    # Start a new gateway so the validators do not consume the SDK tests' rate limit.
+    with running_gateway(binary) as url:
+        subprocess.run([sys.executable, ROOT / "scripts/check_asap_sdk.py", url], env=env, check=True)
 
 
 if __name__ == "__main__":

@@ -60,7 +60,7 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Check ASAP compliance against a live gateway
+      - name: Check ASAP compliance and SDK interoperability
         run: |
           python3 -m pip install 'asap-compliance==1.4.0' 'asap-protocol==2.6.0'
           python3 scripts/run_asap_ci.py build/shellclaw
