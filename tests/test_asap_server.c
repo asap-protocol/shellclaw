@@ -242,6 +242,22 @@ static int test_sdk_unknown_skill(void)
 	return 0;
 }
 
+/* cJSON checks the types and structure. Check full number tokens for precision. */
+static int has_json_number_token(const char *json, const char *number)
+{
+	size_t len = strlen(number);
+	for (const char *at = strstr(json, number); at; at = strstr(at + len, number)) {
+		const char *start = at;
+		while (start > json && strchr(" \t\r\n", start[-1]))
+			start--;
+		const char *end = at + len;
+		end += strspn(end, " \t\r\n");
+		if (start > json && strchr("[:,", start[-1]) && *end && strchr(",]}", *end))
+			return 1;
+	}
+	return 0;
+}
+
 static int test_sdk_echo_preserves_wire_values(void)
 {
 	const char input[] =
@@ -269,13 +285,26 @@ static int test_sdk_echo_preserves_wire_values(void)
 	char *json = asap_jsonrpc_print_response(response, &wire);
 	ASSERT(json != NULL);
 
-	char result[sizeof input + sizeof "\"result\":"];
-	snprintf(result, sizeof result, "\"result\":%s", input);
-	ASSERT(strstr(json, result) != NULL);
-	ASSERT(strstr(json, "\"id\":9007199254740993}") != NULL);
-	ASSERT(strstr(json, "\"status\":\"completed\"") != NULL);
-	ASSERT(strstr(json, "\"task_id\":\"sdk-echo\"") != NULL);
+	cJSON *body = cJSON_Parse(json);
+	ASSERT(cJSON_IsObject(body));
+	ASSERT(cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(body, "id")));
+	const cJSON *result = cJSON_GetObjectItemCaseSensitive(body, "result");
+	const cJSON *envelope = cJSON_GetObjectItemCaseSensitive(result, "envelope");
+	const cJSON *payload = cJSON_GetObjectItemCaseSensitive(envelope, "payload");
+	const char *status = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "status"));
+	const char *task_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(payload, "task_id"));
+	ASSERT(status && strcmp(status, "completed") == 0);
+	ASSERT(task_id && strcmp(task_id, "sdk-echo") == 0);
+	const cJSON *echo = cJSON_GetObjectItemCaseSensitive(payload, "result");
+	cJSON *expected = cJSON_Parse(input);
+	ASSERT(cJSON_IsObject(echo) && cJSON_Compare(echo, expected, 1));
+	ASSERT(has_json_number_token(json, "9007199254740993"));
+	ASSERT(has_json_number_token(json, "5000000000000001"));
+	ASSERT(has_json_number_token(json, "-9007199254740993"));
+	ASSERT(has_json_number_token(json, "1.234567890123456789e-12"));
 
+	cJSON_Delete(expected);
+	cJSON_Delete(body);
 	free(json);
 	cJSON_Delete(response);
 	teardown_env(&in);

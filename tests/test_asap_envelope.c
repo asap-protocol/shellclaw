@@ -147,19 +147,19 @@ static int test_http_request_error_ids(void)
 {
 	const struct {
 		const char *request;
-		const char *response_id;
+		const char *numeric_id;
 		int error_code;
 		int sdk_wire;
 	} cases[] = {
 		{ "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":5000000000000001,"
 		  "\"params\":{\"envelope\":{}}}",
-		  "\"id\":5000000000000001}", -32602, 1 },
+		  "5000000000000001", -32602, 1 },
 		{ "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"params\":{}}",
-		  "\"id\":null}", -32602, 0 },
+		  NULL, -32602, 0 },
 		{ "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":[1],\"params\":{}}",
-		  "\"id\":null}", -32600, 0 },
+		  NULL, -32600, 0 },
 		{ "{\"jsonrpc\":\"2.0\",\"method\":\"asap.send\",\"id\":1.,\"params\":{}}",
-		  "\"id\":null}", -32700, 0 },
+		  NULL, -32700, 0 },
 	};
 	asap_request_wire_t wire = {0};
 
@@ -167,12 +167,30 @@ static int test_http_request_error_ids(void)
 		asap_envelope_t env;
 		cJSON *error = NULL;
 		ASSERT(asap_envelope_parse_request(cases[i].request, &env, &error, &wire) == -1);
-		ASSERT_ERR_CODE(error, cases[i].error_code);
 		ASSERT(wire.sdk_wire == cases[i].sdk_wire);
 
 		char *json = asap_jsonrpc_print_response(error, &wire);
 		ASSERT(json != NULL);
-		ASSERT(strstr(json, cases[i].response_id) != NULL);
+		cJSON *response = cJSON_Parse(json);
+		ASSERT(cJSON_IsObject(response));
+		ASSERT_ERR_CODE(response, cases[i].error_code);
+		const cJSON *id = cJSON_GetObjectItemCaseSensitive(response, "id");
+		if (cases[i].numeric_id) {
+			ASSERT(cJSON_IsNumber(id));
+			ASSERT(cJSON_GetNumberValue(id) == strtod(cases[i].numeric_id, NULL));
+			const char *number = strstr(json, cases[i].numeric_id);
+			ASSERT(number != NULL);
+			const char *start = number;
+			while (start > json && strchr(" \t\r\n", start[-1]))
+				start--;
+			ASSERT(start > json && start[-1] == ':');
+			const char *end = number + strlen(cases[i].numeric_id);
+			end += strspn(end, " \t\r\n");
+			ASSERT(*end == ',' || *end == '}');
+		} else {
+			ASSERT(cJSON_IsNull(id));
+		}
+		cJSON_Delete(response);
 		free(json);
 		cJSON_Delete(error);
 		asap_envelope_clear(&env);
