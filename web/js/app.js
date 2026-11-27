@@ -372,7 +372,7 @@
             cell(row, states[job.delivery_status] || job.delivery_status);
             const controls = row.insertCell();
             const path = '/api/cron/job/' + encodeURIComponent(job.key);
-            if (job.delivery_status !== 'invalid_destination')
+            if (job.enabled || job.delivery_status !== 'invalid_destination')
               action(controls, job.enabled ? 'Pause' : 'Resume', 'POST', path + '/toggle', job.id);
             action(controls, 'Delete', 'DELETE', path, job.id);
           }
