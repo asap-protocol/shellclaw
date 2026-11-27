@@ -1,6 +1,8 @@
 /* ShellClaw Web UI - vanilla JS SPA (dashboard markup in dashboardView.js) */
 (function () {
   const TOKEN_KEY = 'shellclaw_token';
+  const CHAT_DRAFT_KEY = 'shellclaw_chat_draft';
+  const CHAT_TEXT_LIMIT = 32 * 1024;
   const API_BASE = '';
   const dash = typeof ShellClawDashboard !== 'undefined' ? ShellClawDashboard : {};
   const escapeHtml = dash.escapeHtml;
@@ -29,21 +31,17 @@
     });
   }
 
-  function wsConnect(onMessage, repliesOnly = false) {
+  function wsConnect(onMessage) {
     const token = getToken();
     if (!token) return null;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const path = repliesOnly ? '/ws?view=chat' : '/ws';
-    const ws = new WebSocket(proto + '//' + location.host + path, ['ws', 'bearer.' + token]);
-    if (repliesOnly) {
-      ws.onmessage = e => onMessage(e.data);
-    } else {
-      ws.onmessage = e => { try { const d = JSON.parse(e.data); onMessage(d); } catch (_) {} };
-    }
+    const ws = new WebSocket(proto + '//' + location.host + '/ws', ['ws', 'bearer.' + token]);
+    ws.onmessage = e => { try { const d = JSON.parse(e.data); onMessage(d); } catch (_) {} };
     return ws;
   }
 
   let dashboardLiveStop = null;
+  let chatStop = null;
 
   function stopDashboardLive() {
     if (dashboardLiveStop) {
@@ -132,26 +130,155 @@
     });
   }
 
+  function readChatDraft(token) {
+    try {
+      const draft = JSON.parse(sessionStorage.getItem(CHAT_DRAFT_KEY));
+      if (draft && draft.token === token) return draft;
+    } catch (_) {}
+    return { token, text: '', pending: null };
+  }
+
   function renderChat() {
     const token = getToken();
     if (!token) { window.location.hash = '#/pair'; return; }
-    render(app, '<h1>Chat</h1><div id="chat-log"></div><input id="chat-input" placeholder="Type message...">');
+    render(app, '<h1>Chat</h1><div id="chat-log"></div>' +
+      '<input id="chat-input" aria-label="Message" placeholder="Type a message">' +
+      '<p id="chat-status" class="status-note" role="status"></p>');
     const log = document.getElementById('chat-log');
     const input = document.getElementById('chat-input');
-    const ws = wsConnect(function (text) {
-      log.textContent += text + '\n';
-      log.scrollTop = log.scrollHeight;
-    }, true);
-    if (!ws) { log.textContent = 'Not authenticated. Go to pairing.'; return; }
+    const status = document.getElementById('chat-status');
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const draft = readChatDraft(token);
+    const turns = new Map();
+    let cursor = 0;
+    let timer;
+    let refreshing = false;
+    let sendError = '';
+    input.value = draft.text;
+    input.readOnly = Boolean(draft.pending);
+    status.textContent = 'Connecting…';
+
+    function saveDraft() {
+      try {
+        sessionStorage.setItem(CHAT_DRAFT_KEY, JSON.stringify(draft));
+        return true;
+      } catch (_) {
+        sendError = 'This browser cannot save a draft.';
+        status.textContent = sendError;
+        return false;
+      }
+    }
+
+    function acceptDraft() {
+      draft.text = '';
+      draft.pending = null;
+      input.value = '';
+      input.readOnly = false;
+      saveDraft();
+    }
+
+    async function request(method, path, data) {
+      const headers = { Authorization: 'Bearer ' + token };
+      const options = { method, headers, signal, cache: 'no-store' };
+      if (data) {
+        headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify(data);
+      }
+      const response = await fetch(path, options);
+      if (signal.aborted || getToken() !== token) throw new Error('Chat closed');
+      if (response.status === 401) {
+        setToken(null);
+        window.location.hash = '#/pair';
+        throw new Error('Unauthorized');
+      }
+      return response;
+    }
+
+    function showHistory(rows) {
+      for (const row of rows) {
+        let turn = turns.get(row.seq);
+        if (!turn) {
+          turn = document.createElement('div');
+          log.appendChild(turn);
+          turns.set(row.seq, turn);
+        }
+        turn.textContent = 'You: ' + row.text + (row.reply ? '\n' + row.reply : '') + '\n';
+        if (row.reply !== null) cursor = row.seq;
+        if (draft.pending && row.id === draft.pending.id) acceptDraft();
+      }
+      if (rows.length) log.scrollTop = log.scrollHeight;
+    }
+
+    async function refresh() {
+      if (refreshing || signal.aborted) return;
+      clearTimeout(timer);
+      refreshing = true;
+      let wait = 1200;
+      try {
+        const response = await request('GET', '/api/chat?after=' + cursor);
+        if (!response.ok) throw new Error('Cannot load chat');
+        const rows = await response.json();
+        if (signal.aborted || getToken() !== token) return;
+        showHistory(rows);
+        if (rows.length) wait = rows.some(row => row.reply === null) ? 400 : 0;
+        if (draft.pending) {
+          const result = await request('POST', '/api/chat', { id: draft.pending.id, text: draft.pending.text });
+          if (result.ok && (await result.json()).accepted === true) {
+            if (signal.aborted || getToken() !== token) return;
+            acceptDraft();
+            wait = 0;
+          } else if (result.status >= 400 && result.status < 500) {
+            draft.pending = null;
+            input.readOnly = false;
+            sendError = 'The gateway refused this message. Edit the draft and try again.';
+            saveDraft();
+          } else {
+            throw new Error('No message receipt');
+          }
+        }
+        status.textContent = sendError;
+      } catch (_) {
+        if (!signal.aborted)
+          status.textContent = draft.pending ? 'Reconnecting. Your message is pending.' : 'Reconnecting…';
+      } finally {
+        refreshing = false;
+        if (!signal.aborted) timer = window.setTimeout(refresh, wait);
+      }
+    }
+
+    input.oninput = function () {
+      draft.text = input.value;
+      sendError = '';
+      status.textContent = '';
+      saveDraft();
+    };
     input.onkeydown = function (e) {
-      if (e.key !== 'Enter') return;
+      if (e.key !== 'Enter' || e.isComposing || draft.pending) return;
       const text = input.value.trim();
       if (!text) return;
-      ws.send(JSON.stringify({ type: 'message', text }));
-      log.textContent += 'You: ' + text + '\n';
-      input.value = '';
-      log.scrollTop = log.scrollHeight;
+      e.preventDefault();
+      if (new TextEncoder().encode(text).length > CHAT_TEXT_LIMIT) {
+        sendError = 'Use a message of 32 KiB or less.';
+        status.textContent = sendError;
+        return;
+      }
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      const id = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+      draft.text = input.value;
+      draft.pending = { id, text };
+      if (!saveDraft()) { draft.pending = null; return; }
+      sendError = '';
+      status.textContent = 'Sending…';
+      input.readOnly = true;
+      refresh();
     };
+
+    chatStop = function () {
+      controller.abort();
+      clearTimeout(timer);
+    };
+    refresh();
   }
 
   function renderConfig() {
@@ -337,6 +464,10 @@
   const app = document.getElementById('app');
   function navigate() {
     stopDashboardLive();
+    if (chatStop) {
+      chatStop();
+      chatStop = null;
+    }
     const route = getRoute();
     const m = route.match(/^\/skills\/(.+)$/);
     if (m) { renderSkillView(decodeURIComponent(m[1])); return; }
@@ -347,5 +478,8 @@
     });
   }
   window.addEventListener('hashchange', navigate);
+  window.addEventListener('storage', event => {
+    if (event.key === TOKEN_KEY && getRoute() === '/chat') navigate();
+  });
   navigate();
 })();

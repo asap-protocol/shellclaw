@@ -22,35 +22,41 @@ function assert(cond, msg) {
   }
 }
 
-function testPairedChatDisplaysRepliesAsText() {
-  let connection;
+async function testPairedChatDisplaysRepliesAsText() {
+  const requests = [];
+  const turns = [];
   const location = { protocol: 'https:', host: 'localhost', hash: '#/chat' };
-  const log = { textContent: '' };
-  const elements = { app: {}, 'chat-log': log, 'chat-input': {} };
+  const elements = {
+    app: {}, 'chat-log': { appendChild: turn => turns.push(turn) }, 'chat-input': {}, 'chat-status': {}
+  };
+  const replies = ['The card is blue.', '{"type":"provider_status","providers":[]}',
+    '"Café" <strong>azul</strong>'];
   const token = '1234567890abcdef1234567890abcdef';
   const script = fs.readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
   vm.runInNewContext(script, {
     location,
-    window: { location, addEventListener() {} },
-    document: { getElementById: id => elements[id], querySelectorAll: () => [] },
+    window: { location, addEventListener() {}, setTimeout() {} },
+    document: { getElementById: id => elements[id], querySelectorAll: () => [], createElement: () => ({}) },
     localStorage: { getItem: key => key === 'shellclaw_token' ? token : null },
-    WebSocket: function (url, protocols) {
-      this.url = url;
-      this.protocols = protocols;
-      connection = this;
+    sessionStorage: { getItem: () => null },
+    AbortController,
+    clearTimeout,
+    fetch: async (url, options) => {
+      requests.push({ url, options });
+      return { ok: true, json: async () => replies.map((reply, seq) => ({
+        seq: seq + 1, text: 'Example', reply
+      })) };
     },
   });
-  const replies = ['The card is blue.', '{"type":"provider_status","providers":[]}',
-    '"Café" <strong>azul</strong>'];
-  replies.forEach(text => connection.onmessage({ data: text }));
-  assert(log.textContent === replies.join('\n') + '\n', 'chat displays each reply as text');
-  assert(log.innerHTML === undefined, 'chat does not insert reply markup');
-  assert(connection.url === 'wss://localhost/ws?view=chat', 'chat requests the replies-only socket');
-  assert(connection.protocols.length === 2 && connection.protocols[0] === 'ws' &&
-    connection.protocols[1] === 'bearer.' + token, 'paired chat offers both WebSocket protocols');
+  await new Promise(resolve => setImmediate(resolve));
+  assert(turns.length === replies.length, 'chat renders every stored turn');
+  replies.forEach((reply, i) => {
+    assert(turns[i].textContent === 'You: Example\n' + reply + '\n', 'chat displays each reply as text');
+    assert(turns[i].innerHTML === undefined, 'chat does not insert reply markup');
+  });
+  assert(requests.length === 1 && requests[0].url === '/api/chat?after=0', 'chat loads history');
+  assert(requests[0].options.headers.Authorization === 'Bearer ' + token, 'chat authenticates history');
 }
-
-testPairedChatDisplaysRepliesAsText();
 
 assert(escapeHtml(null) === '', 'null');
 assert(escapeHtml(undefined) === '', 'undefined');
@@ -196,7 +202,7 @@ async function testHardwareFetchMocks() {
   delete global.fetch;
 }
 
-testHardwareFetchMocks().then(function () {
+testPairedChatDisplaysRepliesAsText().then(testHardwareFetchMocks).then(function () {
   console.log('test_web_dashboard: all tests passed');
 }).catch(function (err) {
   console.error('FAIL:', err && err.message ? err.message : err);
